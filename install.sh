@@ -146,6 +146,9 @@ else
   cp "$extracted_dir/main.py" "$APP_DIR/main.py"
   cp "$extracted_dir/requirements.txt" "$APP_DIR/requirements.txt"
   cp "$extracted_dir/_version.py" "$APP_DIR/_version.py"
+  if [[ "$specific_version" != "main" && "$specific_version" != "local" ]]; then
+    echo "__version__ = \"${specific_version}\"" > "$APP_DIR/_version.py"
+  fi
 
   completion_src="$extracted_dir/completions/slack.bash"
   completion_dst="$APP_HOME/completions/slack.bash"
