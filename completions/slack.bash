@@ -27,14 +27,6 @@ if isinstance(labels, dict):
 PY
 }
 
-_slack_dm_is_python() {
-  [[ $1 =~ ^python([0-9]+(\.[0-9]+)*)?$ ]]
-}
-
-_slack_dm_is_main_py() {
-  [[ $1 == "main.py" || $1 == */main.py ]]
-}
-
 _slack_dm_complete() {
   local cur prev options
   COMPREPLY=()
@@ -58,9 +50,6 @@ _slack_dm_complete() {
   fi
 
   local cmd_offset=1
-  if _slack_dm_is_python "${COMP_WORDS[0]}" && _slack_dm_is_main_py "${COMP_WORDS[1]}"; then
-    cmd_offset=2
-  fi
 
   if [[ ${COMP_CWORD} -eq $cmd_offset ]]; then
     COMPREPLY=( $(compgen -W "$(_slack_dm_labels)" -- "$cur") )
@@ -96,15 +85,4 @@ _slack_dm_complete() {
   return 0
 }
 
-complete -F _slack_dm_complete slack
-
-_slack_dm_complete_python() {
-  if _slack_dm_is_main_py "${COMP_WORDS[1]}"; then
-    _slack_dm_complete
-    return 0
-  fi
-  return 0
-}
-
-complete -F _slack_dm_complete_python python
-complete -F _slack_dm_complete_python python3
+complete -o default -o bashdefault -F _slack_dm_complete slack
