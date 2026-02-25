@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set version env
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build linux-x64 binary in manylinux2014
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+            -e VERSION="${VERSION}" \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash -lc '
+              set -euo pipefail
+              yum -y install curl zstd
+              PY_URL=$(/opt/python/cp311-cp311/bin/python .github/scripts/find-python-url.py)
+              test -n "$PY_URL"
+              echo "Using python-build-standalone: $PY_URL"
+              curl -fL "$PY_URL" -o /tmp/python.tar
+              mkdir -p /opt/py
+              case "$PY_URL" in
+                *.tar.zst)
+                  tar --use-compress-program=unzstd -xf /tmp/python.tar -C /opt/py
+                  ;;
+                *.tar.gz)
+                  tar -xzf /tmp/python.tar -C /opt/py
+                  ;;
+                *)
+                  echo "Unknown python archive format: $PY_URL" >&2
+                  exit 1
+                  ;;
+              esac
+
+              PYBIN="/opt/py/python/bin/python3"
+              export LD_LIBRARY_PATH="/opt/py/python/lib:${LD_LIBRARY_PATH:-}"
+              "$PYBIN" -m pip install -U pip
+              "$PYBIN" -m pip install --only-binary=:all: -r requirements.txt
+              "$PYBIN" -m pip install --only-binary=:all: pyinstaller
+              echo "__version__ = \"${VERSION}\"" > _version.py
+              "$PYBIN" -m PyInstaller --clean --onedir --name slack main.py
+              tar -C dist -czf slack-linux-x64.tar.gz slack
+            '
+
+      - name: Create release and upload asset
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            slack-linux-x64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
