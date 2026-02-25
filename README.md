@@ -71,6 +71,20 @@ python main.py -au boss boss@company.com
 - `-u`, `--upgrade`: Upgrade via the installer script.
 - `-h`, `--help`: Show help.
 
+## Shell completion (bash)
+
+For local development:
+
+```bash
+source completions/slack.bash
+```
+
+For installed binary:
+
+```bash
+source ~/.slack/completions/slack.bash
+```
+
 ## Install
 
 ```bash

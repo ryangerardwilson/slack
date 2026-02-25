@@ -147,6 +147,14 @@ else
   cp "$extracted_dir/requirements.txt" "$APP_DIR/requirements.txt"
   cp "$extracted_dir/_version.py" "$APP_DIR/_version.py"
 
+  completion_src="$extracted_dir/completions/slack.bash"
+  completion_dst="$APP_HOME/completions/slack.bash"
+  if [[ -f "$completion_src" ]]; then
+    mkdir -p "$APP_HOME/completions"
+    cp "$completion_src" "$completion_dst"
+    chmod 644 "$completion_dst"
+  fi
+
   rm -rf "$tmp_dir"
 
   print_message info "${MUTED}Creating virtualenv at ${NC}${VENV_DIR}"
@@ -181,23 +189,42 @@ add_to_path() {
   fi
 }
 
+add_completion() {
+  local config_file=$1
+  local command=$2
+
+  if grep -Fxq "$command" "$config_file" 2>/dev/null; then
+    print_message info "${MUTED}Completion entry already present in ${NC}$config_file"
+  elif [[ -w "$config_file" ]]; then
+    {
+      echo ""
+      echo "# ${APP} completion"
+      echo "$command"
+    } >> "$config_file"
+    print_message info "${MUTED}Added ${NC}${APP}${MUTED} completion to ${NC}$config_file"
+  else
+    print_message info "Add this to your shell config:"
+    print_message info "  $command"
+  fi
+}
+
 if [[ "$no_modify_path" != "true" ]]; then
+  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+  current_shell=$(basename "${SHELL:-bash}")
+
+  case "$current_shell" in
+    zsh)  config_candidates=("$HOME/.zshrc" "$HOME/.zshenv" "$XDG_CONFIG_HOME/zsh/.zshrc" "$XDG_CONFIG_HOME/zsh/.zshenv") ;;
+    bash) config_candidates=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$XDG_CONFIG_HOME/bash/.bashrc" "$XDG_CONFIG_HOME/bash/.bash_profile") ;;
+    fish) config_candidates=("$HOME/.config/fish/config.fish") ;;
+    *)    config_candidates=("$HOME/.profile" "$HOME/.bashrc") ;;
+  esac
+
+  config_file=""
+  for f in "${config_candidates[@]}"; do
+    if [[ -f "$f" ]]; then config_file="$f"; break; fi
+  done
+
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-    current_shell=$(basename "${SHELL:-bash}")
-
-    case "$current_shell" in
-      zsh)  config_candidates=("$HOME/.zshrc" "$HOME/.zshenv" "$XDG_CONFIG_HOME/zsh/.zshrc" "$XDG_CONFIG_HOME/zsh/.zshenv") ;;
-      bash) config_candidates=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$XDG_CONFIG_HOME/bash/.bashrc" "$XDG_CONFIG_HOME/bash/.bash_profile") ;;
-      fish) config_candidates=("$HOME/.config/fish/config.fish") ;;
-      *)    config_candidates=("$HOME/.profile" "$HOME/.bashrc") ;;
-    esac
-
-    config_file=""
-    for f in "${config_candidates[@]}"; do
-      if [[ -f "$f" ]]; then config_file="$f"; break; fi
-    done
-
     if [[ -z "$config_file" ]]; then
       print_message info "${MUTED}No shell config file found. Manually add:${NC}"
       print_message info "  export PATH=$INSTALL_DIR:\$PATH"
@@ -207,6 +234,15 @@ if [[ "$no_modify_path" != "true" ]]; then
       else
         add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
       fi
+    fi
+  fi
+  if [[ "$current_shell" == "bash" && -f "$APP_HOME/completions/slack.bash" ]]; then
+    completion_line="source \"$APP_HOME/completions/slack.bash\""
+    if [[ -n "$config_file" ]]; then
+      add_completion "$config_file" "$completion_line"
+    else
+      print_message info "Add this to your shell config:"
+      print_message info "  $completion_line"
     fi
   fi
 fi
