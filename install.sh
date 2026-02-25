@@ -6,7 +6,6 @@ REPO="ryangerardwilson/slack"
 APP_HOME="$HOME/.${APP}"
 INSTALL_DIR="$APP_HOME/bin"
 APP_DIR="$APP_HOME/app"
-VENV_DIR="$APP_HOME/venv"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -92,23 +91,18 @@ else
 
   command -v curl >/dev/null 2>&1 || { print_message error "'curl' is required but not installed."; exit 1; }
   command -v tar  >/dev/null 2>&1 || { print_message error "'tar' is required but not installed."; exit 1; }
-  command -v python3 >/dev/null 2>&1 || { print_message error "'python3' is required but not installed."; exit 1; }
 
-  filename="${APP}.tar.gz"
+  filename="${APP}-linux-x64.tar.gz"
   mkdir -p "$APP_DIR"
 
   if [[ -z "$requested_version" ]]; then
+    url="https://github.com/${REPO}/releases/latest/download/${filename}"
     specific_version="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
       | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' || true)"
-    if [[ -n "$specific_version" ]]; then
-      url="https://github.com/${REPO}/archive/refs/tags/v${specific_version}.tar.gz"
-    else
-      specific_version="main"
-      url="https://github.com/${REPO}/archive/refs/heads/main.tar.gz"
-    fi
+    [[ -n "$specific_version" ]] || specific_version="latest"
   else
     requested_version="${requested_version#v}"
-    url="https://github.com/${REPO}/archive/refs/tags/v${requested_version}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/v${requested_version}/${filename}"
     specific_version="${requested_version}"
 
     http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
@@ -119,7 +113,7 @@ else
     fi
   fi
 
-  if command -v "${APP}" >/dev/null 2>&1 && [[ "$specific_version" != "main" ]]; then
+  if command -v "${APP}" >/dev/null 2>&1 && [[ "$specific_version" != "latest" ]]; then
     installed_version=$(${APP} --version 2>/dev/null || true)
     if [[ -n "$installed_version" && "$installed_version" == "$specific_version" ]]; then
       print_message info "${MUTED}${APP} version ${NC}${specific_version}${MUTED} already installed${NC}"
@@ -134,23 +128,19 @@ else
   curl -# -L -o "$tmp_dir/$filename" "$url"
   tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
 
-  extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d -name "${APP}-*" -print -quit)
-  if [[ -z "$extracted_dir" ]]; then
-    print_message error "Archive did not contain expected '${APP}-*' directory"
+  if [[ ! -f "$tmp_dir/${APP}/${APP}" ]]; then
+    print_message error "Archive did not contain expected directory '${APP}/${APP}'"
+    print_message info  "Expected: $tmp_dir/${APP}/${APP}"
     exit 1
   fi
 
   rm -rf "$APP_DIR"
   mkdir -p "$APP_DIR"
 
-  cp "$extracted_dir/main.py" "$APP_DIR/main.py"
-  cp "$extracted_dir/requirements.txt" "$APP_DIR/requirements.txt"
-  cp "$extracted_dir/_version.py" "$APP_DIR/_version.py"
-  if [[ "$specific_version" != "main" && "$specific_version" != "local" ]]; then
-    echo "__version__ = \"${specific_version}\"" > "$APP_DIR/_version.py"
-  fi
+  mv "$tmp_dir/${APP}" "$APP_DIR"
+  rm -rf "$tmp_dir"
 
-  completion_src="$extracted_dir/completions/slack.bash"
+  completion_src="$APP_DIR/${APP}/completions/slack.bash"
   completion_dst="$APP_HOME/completions/slack.bash"
   if [[ -f "$completion_src" ]]; then
     mkdir -p "$APP_HOME/completions"
@@ -158,17 +148,10 @@ else
     chmod 644 "$completion_dst"
   fi
 
-  rm -rf "$tmp_dir"
-
-  print_message info "${MUTED}Creating virtualenv at ${NC}${VENV_DIR}"
-  python3 -m venv "$VENV_DIR"
-  "$VENV_DIR/bin/python" -m pip install -U pip
-  "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
-
   cat > "${INSTALL_DIR}/${APP}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-"${HOME}/.${APP}/venv/bin/python" "${HOME}/.${APP}/app/main.py" "\$@"
+"${HOME}/.${APP}/app/${APP}/${APP}" "\$@"
 EOF
   chmod 755 "${INSTALL_DIR}/${APP}"
 fi

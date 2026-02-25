@@ -16,6 +16,7 @@ try:
 except Exception:
     __version__ = "0.0.0"
 
+
 INSTALL_URL = "https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh"
 LATEST_RELEASE_API = "https://api.github.com/repos/ryangerardwilson/slack/releases/latest"
 

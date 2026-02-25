@@ -91,7 +91,7 @@ source ~/.slack/completions/slack.bash
 curl -fsSL https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh | bash
 ```
 
-The installer sets up a private virtualenv in `~/.slack/venv`.
+The installer downloads the latest release binary into `~/.slack/app`.
 
 ## Release workflow
 
