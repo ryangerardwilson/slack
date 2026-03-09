@@ -33,7 +33,7 @@ _slack_complete() {
   command="${COMP_WORDS[1]}"
 
   if [[ ${COMP_CWORD} -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "-h -v -u -cfg ac dm" -- "$cur") )
+    COMPREPLY=( $(compgen -W "-h -v -u -cfg ac dm ls" -- "$cur") )
     return 0
   fi
 
@@ -49,7 +49,7 @@ _slack_complete() {
       return 0
     fi
     if [[ ${COMP_CWORD} -eq 3 ]]; then
-      COMPREPLY=( $(compgen -W "ac dm" -- "$cur") )
+      COMPREPLY=( $(compgen -W "ac dm ls" -- "$cur") )
       return 0
     fi
   fi
@@ -70,6 +70,12 @@ _slack_complete() {
       fi
       if [[ ${COMP_CWORD} -ge 4 ]]; then
         COMPREPLY=( $(compgen -f -- "$cur") )
+        return 0
+      fi
+      ;;
+    ls)
+      if [[ $prev == "ls" ]]; then
+        COMPREPLY=( $(compgen -W "-dm -mnt" -- "$cur") )
         return 0
       fi
       ;;

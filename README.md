@@ -18,7 +18,7 @@ Set a Slack user token:
 export SLACK_TOKEN="xoxp-..."
 ```
 
-Required scopes: `chat:write`, `im:write`, `users:read`, `files:write`.
+Required scopes: `chat:write`, `im:write`, `im:read`, `users:read`, `users:read.email`, `files:write`, `search:read`.
 
 ## Usage
 
@@ -58,6 +58,18 @@ Send a DM with a file and a directory zipped on the fly:
 python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 ```
 
+List unread DMs:
+
+```bash
+python main.py ls -dm
+```
+
+List unread mentions:
+
+```bash
+python main.py ls -mnt
+```
+
 ## Contacts
 
 Contacts are stored in `~/.config/slack/config.json`.
@@ -76,6 +88,8 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
+- `ls -dm`: List unread direct messages.
+- `ls -mnt`: List unread mentions.
 - `-v`: Print version and exit.
 - `-u`: Upgrade via the installer script.
 - `-h`: Show help.

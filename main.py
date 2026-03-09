@@ -42,6 +42,11 @@ features:
   slack dm mom "hello"
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
+
+  # list unread direct messages or unread mentions
+  # slack ls -dm|-mnt
+  slack ls -dm
+  slack ls -mnt
 """
 
 
@@ -126,6 +131,7 @@ def parse_args(argv):
         "message": None,
         "file_path": None,
         "dir_path": None,
+        "ls_mode": None,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -187,8 +193,13 @@ def parse_args(argv):
                         raise SystemExit("Use at most one file path.")
                     args["file_path"] = path
             return args
+        if token == "ls":
+            if len(remaining) != 1 or remaining[0] not in ("-dm", "-mnt"):
+                raise SystemExit("Use: slack ls -dm | slack ls -mnt")
+            args["ls_mode"] = remaining[0]
+            return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dm | slack ls -mnt"
         )
 
     return args
@@ -317,10 +328,17 @@ def resolve_token():
     return token
 
 
-def slack_request(method, payload, token, use_form=False):
+def slack_request(method, payload, token, use_form=False, http_method="POST"):
     url = f"https://slack.com/api/{method}"
     headers = {"Authorization": f"Bearer {token}"}
-    if use_form:
+    if http_method == "GET":
+        response = requests.get(
+            url,
+            headers=headers,
+            params=payload,
+            timeout=30,
+        )
+    elif use_form:
         response = requests.post(
             url,
             headers=headers,
@@ -374,13 +392,26 @@ def resolve_contact_email(recipient, contacts):
 
 def lookup_user_id_by_email(email, token):
     data = slack_request(
-        "users.lookupByEmail", {"email": email}, token, use_form=True
+        "users.lookupByEmail",
+        {"email": email},
+        token,
+        http_method="GET",
     )
     user = data.get("user") or {}
     user_id = user.get("id")
     if not user_id:
         raise SystemExit("No user found for that email.")
     return user_id
+
+
+def get_user_info(user_id, token):
+    data = slack_request(
+        "users.info",
+        {"user": user_id},
+        token,
+        http_method="GET",
+    )
+    return data.get("user") or {}
 
 
 def open_dm(user_id, token):
@@ -504,6 +535,140 @@ def send_attachments(channel_id, thread_ts, file_path, dir_path, token):
     return uploaded
 
 
+def compact_text(value):
+    value = (value or "").replace("\n", " ").strip()
+    if not value:
+        return "-"
+    return " ".join(value.split())
+
+
+def extract_ts(payload):
+    latest = payload.get("latest")
+    if isinstance(latest, dict):
+        return latest.get("ts") or "0"
+    if isinstance(latest, str):
+        return latest
+    return "0"
+
+
+def print_sections(rows):
+    for index, row in enumerate(rows, start=1):
+        print(f"[{index}]-----")
+        for label, value in row:
+            print(f"{label:<8}: {value}")
+
+
+def list_unread_dms(contacts, token):
+    inverse_contacts = {email: label for label, email in contacts.items()}
+    user_cache = {}
+    cursor = None
+    unread_rows = []
+
+    while True:
+        payload = {
+            "types": "im",
+            "exclude_archived": "true",
+            "limit": "200",
+        }
+        if cursor:
+            payload["cursor"] = cursor
+
+        data = slack_request(
+            "users.conversations",
+            payload,
+            token,
+            http_method="GET",
+        )
+        channels = data.get("channels") or []
+        for channel in channels:
+            unread = channel.get("unread_count_display") or channel.get(
+                "unread_count"
+            ) or 0
+            if unread <= 0:
+                continue
+
+            user_id = channel.get("user") or "-"
+            if user_id not in user_cache:
+                user_cache[user_id] = get_user_info(user_id, token)
+            user = user_cache[user_id]
+            profile = user.get("profile") or {}
+            email = profile.get("email") or "-"
+            display_name = (
+                profile.get("display_name")
+                or profile.get("real_name")
+                or user.get("name")
+                or user_id
+            )
+            label = inverse_contacts.get(email, "-")
+            latest = channel.get("latest") or {}
+            latest_text = (
+                compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
+            )
+
+            unread_rows.append(
+                {
+                    "sort_ts": float(extract_ts(channel)),
+                    "row": [
+                        ("label", label),
+                        ("name", display_name),
+                        ("email", email),
+                        ("user_id", user_id),
+                        ("unread", str(unread)),
+                        ("latest", latest_text),
+                    ],
+                }
+            )
+
+        cursor = (
+            (data.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+
+    if not unread_rows:
+        print("No unread DMs.")
+        return
+
+    unread_rows.sort(key=lambda item: item["sort_ts"], reverse=True)
+    print_sections([item["row"] for item in unread_rows])
+
+
+def list_unread_mentions(self_user_id, token):
+    query = f'"<@{self_user_id}>" is:unread -from:<@{self_user_id}>'
+    data = slack_request(
+        "search.messages",
+        {
+            "query": query,
+            "count": "20",
+            "sort": "timestamp",
+            "sort_dir": "desc",
+        },
+        token,
+        http_method="GET",
+    )
+    matches = ((data.get("messages") or {}).get("matches")) or []
+    if not matches:
+        print("No unread mentions.")
+        return
+
+    rows = []
+    for match in matches:
+        channel = match.get("channel") or {}
+        channel_name = channel.get("name") or channel.get("id") or "-"
+        speaker = match.get("username") or match.get("user") or "-"
+        rows.append(
+            [
+                ("channel", channel_name),
+                ("speaker", speaker),
+                ("ts", match.get("ts") or "-"),
+                ("text", compact_text(match.get("text"))),
+                ("link", match.get("permalink") or "-"),
+            ]
+        )
+
+    print_sections(rows)
+
+
 def main():
     args = parse_args(sys.argv[1:])
 
@@ -520,6 +685,7 @@ def main():
             or args["email"]
             or args["file_path"]
             or args["dir_path"]
+            or args["ls_mode"]
         ):
             raise SystemExit("Use -u by itself to upgrade.")
 
@@ -570,13 +736,25 @@ def main():
         print_help()
         return
 
+    token = resolve_token()
+    auth_data = auth_test(token)
+
+    if args["command"] == "ls":
+        if args["ls_mode"] == "-dm":
+            list_unread_dms(contacts, token)
+            return
+        if args["ls_mode"] == "-mnt":
+            self_user_id = auth_data.get("user_id")
+            if not self_user_id:
+                raise SystemExit("Unable to determine the current Slack user.")
+            list_unread_mentions(self_user_id, token)
+            return
+        raise SystemExit("Use: slack ls -dm | slack ls -mnt")
+
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dm | slack ls -mnt"
         )
-
-    token = resolve_token()
-    auth_test(token)
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)
     user_id = lookup_user_id_by_email(recipient_email, token)
