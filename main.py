@@ -561,6 +561,7 @@ def print_sections(rows):
 def list_unread_dms(contacts, token):
     inverse_contacts = {email: label for label, email in contacts.items()}
     user_cache = {}
+    info_cache = {}
     cursor = None
     unread_rows = []
 
@@ -581,13 +582,27 @@ def list_unread_dms(contacts, token):
         )
         channels = data.get("channels") or []
         for channel in channels:
-            unread = channel.get("unread_count_display") or channel.get(
+            channel_id = channel.get("id")
+            if not channel_id:
+                continue
+
+            if channel_id not in info_cache:
+                info_data = slack_request(
+                    "conversations.info",
+                    {"channel": channel_id, "include_num_members": "false"},
+                    token,
+                    http_method="GET",
+                )
+                info_cache[channel_id] = info_data.get("channel") or {}
+
+            info_channel = info_cache[channel_id]
+            unread = info_channel.get("unread_count_display") or info_channel.get(
                 "unread_count"
             ) or 0
             if unread <= 0:
                 continue
 
-            user_id = channel.get("user") or "-"
+            user_id = info_channel.get("user") or channel.get("user") or "-"
             if user_id not in user_cache:
                 user_cache[user_id] = get_user_info(user_id, token)
             user = user_cache[user_id]
@@ -600,18 +615,19 @@ def list_unread_dms(contacts, token):
                 or user_id
             )
             label = inverse_contacts.get(email, "-")
-            latest = channel.get("latest") or {}
+            latest = info_channel.get("latest") or {}
             latest_text = (
                 compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
             )
 
             unread_rows.append(
                 {
-                    "sort_ts": float(extract_ts(channel)),
+                    "sort_ts": float(extract_ts(info_channel)),
                     "row": [
                         ("label", label),
                         ("name", display_name),
                         ("email", email),
+                        ("dm_id", channel_id),
                         ("user_id", user_id),
                         ("unread", str(unread)),
                         ("latest", latest_text),
