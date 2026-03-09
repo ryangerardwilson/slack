@@ -640,8 +640,45 @@ def compact_text(value):
     return " ".join(value.split())
 
 
+def message_text(message):
+    primary = (message.get("text") or "").strip()
+    if primary:
+        return primary
+
+    parts = []
+    for attachment in message.get("attachments") or []:
+        text = (attachment.get("text") or attachment.get("fallback") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def message_files(message):
+    collected = []
+    seen = set()
+
+    for file_payload in message.get("files") or []:
+        file_id = file_payload.get("id")
+        if file_id and file_id in seen:
+            continue
+        if file_id:
+            seen.add(file_id)
+        collected.append(file_payload)
+
+    for attachment in message.get("attachments") or []:
+        for file_payload in attachment.get("files") or []:
+            file_id = file_payload.get("id")
+            if file_id and file_id in seen:
+                continue
+            if file_id:
+                seen.add(file_id)
+            collected.append(file_payload)
+
+    return collected
+
+
 def summarize_files(message):
-    files = message.get("files") or []
+    files = message_files(message)
     rendered = []
     for file in files:
         file_id = file.get("id")
@@ -807,7 +844,7 @@ def _download_destination(dm_id, file_payload):
 def _message_details(message, dm_id, token):
     downloads = []
     code_blocks = []
-    for file_payload in message.get("files") or []:
+    for file_payload in message_files(message):
         if file_payload.get("mode") == "snippet":
             code_blocks.append(
                 {
@@ -840,7 +877,7 @@ def _print_open_entries(entries, token):
         print(f"{'email':<8}: {entry['email']}")
         print(f"{'dm_id':<8}: {entry['dm_id']}")
         print(f"{'date':<8}: {format_ts(entry['message'].get('ts'))}")
-        text = (entry["message"].get("text") or "").rstrip()
+        text = message_text(entry["message"]).rstrip()
         print(style_help(f"{'text':<8}: {text if text else '-'}"))
 
         downloads, code_blocks = _message_details(entry["message"], entry["dm_id"], token)
@@ -1180,7 +1217,7 @@ def download_dm_file(dm_id, file_id, output_path, token):
             http_method="GET",
         )
         for message in history.get("messages") or []:
-            for file in message.get("files") or []:
+            for file in message_files(message):
                 if file.get("id") != file_id:
                     continue
                 download_url = file.get("url_private_download")
