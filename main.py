@@ -52,10 +52,15 @@ features:
   slack df D0466D63H7B F0AH0LD4133
 
   # list saved-contact direct message history with attached files
-  # slack ls -dms [-ur|-r] <number>
-  slack ls -dms 10
-  slack ls -dms -ur 10
-  slack ls -dms -r 10
+  # slack ls [label] [-ur|-r] <number>
+  slack ls 10
+  slack ls md 10
+  slack ls -ur 10
+  slack ls md -r 10
+
+  # list all registered contact labels
+  # slack ls rc
+  slack ls rc
 
   # clear stale conversations and bot-like conversations
   # slack sc
@@ -151,7 +156,8 @@ def parse_args(argv):
         "output_path": None,
         "file_path": None,
         "dir_path": None,
-        "ls_mode": None,
+        "ls_label": None,
+        "ls_registry": False,
         "ls_filter": "all",
         "ls_limit": None,
         "config": None,
@@ -225,22 +231,31 @@ def parse_args(argv):
             return args
         if token == "ls":
             if not remaining:
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
-            args["ls_mode"] = remaining[0]
-            if args["ls_mode"] != "-dms":
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
-            if len(remaining) == 2:
-                limit_token = remaining[1]
-                args["ls_filter"] = "all"
-            elif len(remaining) == 3 and remaining[1] in ("-ur", "-r"):
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
+            if remaining == ["rc"]:
+                args["ls_registry"] = True
+                return args
+            if len(remaining) == 1:
+                limit_token = remaining[0]
+            elif len(remaining) == 2:
+                if remaining[0] in ("-ur", "-r"):
+                    args["ls_filter"] = "unread" if remaining[0] == "-ur" else "read"
+                    limit_token = remaining[1]
+                else:
+                    args["ls_label"] = remaining[0]
+                    limit_token = remaining[1]
+            elif len(remaining) == 3:
+                args["ls_label"] = remaining[0]
+                if remaining[1] not in ("-ur", "-r"):
+                    raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
                 args["ls_filter"] = "unread" if remaining[1] == "-ur" else "read"
                 limit_token = remaining[2]
             else:
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
             try:
                 args["ls_limit"] = int(limit_token)
             except ValueError:
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
             if args["ls_limit"] <= 0:
                 raise SystemExit("Number must be greater than 0.")
             return args
@@ -253,10 +268,26 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls rc | slack ls [label] [-ur|-r] <number> | slack sc | slack mra"
         )
 
     return args
+
+
+def list_registered_contacts(contacts):
+    if not contacts:
+        print("No registered contacts.")
+        return
+
+    rows = []
+    for label in sorted(contacts):
+        rows.append(
+            [
+                ("label", label),
+                ("email", contacts[label]),
+            ]
+        )
+    print_sections(rows)
 
 
 def _version_tuple(version):
@@ -1065,7 +1096,7 @@ def main():
             or args["email"]
             or args["file_path"]
             or args["dir_path"]
-            or args["ls_mode"]
+            or args["ls_label"]
         ):
             raise SystemExit("Use -u by itself to upgrade.")
 
@@ -1116,19 +1147,26 @@ def main():
         print_help()
         return
 
+    if args["command"] == "ls" and args["ls_registry"]:
+        list_registered_contacts(contacts)
+        return
+
     token = resolve_token()
     auth_data = auth_test(token)
 
     if args["command"] == "ls":
-        if args["ls_mode"] == "-dms":
-            self_user_id = auth_data.get("user_id")
-            if not self_user_id:
-                raise SystemExit("Unable to determine the current Slack user.")
-            list_dms(
-                contacts, token, args["ls_limit"], args["ls_filter"], self_user_id
-            )
-            return
-        raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+        self_user_id = auth_data.get("user_id")
+        if not self_user_id:
+            raise SystemExit("Unable to determine the current Slack user.")
+        list_contacts = contacts
+        if args["ls_label"]:
+            if args["ls_label"] not in contacts:
+                raise SystemExit(f"Unknown contact label: {args['ls_label']}")
+            list_contacts = {args["ls_label"]: contacts[args["ls_label"]]}
+        list_dms(
+            list_contacts, token, args["ls_limit"], args["ls_filter"], self_user_id
+        )
+        return
 
     if args["command"] == "mra":
         mark_all_unread_dms_as_read(contacts, token)
@@ -1144,7 +1182,7 @@ def main():
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls rc | slack ls [label] [-ur|-r] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

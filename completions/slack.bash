@@ -78,10 +78,13 @@ _slack_complete() {
       ;;
     ls)
       if [[ $prev == "ls" ]]; then
-        COMPREPLY=( $(compgen -W "-dms" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$(_slack_contacts) rc -ur -r" -- "$cur") )
         return 0
       fi
-      if [[ $prev == "-dms" ]]; then
+      if [[ $prev == "-ur" || $prev == "-r" ]]; then
+        return 0
+      fi
+      if [[ " ${COMP_WORDS[*]} " != *" -ur "* && " ${COMP_WORDS[*]} " != *" -r "* ]]; then
         COMPREPLY=( $(compgen -W "-ur -r" -- "$cur") )
         return 0
       fi

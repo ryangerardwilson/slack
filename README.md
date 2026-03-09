@@ -62,9 +62,11 @@ python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/
 List saved-contact DM history, including attached file ids:
 
 ```bash
-python main.py ls -dms 10
-python main.py ls -dms -ur 10
-python main.py ls -dms -r 10
+python main.py ls 10
+python main.py ls md 10
+python main.py ls -ur 10
+python main.py ls md -r 10
+python main.py ls rc
 ```
 
 Clear stale conversations and bot-like conversations:
@@ -81,7 +83,7 @@ Mark all unread DMs as read:
 python main.py mra
 ```
 
-`ls -dms ...` and `mra` only operate on contacts you have saved with `ac`.
+`ls ...` and `mra` only operate on contacts you have saved with `ac`.
 
 ## Contacts
 
@@ -102,9 +104,13 @@ Example:
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `ls -dms <number>`: List that many latest saved-contact DM messages, oldest first and latest last, with attached file ids.
-- `ls -dms -ur <number>`: List that many latest unread saved-contact DM messages, with attached file ids.
-- `ls -dms -r <number>`: List that many latest read saved-contact DM messages, with attached file ids.
+- `ls <number>`: List that many latest saved-contact DM messages across all saved labels, oldest first and latest last, with attached file ids.
+- `ls <label> <number>`: List that many latest saved-contact DM messages for one saved label.
+- `ls -ur <number>`: List that many latest unread saved-contact DM messages across all saved labels.
+- `ls <label> -ur <number>`: List that many latest unread saved-contact DM messages for one saved label.
+- `ls -r <number>`: List that many latest read saved-contact DM messages across all saved labels.
+- `ls <label> -r <number>`: List that many latest read saved-contact DM messages for one saved label.
+- `ls rc`: List all registered contact labels and emails from local config.
 - `mra`: Mark all unread saved-contact direct messages as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.
