@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -44,9 +45,13 @@ features:
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
   # list unread direct messages or unread mentions
-  # slack ls -dm|-mnt
-  slack ls -dm
-  slack ls -mnt
+  # slack ls -dms|-mnts
+  slack ls -dms
+  slack ls -mnts
+
+  # clear stale conversations and bot-like conversations
+  # slack sc
+  slack sc
 """
 
 
@@ -194,12 +199,16 @@ def parse_args(argv):
                     args["file_path"] = path
             return args
         if token == "ls":
-            if len(remaining) != 1 or remaining[0] not in ("-dm", "-mnt"):
-                raise SystemExit("Use: slack ls -dm | slack ls -mnt")
+            if len(remaining) != 1 or remaining[0] not in ("-dms", "-mnts"):
+                raise SystemExit("Use: slack ls -dms | slack ls -mnts")
             args["ls_mode"] = remaining[0]
             return args
+        if token == "sc":
+            if remaining:
+                raise SystemExit("Use: slack sc")
+            return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dm | slack ls -mnt"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms | slack ls -mnts | slack sc"
         )
 
     return args
@@ -558,30 +567,33 @@ def print_sections(rows):
             print(f"{label:<8}: {value}")
 
 
+def list_api(method, params, token):
+    cursor = None
+    items = []
+    while True:
+        payload = dict(params)
+        if cursor:
+            payload["cursor"] = cursor
+        data = slack_request(method, payload, token, http_method="GET")
+        batch = data.get("channels") or []
+        items.extend(batch)
+        cursor = ((data.get("response_metadata") or {}).get("next_cursor") or "").strip()
+        if not cursor:
+            break
+    return items
+
+
 def list_unread_dms(contacts, token):
     inverse_contacts = {email: label for label, email in contacts.items()}
     user_cache = {}
     info_cache = {}
-    cursor = None
     unread_rows = []
-
-    while True:
-        payload = {
-            "types": "im",
-            "exclude_archived": "true",
-            "limit": "200",
-        }
-        if cursor:
-            payload["cursor"] = cursor
-
-        data = slack_request(
-            "users.conversations",
-            payload,
-            token,
-            http_method="GET",
-        )
-        channels = data.get("channels") or []
-        for channel in channels:
+    channels = list_api(
+        "users.conversations",
+        {"types": "im", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    for channel in channels:
             channel_id = channel.get("id")
             if not channel_id:
                 continue
@@ -635,12 +647,6 @@ def list_unread_dms(contacts, token):
                 }
             )
 
-        cursor = (
-            (data.get("response_metadata") or {}).get("next_cursor") or ""
-        ).strip()
-        if not cursor:
-            break
-
     if not unread_rows:
         print("No unread DMs.")
         return
@@ -683,6 +689,167 @@ def list_unread_mentions(self_user_id, token):
         )
 
     print_sections(rows)
+
+
+def action_close_conversation(channel_id, token):
+    data = slack_request("conversations.close", {"channel": channel_id}, token)
+    return data.get("already_closed") or data.get("no_op")
+
+
+def action_leave_conversation(channel_id, token):
+    data = slack_request("conversations.leave", {"channel": channel_id}, token)
+    return data.get("already_inactive") or data.get("not_in_channel")
+
+
+def conversation_age_is_stale(ts_value, cutoff_ts):
+    if not ts_value:
+        return False
+    try:
+        return float(ts_value) < cutoff_ts
+    except (TypeError, ValueError):
+        return False
+
+
+def ms_age_is_stale(ms_value, cutoff_ts):
+    if not ms_value:
+        return False
+    try:
+        return (float(ms_value) / 1000.0) < cutoff_ts
+    except (TypeError, ValueError):
+        return False
+
+
+def summarize_reasons(reasons):
+    return ",".join(reasons) if reasons else "-"
+
+
+def clear_stale_conversations(token):
+    cutoff_ts = time.time() - (183 * 24 * 60 * 60)
+    user_cache = {}
+    rows = []
+    counts = {"closed": 0, "left": 0, "skipped": 0}
+
+    dm_channels = list_api(
+        "users.conversations",
+        {"types": "im", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    for channel in dm_channels:
+        channel_id = channel.get("id")
+        if not channel_id:
+            continue
+        info = slack_request(
+            "conversations.info",
+            {"channel": channel_id, "include_num_members": "false"},
+            token,
+            http_method="GET",
+        ).get("channel") or {}
+        user_id = info.get("user") or channel.get("user") or "-"
+        if user_id not in user_cache:
+            user_cache[user_id] = get_user_info(user_id, token)
+        user = user_cache[user_id]
+        profile = user.get("profile") or {}
+        email = profile.get("email") or "-"
+        display_name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user.get("name")
+            or user_id
+        )
+        latest = info.get("latest") or {}
+        latest_ts = latest.get("ts") if isinstance(latest, dict) else None
+        reasons = []
+        if email == "-":
+            reasons.append("no_email")
+        if conversation_age_is_stale(latest_ts, cutoff_ts):
+            reasons.append("stale_6mo")
+        if not reasons:
+            continue
+        try:
+            action_close_conversation(channel_id, token)
+            counts["closed"] += 1
+            action = "closed"
+        except SystemExit as exc:
+            counts["skipped"] += 1
+            action = f"skip:{exc}"
+        rows.append(
+            [
+                ("type", "dm"),
+                ("action", action),
+                ("why", summarize_reasons(reasons)),
+                ("name", display_name),
+                ("email", email),
+                ("id", channel_id),
+            ]
+        )
+
+    public_channels = list_api(
+        "conversations.list",
+        {"types": "public_channel", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    for channel in public_channels:
+        if not channel.get("is_member"):
+            continue
+        channel_id = channel.get("id")
+        if not channel_id:
+            continue
+        info = slack_request(
+            "conversations.info",
+            {"channel": channel_id, "include_num_members": "false"},
+            token,
+            http_method="GET",
+        ).get("channel") or {}
+        creator_id = info.get("creator") or channel.get("creator") or "-"
+        if creator_id not in user_cache:
+            user_cache[creator_id] = get_user_info(creator_id, token)
+        creator = user_cache[creator_id]
+        creator_email = ((creator.get("profile") or {}).get("email")) or "-"
+        reasons = []
+        if creator_email == "-":
+            reasons.append("creator_no_email")
+        if ms_age_is_stale(info.get("updated") or channel.get("updated"), cutoff_ts):
+            reasons.append("stale_6mo")
+        if not reasons:
+            continue
+        if info.get("is_general"):
+            counts["skipped"] += 1
+            rows.append(
+                [
+                    ("type", "chan"),
+                    ("action", "skip:cant_leave_general"),
+                    ("why", summarize_reasons(reasons)),
+                    ("name", info.get("name") or channel.get("name") or channel_id),
+                    ("email", creator_email),
+                    ("id", channel_id),
+                ]
+            )
+            continue
+        try:
+            action_leave_conversation(channel_id, token)
+            counts["left"] += 1
+            action = "left"
+        except SystemExit as exc:
+            counts["skipped"] += 1
+            action = f"skip:{exc}"
+        rows.append(
+            [
+                ("type", "chan"),
+                ("action", action),
+                ("why", summarize_reasons(reasons)),
+                ("name", info.get("name") or channel.get("name") or channel_id),
+                ("email", creator_email),
+                ("id", channel_id),
+            ]
+        )
+
+    if not rows:
+        print("No conversations cleared.")
+    else:
+        print_sections(rows)
+    print(
+        f"Summary: closed={counts['closed']} left={counts['left']} skipped={counts['skipped']} private_and_mpim_skipped=scope"
+    )
 
 
 def main():
@@ -756,20 +923,24 @@ def main():
     auth_data = auth_test(token)
 
     if args["command"] == "ls":
-        if args["ls_mode"] == "-dm":
+        if args["ls_mode"] == "-dms":
             list_unread_dms(contacts, token)
             return
-        if args["ls_mode"] == "-mnt":
+        if args["ls_mode"] == "-mnts":
             self_user_id = auth_data.get("user_id")
             if not self_user_id:
                 raise SystemExit("Unable to determine the current Slack user.")
             list_unread_mentions(self_user_id, token)
             return
-        raise SystemExit("Use: slack ls -dm | slack ls -mnt")
+        raise SystemExit("Use: slack ls -dms | slack ls -mnts")
+
+    if args["command"] == "sc":
+        clear_stale_conversations(token)
+        return
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dm | slack ls -mnt"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms | slack ls -mnts | slack sc"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

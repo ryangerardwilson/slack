@@ -75,7 +75,7 @@ _slack_complete() {
       ;;
     ls)
       if [[ $prev == "ls" ]]; then
-        COMPREPLY=( $(compgen -W "-dm -mnt" -- "$cur") )
+        COMPREPLY=( $(compgen -W "-dms -mnts" -- "$cur") )
         return 0
       fi
       ;;
