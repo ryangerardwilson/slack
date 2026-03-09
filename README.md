@@ -18,7 +18,7 @@ Set a Slack user token:
 export SLACK_TOKEN="xoxp-..."
 ```
 
-Required scopes: `chat:write`, `im:write`, `im:read`, `users:read`, `users:read.email`, `files:write`.
+Required scopes: `chat:write`, `im:write`, `im:read`, `im:history`, `users:read`, `users:read.email`, `files:write`.
 
 ## Usage
 
@@ -100,9 +100,9 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
-- `ls -dms <number>`: List that many latest saved-contact direct messages, oldest first and latest last.
-- `ls -dms -ur <number>`: List that many latest unread saved-contact direct messages.
-- `ls -dms -r <number>`: List that many latest read saved-contact direct messages.
+- `ls -dms <number>`: List that many latest saved-contact DM messages, oldest first and latest last.
+- `ls -dms -ur <number>`: List that many latest unread saved-contact DM messages.
+- `ls -dms -r <number>`: List that many latest read saved-contact DM messages.
 - `mra`: Mark all unread saved-contact direct messages as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.

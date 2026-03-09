@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -23,6 +24,7 @@ LATEST_RELEASE_API = "https://api.github.com/repos/ryangerardwilson/slack/releas
 
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
+USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 HELP_TEXT = """Slack CLI
 
 flags:
@@ -117,9 +119,10 @@ def normalize_contacts(payload):
             isinstance(key, str)
             and isinstance(value, str)
             and key.strip()
-            and "@" in value
         ):
-            cleaned[key.strip()] = value.strip()
+            value = value.strip()
+            if value:
+                cleaned[key.strip()] = value
     return cleaned
 
 
@@ -633,14 +636,24 @@ def get_contact_dm_infos(contacts, token):
             user_to_channel[user_id] = channel_id
 
     infos = []
-    for label, email in contacts.items():
-        try:
-            user_id = lookup_user_id_by_email(email, token)
-        except SystemExit:
-            continue
+    user_cache = {}
+    for label, target in contacts.items():
+        email = None
+        if USER_ID_RE.match(target):
+            user_id = target
+        else:
+            try:
+                user_id = lookup_user_id_by_email(target, token)
+            except SystemExit:
+                continue
         channel_id = user_to_channel.get(user_id)
         if not channel_id:
             continue
+        if user_id not in user_cache:
+            user_cache[user_id] = get_user_info(user_id, token)
+        user = user_cache[user_id]
+        profile = user.get("profile") or {}
+        email = profile.get("email") or target
         info = slack_request(
             "conversations.info",
             {"channel": channel_id, "include_num_members": "false"},
@@ -654,24 +667,17 @@ def get_contact_dm_infos(contacts, token):
                 "user_id": user_id,
                 "channel_id": channel_id,
                 "info": info,
+                "user": user,
             }
         )
     return infos
 
 
-def list_dms(contacts, token, limit, filter_mode):
+def list_dms(contacts, token, limit, filter_mode, self_user_id):
     rows = []
     for contact_dm in get_contact_dm_infos(contacts, token):
         info_channel = contact_dm["info"]
-        unread = info_channel.get("unread_count_display") or info_channel.get(
-            "unread_count"
-        ) or 0
-        is_unread = unread > 0
-        if filter_mode == "unread" and not is_unread:
-            continue
-        if filter_mode == "read" and is_unread:
-            continue
-        user = get_user_info(contact_dm["user_id"], token)
+        user = contact_dm["user"]
         profile = user.get("profile") or {}
         display_name = (
             profile.get("display_name")
@@ -679,27 +685,50 @@ def list_dms(contacts, token, limit, filter_mode):
             or user.get("name")
             or contact_dm["user_id"]
         )
-        latest = info_channel.get("latest") or {}
-        latest_ts = latest.get("ts") if isinstance(latest, dict) else None
-        latest_text = (
-            compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
-        )
+        last_read = info_channel.get("last_read") or "0"
+        try:
+            last_read_value = float(last_read)
+        except (TypeError, ValueError):
+            last_read_value = 0.0
 
-        rows.append(
-            {
-                "sort_ts": float(extract_ts(info_channel)),
-                "row": [
-                    ("label", contact_dm["label"]),
-                    ("name", display_name),
-                    ("email", contact_dm["email"]),
-                    ("dm_id", contact_dm["channel_id"]),
-                    ("user_id", contact_dm["user_id"]),
-                    ("unread", str(unread)),
-                    ("date", format_ts(latest_ts)),
-                    ("latest", latest_text),
-                ],
-            }
+        history = slack_request(
+            "conversations.history",
+            {"channel": contact_dm["channel_id"], "limit": str(limit)},
+            token,
+            http_method="GET",
         )
+        messages = history.get("messages") or []
+        for message in messages:
+            ts = message.get("ts")
+            if not ts:
+                continue
+            try:
+                ts_value = float(ts)
+            except (TypeError, ValueError):
+                continue
+            is_unread = ts_value > last_read_value
+            if filter_mode == "unread" and not is_unread:
+                continue
+            if filter_mode == "read" and is_unread:
+                continue
+
+            speaker = "self" if message.get("user") == self_user_id else "other"
+            rows.append(
+                {
+                    "sort_ts": ts_value,
+                    "row": [
+                        ("label", contact_dm["label"]),
+                        ("name", display_name),
+                        ("email", contact_dm["email"]),
+                        ("dm_id", contact_dm["channel_id"]),
+                        ("user_id", contact_dm["user_id"]),
+                        ("state", "unread" if is_unread else "read"),
+                        ("from", speaker),
+                        ("date", format_ts(ts)),
+                        ("text", compact_text(message.get("text"))),
+                    ],
+                }
+            )
 
     if not rows:
         if filter_mode == "unread":
@@ -763,7 +792,7 @@ def mark_all_unread_dms_as_read(contacts, token):
         if not latest_ts:
             continue
 
-        user = get_user_info(contact_dm["user_id"], token)
+        user = contact_dm["user"]
         profile = user.get("profile") or {}
         display_name = (
             profile.get("display_name")
@@ -996,11 +1025,16 @@ def main():
         return
 
     token = resolve_token()
-    auth_test(token)
+    auth_data = auth_test(token)
 
     if args["command"] == "ls":
         if args["ls_mode"] == "-dms":
-            list_dms(contacts, token, args["ls_limit"], args["ls_filter"])
+            self_user_id = auth_data.get("user_id")
+            if not self_user_id:
+                raise SystemExit("Unable to determine the current Slack user.")
+            list_dms(
+                contacts, token, args["ls_limit"], args["ls_filter"], self_user_id
+            )
             return
         raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
 
