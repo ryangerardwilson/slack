@@ -620,6 +620,8 @@ def list_unread_dms(contacts, token):
             user = user_cache[user_id]
             profile = user.get("profile") or {}
             email = profile.get("email") or "-"
+            if email == "-":
+                continue
             display_name = (
                 profile.get("display_name")
                 or profile.get("real_name")
