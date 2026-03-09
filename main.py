@@ -601,7 +601,8 @@ def extract_ts(payload):
 
 def print_sections(rows):
     for index, row in enumerate(rows, start=1):
-        print(f"[{index}]-----")
+        prefix = f"[{index}]"
+        print(prefix + ("-" * max(1, 79 - len(prefix))))
         for label, value in row:
             print(f"{label:<8}: {value}")
 
@@ -706,13 +707,14 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id):
                 ts_value = float(ts)
             except (TypeError, ValueError):
                 continue
+            if message.get("user") == self_user_id:
+                continue
             is_unread = ts_value > last_read_value
             if filter_mode == "unread" and not is_unread:
                 continue
             if filter_mode == "read" and is_unread:
                 continue
 
-            speaker = "self" if message.get("user") == self_user_id else "other"
             rows.append(
                 {
                     "sort_ts": ts_value,
@@ -723,7 +725,7 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id):
                         ("dm_id", contact_dm["channel_id"]),
                         ("user_id", contact_dm["user_id"]),
                         ("state", "unread" if is_unread else "read"),
-                        ("from", speaker),
+                        ("from", "other"),
                         ("date", format_ts(ts)),
                         ("text", compact_text(message.get("text"))),
                     ],
