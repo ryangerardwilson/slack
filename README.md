@@ -1,6 +1,6 @@
 # slack
 
-Minimal CLI to send Slack direct messages as yourself.
+Minimal CLI to save Slack contacts and send direct messages as yourself.
 
 ## Setup
 
@@ -18,7 +18,7 @@ Set a Slack user token:
 export SLACK_TOKEN="xoxp-..."
 ```
 
-Required scopes: `chat:write`, `im:write` (add `users:read` for email lookup).
+Required scopes: `chat:write`, `im:write`, `users:read`, `files:write`.
 
 ## Usage
 
@@ -28,53 +28,54 @@ Show help:
 python main.py -h
 ```
 
-Send a DM by user ID:
+Add a contact:
 
 ```bash
-python main.py U123ABC "hello"
+python main.py ac mom mom@example.com
 ```
 
-Send a DM by email (requires `users:read`):
+Send a DM by saved contact label:
 
 ```bash
-python main.py someone@company.com "hello"
+python main.py dm mom "hello"
 ```
 
-Compose in Vim:
+Send a DM by email:
 
 ```bash
-python main.py -e U123ABC
+python main.py dm someone@company.com "hello"
 ```
 
-## Labels
-
-Save a label from the CLI:
+Send a DM with a file:
 
 ```bash
-python main.py -au mom U123ABC
-python main.py -au boss boss@company.com
+python main.py dm boss@company.com "latest draft" ~/Downloads/draft.pdf
 ```
 
-Or edit `~/.config/slack/config.json` directly:
+Send a DM with a file and a directory zipped on the fly:
+
+```bash
+python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
+```
+
+## Contacts
+
+Contacts are stored in `~/.config/slack/config.json`.
+
+Example:
 
 ```json
 {
-  "user_labels": {
-    "mom": "U123ABC"
+  "contacts": {
+    "mom": "mom@example.com"
   }
 }
 ```
 
-Then:
-
-```bash
-python main.py mom "hello"
-```
-
 ## Options
 
-- `-e`: Open `$VISUAL`, then `$EDITOR`, to compose a DM.
-- `-au`: Save a label pointing to a Slack user ID or email.
+- `ac`: Save a contact label for an email address.
+- `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
 - `-v`: Print version and exit.
 - `-u`: Upgrade via the installer script.
 - `-h`: Show help.

@@ -1,10 +1,10 @@
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
 import tempfile
+import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -21,7 +21,6 @@ LATEST_RELEASE_API = "https://api.github.com/repos/ryangerardwilson/slack/releas
 
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
-USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 HELP_TEXT = """Slack CLI
 
 flags:
@@ -33,16 +32,16 @@ flags:
     upgrade to the latest release
 
 features:
-  send a direct message as yourself
-  # slack [-e] <user_id|email|label> <text...>
-  slack U123ABC "hello"
-  slack someone@company.com "hello"
-  slack -e mom
+  save a contact label
+  # slack ac <label> <email>
+  slack ac mom mom@example.com
+  slack ac boss boss@company.com
 
-  save a label for a Slack user
-  # slack -au <label> <user_id|email>
-  slack -au mom U123ABC
-  slack -au boss boss@company.com
+  send a direct message, with an optional file and optional zipped directory
+  # slack dm <contact_label|email> <message> [file_path] [dir_path]
+  slack dm mom "hello"
+  slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
+  slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 """
 
 
@@ -87,17 +86,24 @@ def save_config(config_path, payload):
         handle.write("\n")
 
 
-def normalize_user_labels(payload):
-    labels = payload.get("user_labels", {})
+def normalize_contacts(payload):
+    labels = payload.get("contacts")
+    if labels is None:
+        labels = payload.get("user_labels", {})
     if labels is None:
         return {}
     if not isinstance(labels, dict):
-        raise SystemExit("user_labels must be a JSON object.")
+        raise SystemExit("contacts must be a JSON object.")
 
     cleaned = {}
     for key, value in labels.items():
-        if isinstance(key, str) and isinstance(value, str) and value.strip():
-            cleaned[key] = value.strip()
+        if (
+            isinstance(key, str)
+            and isinstance(value, str)
+            and key.strip()
+            and "@" in value
+        ):
+            cleaned[key.strip()] = value.strip()
     return cleaned
 
 
@@ -113,11 +119,14 @@ def print_help():
 
 def parse_args(argv):
     args = {
+        "command": None,
+        "label": None,
+        "email": None,
         "recipient": None,
-        "text": [],
+        "message": None,
+        "file_path": None,
+        "dir_path": None,
         "config": None,
-        "edit": False,
-        "add_user": None,
         "version": False,
         "upgrade": False,
     }
@@ -140,16 +149,6 @@ def parse_args(argv):
             args["upgrade"] = True
             index += 1
             continue
-        if token == "-e":
-            args["edit"] = True
-            index += 1
-            continue
-        if token == "-au":
-            if index + 2 >= len(argv):
-                raise SystemExit("Use: slack -au <label> <user_id|email>")
-            args["add_user"] = [argv[index + 1], argv[index + 2]]
-            index += 3
-            continue
         if token == "-cfg":
             if index + 1 >= len(argv):
                 raise SystemExit("Use: slack -cfg <config_path>")
@@ -159,11 +158,38 @@ def parse_args(argv):
         if token.startswith("-"):
             raise SystemExit(f"Unknown flag: {token}")
 
-        if args["recipient"] is None:
-            args["recipient"] = token
-        else:
-            args["text"].append(token)
-        index += 1
+        if args["command"] is not None:
+            raise SystemExit("Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]")
+
+        args["command"] = token
+        remaining = argv[index + 1 :]
+        if token == "ac":
+            if len(remaining) != 2:
+                raise SystemExit("Use: slack ac <label> <email>")
+            args["label"], args["email"] = remaining
+            return args
+        if token == "dm":
+            if len(remaining) < 2 or len(remaining) > 4:
+                raise SystemExit(
+                    "Use: slack dm <contact_label|email> <message> [file_path] [dir_path]"
+                )
+            args["recipient"] = remaining[0]
+            args["message"] = remaining[1]
+            extra_paths = remaining[2:]
+            for path in extra_paths:
+                expanded = os.path.expanduser(path)
+                if os.path.isdir(expanded):
+                    if args["dir_path"] is not None:
+                        raise SystemExit("Use at most one directory path.")
+                    args["dir_path"] = path
+                else:
+                    if args["file_path"] is not None:
+                        raise SystemExit("Use at most one file path.")
+                    args["file_path"] = path
+            return args
+        raise SystemExit(
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+        )
 
     return args
 
@@ -291,10 +317,10 @@ def resolve_token():
     return token
 
 
-def slack_request(method, payload, token):
+def slack_request(method, payload, token, use_form=False):
     url = f"https://slack.com/api/{method}"
     headers = {"Authorization": f"Bearer {token}"}
-    if method == "users.lookupByEmail":
+    if use_form:
         response = requests.post(
             url,
             headers=headers,
@@ -338,19 +364,23 @@ def auth_test(token):
     return data
 
 
-def resolve_user_id(recipient, labels, token):
-    if recipient in labels:
-        return labels[recipient]
-    if USER_ID_RE.match(recipient or ""):
-        return recipient
+def resolve_contact_email(recipient, contacts):
+    if recipient in contacts:
+        return contacts[recipient]
     if recipient and "@" in recipient:
-        data = slack_request("users.lookupByEmail", {"email": recipient}, token)
-        user = data.get("user") or {}
-        user_id = user.get("id")
-        if not user_id:
-            raise SystemExit("No user found for that email.")
-        return user_id
-    raise SystemExit("Recipient must be a user ID, email, or saved label.")
+        return recipient.strip()
+    raise SystemExit("Recipient must be a contact label or email.")
+
+
+def lookup_user_id_by_email(email, token):
+    data = slack_request(
+        "users.lookupByEmail", {"email": email}, token, use_form=True
+    )
+    user = data.get("user") or {}
+    user_id = user.get("id")
+    if not user_id:
+        raise SystemExit("No user found for that email.")
+    return user_id
 
 
 def open_dm(user_id, token):
@@ -371,6 +401,109 @@ def send_dm(token, user_id, text):
     return channel_id, message.get("ts")
 
 
+def expand_existing_path(path, kind):
+    expanded = os.path.expanduser(path)
+    if kind == "file":
+        if not os.path.isfile(expanded):
+            raise SystemExit(f"File not found: {path}")
+    elif kind == "dir":
+        if not os.path.isdir(expanded):
+            raise SystemExit(f"Directory not found: {path}")
+    return expanded
+
+
+def zip_directory(dir_path):
+    expanded = expand_existing_path(dir_path, "dir")
+    base_name = os.path.basename(os.path.normpath(expanded)) or "archive"
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False, suffix=f"-{base_name}.zip"
+    )
+    temp_file.close()
+    archive_path = temp_file.name
+    try:
+        with zipfile.ZipFile(
+            archive_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            for root, _, files in os.walk(expanded):
+                for name in sorted(files):
+                    full_path = os.path.join(root, name)
+                    rel_path = os.path.relpath(full_path, expanded)
+                    archive.write(full_path, arcname=os.path.join(base_name, rel_path))
+    except Exception:
+        try:
+            os.remove(archive_path)
+        except OSError:
+            pass
+        raise
+    return archive_path, f"{base_name}.zip"
+
+
+def _upload_external_file(channel_id, thread_ts, path, filename, token):
+    file_size = os.path.getsize(path)
+    upload_data = slack_request(
+        "files.getUploadURLExternal",
+        {"filename": filename, "length": str(file_size)},
+        token,
+        use_form=True,
+    )
+    upload_url = upload_data.get("upload_url")
+    file_id = upload_data.get("file_id")
+    if not upload_url or not file_id:
+        raise SystemExit("Slack did not return an upload URL.")
+
+    with open(path, "rb") as handle:
+        response = requests.post(
+            upload_url,
+            data=handle,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=120,
+        )
+    if response.status_code not in (200, 201):
+        raise SystemExit(
+            f"Slack upload HTTP {response.status_code}: {response.text.strip()}"
+        )
+
+    payload = {
+        "files": [{"id": file_id, "title": filename}],
+        "channel_id": channel_id,
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+
+    slack_request("files.completeUploadExternal", payload, token)
+    return file_id
+
+
+def send_attachments(channel_id, thread_ts, file_path, dir_path, token):
+    uploaded = []
+
+    if file_path:
+        expanded = expand_existing_path(file_path, "file")
+        filename = os.path.basename(expanded)
+        file_id = _upload_external_file(
+            channel_id, thread_ts, expanded, filename, token
+        )
+        uploaded.append(filename)
+
+    archive_path = None
+    archive_name = None
+    try:
+        if dir_path:
+            archive_path, archive_name = zip_directory(dir_path)
+            file_id = _upload_external_file(
+                channel_id, thread_ts, archive_path, archive_name, token
+            )
+            uploaded.append(archive_name)
+    finally:
+        if archive_path:
+            try:
+                os.remove(archive_path)
+            except OSError:
+                pass
+
+    return uploaded
+
+
 def main():
     args = parse_args(sys.argv[1:])
 
@@ -379,7 +512,15 @@ def main():
         return
 
     if args["upgrade"]:
-        if args["recipient"] or args["text"] or args["edit"] or args["add_user"]:
+        if (
+            args["command"]
+            or args["recipient"]
+            or args["message"]
+            or args["label"]
+            or args["email"]
+            or args["file_path"]
+            or args["dir_path"]
+        ):
             raise SystemExit("Use -u by itself to upgrade.")
 
         latest = _get_latest_version()
@@ -408,57 +549,50 @@ def main():
 
     config_path = get_config_path(args["config"])
     config = load_config(config_path)
-    user_labels = normalize_user_labels(config)
+    contacts = normalize_contacts(config)
 
-    if args["add_user"]:
-        if args["recipient"] or args["text"] or args["edit"]:
-            raise SystemExit("Use -au by itself.")
-        label, value = args["add_user"]
-        label = label.strip()
-        value = value.strip()
+    if args["command"] == "ac":
+        label = (args["label"] or "").strip()
+        email = (args["email"] or "").strip()
         if not label:
             raise SystemExit("Label cannot be empty.")
-        if not value:
-            raise SystemExit("User ID or email cannot be empty.")
-        if USER_ID_RE.match(value):
-            user_id = value
-        elif "@" in value:
-            token = resolve_token()
-            auth_test(token)
-            user_id = resolve_user_id(value, {}, token)
-        else:
-            raise SystemExit("Value must be a user ID or email.")
-        user_labels[label] = user_id
-        config["user_labels"] = user_labels
+        if "@" not in email:
+            raise SystemExit("Use: slack ac <label> <email>")
+        contacts[label] = email
+        config["contacts"] = contacts
+        if "user_labels" in config:
+            del config["user_labels"]
         save_config(config_path, config)
-        print(f"Saved label '{label}' in {config_path}")
+        print(f"Saved contact '{label}' -> {email}")
         return
 
-    if args["edit"] and args["text"]:
-        raise SystemExit("Use either -e or provide text, not both.")
-
-    if args["edit"]:
-        text = read_from_editor()
-    else:
-        text = " ".join(args["text"]).strip()
-
-    if not args["recipient"]:
+    if not args["command"]:
         print_help()
         return
 
-    if not text:
-        print_help()
-        return
+    if args["command"] != "dm":
+        raise SystemExit(
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+        )
 
     token = resolve_token()
     auth_test(token)
 
-    user_id = resolve_user_id(args["recipient"], user_labels, token)
-    channel_id, ts = send_dm(token, user_id, text)
-    if ts:
-        print(f"DM sent. user={user_id} channel={channel_id} ts={ts}")
+    recipient_email = resolve_contact_email(args["recipient"], contacts)
+    user_id = lookup_user_id_by_email(recipient_email, token)
+    channel_id, ts = send_dm(token, user_id, args["message"])
+    uploaded = send_attachments(
+        channel_id, ts, args["file_path"], args["dir_path"], token
+    )
+
+    if uploaded:
+        print(
+            f"DM sent. email={recipient_email} channel={channel_id} ts={ts} files={','.join(uploaded)}"
+        )
+    elif ts:
+        print(f"DM sent. email={recipient_email} channel={channel_id} ts={ts}")
     else:
-        print(f"DM sent. user={user_id} channel={channel_id}")
+        print(f"DM sent. email={recipient_email} channel={channel_id}")
 
 
 if __name__ == "__main__":
