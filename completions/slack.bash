@@ -78,6 +78,10 @@ _slack_complete() {
         COMPREPLY=( $(compgen -W "-dms -mnts" -- "$cur") )
         return 0
       fi
+      if [[ $prev == "-dms" ]]; then
+        COMPREPLY=( $(compgen -W "-ur -r" -- "$cur") )
+        return 0
+      fi
       ;;
   esac
 

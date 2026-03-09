@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -45,8 +46,10 @@ features:
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
   # list unread direct messages or unread mentions
-  # slack ls -dms|-mnts
-  slack ls -dms
+  # slack ls -dms [-ur|-r] <number> | slack ls -mnts
+  slack ls -dms 10
+  slack ls -dms -ur 10
+  slack ls -dms -r 10
   slack ls -mnts
 
   # clear stale conversations and bot-like conversations
@@ -137,6 +140,7 @@ def parse_args(argv):
         "file_path": None,
         "dir_path": None,
         "ls_mode": None,
+        "ls_limit": None,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -199,16 +203,34 @@ def parse_args(argv):
                     args["file_path"] = path
             return args
         if token == "ls":
-            if len(remaining) != 1 or remaining[0] not in ("-dms", "-mnts"):
-                raise SystemExit("Use: slack ls -dms | slack ls -mnts")
+            if not remaining:
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number> | slack ls -mnts")
             args["ls_mode"] = remaining[0]
+            if args["ls_mode"] == "-mnts":
+                if len(remaining) != 1:
+                    raise SystemExit("Use: slack ls -mnts")
+                return args
+            if args["ls_mode"] != "-dms":
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number> | slack ls -mnts")
+            if len(remaining) == 2:
+                limit_token = remaining[1]
+            elif len(remaining) == 3 and remaining[1] in ("-ur", "-r"):
+                limit_token = remaining[2]
+            else:
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+            try:
+                args["ls_limit"] = int(limit_token)
+            except ValueError:
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+            if args["ls_limit"] <= 0:
+                raise SystemExit("Number must be greater than 0.")
             return args
         if token == "sc":
             if remaining:
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms | slack ls -mnts | slack sc"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack ls -mnts | slack sc"
         )
 
     return args
@@ -551,6 +573,14 @@ def compact_text(value):
     return " ".join(value.split())
 
 
+def format_ts(ts_value):
+    try:
+        dt = datetime.fromtimestamp(float(ts_value))
+    except (TypeError, ValueError, OSError):
+        return "-"
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def extract_ts(payload):
     latest = payload.get("latest")
     if isinstance(latest, dict):
@@ -583,7 +613,7 @@ def list_api(method, params, token):
     return items
 
 
-def list_unread_dms(contacts, token):
+def list_unread_dms(contacts, token, limit):
     inverse_contacts = {email: label for label, email in contacts.items()}
     user_cache = {}
     info_cache = {}
@@ -630,6 +660,7 @@ def list_unread_dms(contacts, token):
             )
             label = inverse_contacts.get(email, "-")
             latest = info_channel.get("latest") or {}
+            latest_ts = latest.get("ts") if isinstance(latest, dict) else None
             latest_text = (
                 compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
             )
@@ -644,6 +675,7 @@ def list_unread_dms(contacts, token):
                         ("dm_id", channel_id),
                         ("user_id", user_id),
                         ("unread", str(unread)),
+                        ("date", format_ts(latest_ts)),
                         ("latest", latest_text),
                     ],
                 }
@@ -654,7 +686,9 @@ def list_unread_dms(contacts, token):
         return
 
     unread_rows.sort(key=lambda item: item["sort_ts"], reverse=True)
-    print_sections([item["row"] for item in unread_rows])
+    selected = unread_rows[:limit]
+    selected.sort(key=lambda item: item["sort_ts"])
+    print_sections([item["row"] for item in selected])
 
 
 def list_unread_mentions(self_user_id, token):
@@ -926,7 +960,7 @@ def main():
 
     if args["command"] == "ls":
         if args["ls_mode"] == "-dms":
-            list_unread_dms(contacts, token)
+            list_unread_dms(contacts, token, args["ls_limit"])
             return
         if args["ls_mode"] == "-mnts":
             self_user_id = auth_data.get("user_id")

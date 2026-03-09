@@ -61,7 +61,9 @@ python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/
 List unread DMs:
 
 ```bash
-python main.py ls -dms
+python main.py ls -dms 10
+python main.py ls -dms -ur 10
+python main.py ls -dms -r 10
 ```
 
 List unread mentions:
@@ -96,7 +98,9 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
-- `ls -dms`: List unread direct messages.
+- `ls -dms <number>`: List that many unread direct messages, oldest first and latest last.
+- `ls -dms -ur <number>`: Same as `ls -dms <number>`.
+- `ls -dms -r <number>`: Same as `ls -dms <number>`.
 - `ls -mnts`: List unread mentions.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.
