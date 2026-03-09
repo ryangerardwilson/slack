@@ -99,8 +99,9 @@ Example:
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
 - `ls -dms <number>`: List that many unread direct messages, oldest first and latest last.
-- `ls -dms -ur <number>`: Same as `ls -dms <number>`.
-- `ls -dms -r <number>`: Same as `ls -dms <number>`.
+- `ls -dms <number>`: List that many latest direct messages, oldest first and latest last.
+- `ls -dms -ur <number>`: List that many latest unread direct messages.
+- `ls -dms -r <number>`: List that many latest read direct messages.
 - `ls -mnts`: List unread mentions.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.

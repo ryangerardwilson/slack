@@ -140,6 +140,7 @@ def parse_args(argv):
         "file_path": None,
         "dir_path": None,
         "ls_mode": None,
+        "ls_filter": "all",
         "ls_limit": None,
         "config": None,
         "version": False,
@@ -214,7 +215,9 @@ def parse_args(argv):
                 raise SystemExit("Use: slack ls -dms [-ur|-r] <number> | slack ls -mnts")
             if len(remaining) == 2:
                 limit_token = remaining[1]
+                args["ls_filter"] = "all"
             elif len(remaining) == 3 and remaining[1] in ("-ur", "-r"):
+                args["ls_filter"] = "unread" if remaining[1] == "-ur" else "read"
                 limit_token = remaining[2]
             else:
                 raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
@@ -613,11 +616,11 @@ def list_api(method, params, token):
     return items
 
 
-def list_unread_dms(contacts, token, limit):
+def list_dms(contacts, token, limit, filter_mode):
     inverse_contacts = {email: label for label, email in contacts.items()}
     user_cache = {}
     info_cache = {}
-    unread_rows = []
+    rows = []
     channels = list_api(
         "users.conversations",
         {"types": "im", "exclude_archived": "true", "limit": "200"},
@@ -641,9 +644,6 @@ def list_unread_dms(contacts, token, limit):
             unread = info_channel.get("unread_count_display") or info_channel.get(
                 "unread_count"
             ) or 0
-            if unread <= 0:
-                continue
-
             user_id = info_channel.get("user") or channel.get("user") or "-"
             if user_id not in user_cache:
                 user_cache[user_id] = get_user_info(user_id, token)
@@ -651,6 +651,11 @@ def list_unread_dms(contacts, token, limit):
             profile = user.get("profile") or {}
             email = profile.get("email") or "-"
             if email == "-":
+                continue
+            is_unread = unread > 0
+            if filter_mode == "unread" and not is_unread:
+                continue
+            if filter_mode == "read" and is_unread:
                 continue
             display_name = (
                 profile.get("display_name")
@@ -665,7 +670,7 @@ def list_unread_dms(contacts, token, limit):
                 compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
             )
 
-            unread_rows.append(
+            rows.append(
                 {
                     "sort_ts": float(extract_ts(info_channel)),
                     "row": [
@@ -681,12 +686,17 @@ def list_unread_dms(contacts, token, limit):
                 }
             )
 
-    if not unread_rows:
-        print("No unread DMs.")
+    if not rows:
+        if filter_mode == "unread":
+            print("No unread DMs.")
+        elif filter_mode == "read":
+            print("No read DMs.")
+        else:
+            print("No DMs.")
         return
 
-    unread_rows.sort(key=lambda item: item["sort_ts"], reverse=True)
-    selected = unread_rows[:limit]
+    rows.sort(key=lambda item: item["sort_ts"], reverse=True)
+    selected = rows[:limit]
     selected.sort(key=lambda item: item["sort_ts"])
     print_sections([item["row"] for item in selected])
 
@@ -960,7 +970,7 @@ def main():
 
     if args["command"] == "ls":
         if args["ls_mode"] == "-dms":
-            list_unread_dms(contacts, token, args["ls_limit"])
+            list_dms(contacts, token, args["ls_limit"], args["ls_filter"])
             return
         if args["ls_mode"] == "-mnts":
             self_user_id = auth_data.get("user_id")
