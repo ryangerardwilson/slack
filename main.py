@@ -46,15 +46,18 @@ features:
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
   # list unread direct messages or unread mentions
-  # slack ls -dms [-ur|-r] <number> | slack ls -mnts
+  # slack ls -dms [-ur|-r] <number>
   slack ls -dms 10
   slack ls -dms -ur 10
   slack ls -dms -r 10
-  slack ls -mnts
 
   # clear stale conversations and bot-like conversations
   # slack sc
   slack sc
+
+  # mark all unread direct messages as read
+  # slack mra
+  slack mra
 """
 
 
@@ -205,14 +208,10 @@ def parse_args(argv):
             return args
         if token == "ls":
             if not remaining:
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number> | slack ls -mnts")
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
             args["ls_mode"] = remaining[0]
-            if args["ls_mode"] == "-mnts":
-                if len(remaining) != 1:
-                    raise SystemExit("Use: slack ls -mnts")
-                return args
             if args["ls_mode"] != "-dms":
-                raise SystemExit("Use: slack ls -dms [-ur|-r] <number> | slack ls -mnts")
+                raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
             if len(remaining) == 2:
                 limit_token = remaining[1]
                 args["ls_filter"] = "all"
@@ -228,12 +227,16 @@ def parse_args(argv):
             if args["ls_limit"] <= 0:
                 raise SystemExit("Number must be greater than 0.")
             return args
+        if token == "mra":
+            if remaining:
+                raise SystemExit("Use: slack mra")
+            return args
         if token == "sc":
             if remaining:
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack ls -mnts | slack sc"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
         )
 
     return args
@@ -724,42 +727,6 @@ def list_dms(contacts, token, limit, filter_mode):
     print_sections([item["row"] for item in selected])
 
 
-def list_unread_mentions(self_user_id, token):
-    query = f'"<@{self_user_id}>" is:unread -from:<@{self_user_id}>'
-    data = slack_request(
-        "search.messages",
-        {
-            "query": query,
-            "count": "20",
-            "sort": "timestamp",
-            "sort_dir": "desc",
-        },
-        token,
-        http_method="GET",
-    )
-    matches = ((data.get("messages") or {}).get("matches")) or []
-    if not matches:
-        print("No unread mentions.")
-        return
-
-    rows = []
-    for match in matches:
-        channel = match.get("channel") or {}
-        channel_name = channel.get("name") or channel.get("id") or "-"
-        speaker = match.get("username") or match.get("user") or "-"
-        rows.append(
-            [
-                ("channel", channel_name),
-                ("speaker", speaker),
-                ("ts", match.get("ts") or "-"),
-                ("text", compact_text(match.get("text"))),
-                ("link", match.get("permalink") or "-"),
-            ]
-        )
-
-    print_sections(rows)
-
-
 def action_close_conversation(channel_id, token):
     data = slack_request("conversations.close", {"channel": channel_id}, token)
     return data.get("already_closed") or data.get("no_op")
@@ -790,6 +757,74 @@ def ms_age_is_stale(ms_value, cutoff_ts):
 
 def summarize_reasons(reasons):
     return ",".join(reasons) if reasons else "-"
+
+
+def mark_all_unread_dms_as_read(token):
+    user_cache = {}
+    rows = []
+    marked = 0
+
+    channels = list_api(
+        "users.conversations",
+        {"types": "im", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    for channel in channels:
+        channel_id = channel.get("id")
+        if not channel_id:
+            continue
+        info = slack_request(
+            "conversations.info",
+            {"channel": channel_id, "include_num_members": "false"},
+            token,
+            http_method="GET",
+        ).get("channel") or {}
+        unread = info.get("unread_count_display") or info.get("unread_count") or 0
+        if unread <= 0:
+            continue
+
+        latest = info.get("latest") or {}
+        latest_ts = latest.get("ts") if isinstance(latest, dict) else None
+        if not latest_ts:
+            continue
+
+        user_id = info.get("user") or channel.get("user") or "-"
+        if user_id not in user_cache:
+            user_cache[user_id] = get_user_info(user_id, token)
+        user = user_cache[user_id]
+        profile = user.get("profile") or {}
+        display_name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user.get("name")
+            or user_id
+        )
+        email = profile.get("email") or "-"
+
+        slack_request(
+            "conversations.mark",
+            {"channel": channel_id, "ts": latest_ts},
+            token,
+            use_form=True,
+        )
+        marked += 1
+        rows.append(
+            [
+                ("name", display_name),
+                ("email", email),
+                ("dm_id", channel_id),
+                ("unread", str(unread)),
+                ("date", format_ts(latest_ts)),
+                ("action", "marked_read"),
+            ]
+        )
+
+    if not rows:
+        print("No unread DMs to mark as read.")
+        return
+
+    print_sections(rows)
+    print(f"Summary: marked_read={marked}")
 
 
 def clear_stale_conversations(token):
@@ -989,19 +1024,17 @@ def main():
         return
 
     token = resolve_token()
-    auth_data = auth_test(token)
+    auth_test(token)
 
     if args["command"] == "ls":
         if args["ls_mode"] == "-dms":
             list_dms(contacts, token, args["ls_limit"], args["ls_filter"])
             return
-        if args["ls_mode"] == "-mnts":
-            self_user_id = auth_data.get("user_id")
-            if not self_user_id:
-                raise SystemExit("Unable to determine the current Slack user.")
-            list_unread_mentions(self_user_id, token)
-            return
-        raise SystemExit("Use: slack ls -dms | slack ls -mnts")
+        raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
+
+    if args["command"] == "mra":
+        mark_all_unread_dms_as_read(token)
+        return
 
     if args["command"] == "sc":
         clear_stale_conversations(token)
@@ -1009,7 +1042,7 @@ def main():
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms | slack ls -mnts | slack sc"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

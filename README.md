@@ -18,7 +18,7 @@ Set a Slack user token:
 export SLACK_TOKEN="xoxp-..."
 ```
 
-Required scopes: `chat:write`, `im:write`, `im:read`, `users:read`, `users:read.email`, `files:write`, `search:read`.
+Required scopes: `chat:write`, `im:write`, `im:read`, `users:read`, `users:read.email`, `files:write`.
 
 ## Usage
 
@@ -58,18 +58,12 @@ Send a DM with a file and a directory zipped on the fly:
 python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 ```
 
-List unread DMs:
+List DMs:
 
 ```bash
 python main.py ls -dms 10
 python main.py ls -dms -ur 10
 python main.py ls -dms -r 10
-```
-
-List unread mentions:
-
-```bash
-python main.py ls -mnts
 ```
 
 Clear stale conversations and bot-like conversations:
@@ -79,6 +73,12 @@ python main.py sc
 ```
 
 `sc` closes DMs whose counterpart has no email or whose latest activity is older than about 6 months. It also leaves joined public channels whose creator has no email or whose channel update time is older than about 6 months. Private channels and group DMs are skipped when the token lacks the required scopes.
+
+Mark all unread DMs as read:
+
+```bash
+python main.py mra
+```
 
 ## Contacts
 
@@ -98,11 +98,10 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
-- `ls -dms <number>`: List that many unread direct messages, oldest first and latest last.
 - `ls -dms <number>`: List that many latest direct messages, oldest first and latest last.
 - `ls -dms -ur <number>`: List that many latest unread direct messages.
 - `ls -dms -r <number>`: List that many latest read direct messages.
-- `ls -mnts`: List unread mentions.
+- `mra`: Mark all unread DMs as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.
 - `-u`: Upgrade via the installer script.
