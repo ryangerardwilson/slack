@@ -841,21 +841,21 @@ def _print_open_entries(entries, token):
         print(f"{'dm_id':<8}: {entry['dm_id']}")
         print(f"{'date':<8}: {format_ts(entry['message'].get('ts'))}")
         text = (entry["message"].get("text") or "").rstrip()
-        print(f"{'text':<8}: {text if text else '-'}")
+        print(style_help(f"{'text':<8}: {text if text else '-'}"))
 
         downloads, code_blocks = _message_details(entry["message"], entry["dm_id"], token)
         if downloads:
             for file_info in downloads:
-                print(f"{'file':<8}: {file_info['id']} {file_info['path']}")
+                print(style_help(f"{'file':<8}: {file_info['id']} {file_info['path']}"))
         else:
-            print(f"{'file':<8}: -")
+            print(style_help(f"{'file':<8}: -"))
 
         if code_blocks:
             for block in code_blocks:
-                print(f"{'code':<8}: {block['id']} {block['name']}")
-                print(block["text"])
+                print(style_help(f"{'code':<8}: {block['id']} {block['name']}"))
+                print(style_help(block["text"]))
         else:
-            print(f"{'code':<8}: -")
+            print(style_help(f"{'code':<8}: -"))
 
 
 def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
