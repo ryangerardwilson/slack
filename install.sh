@@ -175,25 +175,6 @@ add_to_path() {
   fi
 }
 
-add_completion() {
-  local config_file=$1
-  local command=$2
-
-  if grep -Fxq "$command" "$config_file" 2>/dev/null; then
-    print_message info "${MUTED}Completion entry already present in ${NC}$config_file"
-  elif [[ -w "$config_file" ]]; then
-    {
-      echo ""
-      echo "# ${APP} completion"
-      echo "$command"
-    } >> "$config_file"
-    print_message info "${MUTED}Added ${NC}${APP}${MUTED} completion to ${NC}$config_file"
-  else
-    print_message info "Add this to your shell config:"
-    print_message info "  $command"
-  fi
-}
-
 if [[ "$no_modify_path" != "true" ]]; then
   XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
   current_shell=$(basename "${SHELL:-bash}")
@@ -220,15 +201,6 @@ if [[ "$no_modify_path" != "true" ]]; then
       else
         add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
       fi
-    fi
-  fi
-  if [[ "$current_shell" == "bash" && -f "$APP_HOME/completions/slack.bash" ]]; then
-    completion_line="source \"$APP_HOME/completions/slack.bash\""
-    if [[ -n "$config_file" ]]; then
-      add_completion "$config_file" "$completion_line"
-    else
-      print_message info "Add this to your shell config:"
-      print_message info "  $completion_line"
     fi
   fi
 fi

@@ -117,20 +117,6 @@ Example:
 - `-u`: Upgrade via the installer script.
 - `-h`: Show help.
 
-## Shell completion (bash)
-
-For local development:
-
-```bash
-source completions/slack.bash
-```
-
-For installed binary:
-
-```bash
-source ~/.slack/completions/slack.bash
-```
-
 ## Install
 
 ```bash
