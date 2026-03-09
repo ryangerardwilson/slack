@@ -47,7 +47,11 @@ features:
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
-  # list saved-contact direct messages
+  # download a file attachment from a DM by dm_id and file_id
+  # slack df <dm_id> <file_id> [output_path]
+  slack df D0466D63H7B F0AH0LD4133
+
+  # list saved-contact direct message history with attached files
   # slack ls -dms [-ur|-r] <number>
   slack ls -dms 10
   slack ls -dms -ur 10
@@ -143,6 +147,8 @@ def parse_args(argv):
         "email": None,
         "recipient": None,
         "message": None,
+        "file_id": None,
+        "output_path": None,
         "file_path": None,
         "dir_path": None,
         "ls_mode": None,
@@ -209,6 +215,14 @@ def parse_args(argv):
                         raise SystemExit("Use at most one file path.")
                     args["file_path"] = path
             return args
+        if token == "df":
+            if len(remaining) < 2 or len(remaining) > 3:
+                raise SystemExit("Use: slack df <dm_id> <file_id> [output_path]")
+            args["recipient"] = remaining[0]
+            args["file_id"] = remaining[1]
+            if len(remaining) == 3:
+                args["output_path"] = remaining[2]
+            return args
         if token == "ls":
             if not remaining:
                 raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
@@ -239,7 +253,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
         )
 
     return args
@@ -582,6 +596,18 @@ def compact_text(value):
     return " ".join(value.split())
 
 
+def summarize_files(message):
+    files = message.get("files") or []
+    rendered = []
+    for file in files:
+        file_id = file.get("id")
+        if not file_id:
+            continue
+        name = file.get("name") or "unnamed"
+        rendered.append(f"{file_id}:{name}")
+    return ", ".join(rendered) if rendered else "-"
+
+
 def format_ts(ts_value):
     try:
         dt = datetime.fromtimestamp(float(ts_value))
@@ -718,13 +744,14 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id):
                     {
                         "sort_ts": ts_value,
                         "row": [
-                            ("email", contact_dm["email"]),
-                            ("dm_id", contact_dm["channel_id"]),
-                            ("date", format_ts(ts)),
-                            ("text", compact_text(message.get("text"))),
-                        ],
-                    }
-                )
+                        ("email", contact_dm["email"]),
+                        ("dm_id", contact_dm["channel_id"]),
+                        ("date", format_ts(ts)),
+                        ("text", compact_text(message.get("text"))),
+                        ("files", summarize_files(message)),
+                    ],
+                }
+            )
                 matched += 1
                 if matched >= limit:
                     break
@@ -834,6 +861,63 @@ def mark_all_unread_dms_as_read(contacts, token):
 
     print_sections(rows)
     print(f"Summary: marked_read={marked}")
+
+
+def download_dm_file(dm_id, file_id, output_path, token):
+    cursor = None
+    while True:
+        history = slack_request(
+            "conversations.history",
+            {
+                "channel": dm_id,
+                "limit": "200",
+                **({"cursor": cursor} if cursor else {}),
+            },
+            token,
+            http_method="GET",
+        )
+        for message in history.get("messages") or []:
+            for file in message.get("files") or []:
+                if file.get("id") != file_id:
+                    continue
+                download_url = file.get("url_private_download")
+                filename = file.get("name") or file_id
+                if not download_url:
+                    raise SystemExit("File has no downloadable URL.")
+
+                destination = output_path or filename
+                destination = os.path.expanduser(destination)
+                parent = os.path.dirname(destination)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+
+                with requests.get(
+                    download_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    stream=True,
+                    timeout=120,
+                    allow_redirects=True,
+                ) as response:
+                    content_type = response.headers.get("content-type") or ""
+                    if response.status_code != 200 or "text/html" in content_type:
+                        raise SystemExit(
+                            "Downloading files requires a token with file download access, typically files:read."
+                        )
+                    with open(destination, "wb") as handle:
+                        for chunk in response.iter_content(chunk_size=65536):
+                            if chunk:
+                                handle.write(chunk)
+
+                print(f"downloaded dm_id={dm_id} file_id={file_id} path={destination}")
+                return
+
+        cursor = (
+            (history.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+
+    raise SystemExit(f"File not found in dm_id={dm_id}: {file_id}")
 
 
 def clear_stale_conversations(token):
@@ -1050,13 +1134,17 @@ def main():
         mark_all_unread_dms_as_read(contacts, token)
         return
 
+    if args["command"] == "df":
+        download_dm_file(args["recipient"], args["file_id"], args["output_path"], token)
+        return
+
     if args["command"] == "sc":
         clear_stale_conversations(token)
         return
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls -dms [-ur|-r] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)
