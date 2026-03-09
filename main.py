@@ -1,4 +1,3 @@
-import argparse
 import json
 import os
 import re
@@ -23,6 +22,28 @@ LATEST_RELEASE_API = "https://api.github.com/repos/ryangerardwilson/slack/releas
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+HELP_TEXT = """Slack CLI
+
+flags:
+  slack -h
+    show this help
+  slack -v
+    print the installed version
+  slack -u
+    upgrade to the latest release
+
+features:
+  send a direct message as yourself
+  # slack [-e] <user_id|email|label> <text...>
+  slack U123ABC "hello"
+  slack someone@company.com "hello"
+  slack -e mom
+
+  save a label for a Slack user
+  # slack -au <label> <user_id|email>
+  slack -au mom U123ABC
+  slack -au boss boss@company.com
+"""
 
 
 def get_env(name):
@@ -80,50 +101,71 @@ def normalize_user_labels(payload):
     return cleaned
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(
-        description="Send a Slack direct message as yourself."
-    )
-    parser.add_argument(
-        "recipient",
-        nargs="?",
-        help="User ID (U...), email, or label.",
-    )
-    parser.add_argument(
-        "text",
-        nargs="*",
-        help="Message text to send.",
-    )
-    parser.add_argument(
-        "--config",
-        help="Path to config.json for labels.",
-    )
-    parser.add_argument(
-        "-e",
-        "--edit",
-        action="store_true",
-        help="Open $EDITOR to compose the message.",
-    )
-    parser.add_argument(
-        "-au",
-        "--add-user",
-        nargs=2,
-        metavar=("LABEL", "USER_ID_OR_EMAIL"),
-        help="Save a label pointing to a Slack user ID or email.",
-    )
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="store_true",
-        help="Show version and exit.",
-    )
-    parser.add_argument(
-        "-u",
-        "--upgrade",
-        action="store_true",
-        help="Upgrade to the latest version.",
-    )
-    return parser
+def style_help(text):
+    if sys.stdout.isatty() and not os.getenv("NO_COLOR"):
+        return f"\033[38;5;245m{text}\033[0m"
+    return text
+
+
+def print_help():
+    print(style_help(HELP_TEXT.rstrip()))
+
+
+def parse_args(argv):
+    args = {
+        "recipient": None,
+        "text": [],
+        "config": None,
+        "edit": False,
+        "add_user": None,
+        "version": False,
+        "upgrade": False,
+    }
+
+    if not argv:
+        return args
+
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+
+        if token == "-h":
+            print_help()
+            raise SystemExit(0)
+        if token == "-v":
+            args["version"] = True
+            index += 1
+            continue
+        if token == "-u":
+            args["upgrade"] = True
+            index += 1
+            continue
+        if token == "-e":
+            args["edit"] = True
+            index += 1
+            continue
+        if token == "-au":
+            if index + 2 >= len(argv):
+                raise SystemExit("Use: slack -au <label> <user_id|email>")
+            args["add_user"] = [argv[index + 1], argv[index + 2]]
+            index += 3
+            continue
+        if token == "-cfg":
+            if index + 1 >= len(argv):
+                raise SystemExit("Use: slack -cfg <config_path>")
+            args["config"] = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("-"):
+            raise SystemExit(f"Unknown flag: {token}")
+
+        if args["recipient"] is None:
+            args["recipient"] = token
+        else:
+            args["text"].append(token)
+        index += 1
+
+    return args
 
 
 def _version_tuple(version):
@@ -216,7 +258,8 @@ def read_from_editor():
         temp_path = tmp.name
 
     try:
-        editor = os.getenv("EDITOR", "vim").strip()
+        editor = os.getenv("VISUAL") or os.getenv("EDITOR") or "vim"
+        editor = editor.strip()
         editor_cmd = shlex.split(editor) if editor else ["vim"]
         if not editor_cmd:
             editor_cmd = ["vim"]
@@ -329,15 +372,14 @@ def send_dm(token, user_id, text):
 
 
 def main():
-    parser = build_parser()
-    args = parser.parse_args()
+    args = parse_args(sys.argv[1:])
 
-    if args.version:
+    if args["version"]:
         print(__version__)
         return
 
-    if args.upgrade:
-        if args.recipient or args.text or args.edit or args.add_user:
+    if args["upgrade"]:
+        if args["recipient"] or args["text"] or args["edit"] or args["add_user"]:
             raise SystemExit("Use -u by itself to upgrade.")
 
         latest = _get_latest_version()
@@ -364,14 +406,14 @@ def main():
         rc = _run_upgrade()
         sys.exit(rc)
 
-    config_path = get_config_path(args.config)
+    config_path = get_config_path(args["config"])
     config = load_config(config_path)
     user_labels = normalize_user_labels(config)
 
-    if args.add_user:
-        if args.recipient or args.text or args.edit:
-            raise SystemExit("Use --add-user by itself.")
-        label, value = args.add_user
+    if args["add_user"]:
+        if args["recipient"] or args["text"] or args["edit"]:
+            raise SystemExit("Use -au by itself.")
+        label, value = args["add_user"]
         label = label.strip()
         value = value.strip()
         if not label:
@@ -392,26 +434,26 @@ def main():
         print(f"Saved label '{label}' in {config_path}")
         return
 
-    if args.edit and args.text:
+    if args["edit"] and args["text"]:
         raise SystemExit("Use either -e or provide text, not both.")
 
-    if args.edit:
+    if args["edit"]:
         text = read_from_editor()
     else:
-        text = " ".join(args.text).strip()
+        text = " ".join(args["text"]).strip()
 
-    if not args.recipient:
-        parser.print_help()
+    if not args["recipient"]:
+        print_help()
         return
 
     if not text:
-        parser.print_help()
+        print_help()
         return
 
     token = resolve_token()
     auth_test(token)
 
-    user_id = resolve_user_id(args.recipient, user_labels, token)
+    user_id = resolve_user_id(args["recipient"], user_labels, token)
     channel_id, ts = send_dm(token, user_id, text)
     if ts:
         print(f"DM sent. user={user_id} channel={channel_id} ts={ts}")

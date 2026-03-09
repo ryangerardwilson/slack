@@ -4,9 +4,11 @@ Minimal CLI to send Slack direct messages as yourself.
 
 ## Setup
 
-Install dependencies:
+Create a local venv and install dependencies:
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -19,6 +21,12 @@ export SLACK_TOKEN="xoxp-..."
 Required scopes: `chat:write`, `im:write` (add `users:read` for email lookup).
 
 ## Usage
+
+Show help:
+
+```bash
+python main.py -h
+```
 
 Send a DM by user ID:
 
@@ -40,7 +48,14 @@ python main.py -e U123ABC
 
 ## Labels
 
-Create `~/.config/slack/config.json`:
+Save a label from the CLI:
+
+```bash
+python main.py -au mom U123ABC
+python main.py -au boss boss@company.com
+```
+
+Or edit `~/.config/slack/config.json` directly:
 
 ```json
 {
@@ -56,20 +71,13 @@ Then:
 python main.py mom "hello"
 ```
 
-Add a label from the CLI (user ID or email). Email labels require `users:read`.
-
-```bash
-python main.py -au mom U123ABC
-python main.py -au boss boss@company.com
-```
-
 ## Options
 
-- `-e`, `--edit`: Open $EDITOR to compose a DM.
-- `-au`, `--add-user`: Save a label pointing to a Slack user ID or email.
-- `-v`, `--version`: Print version and exit.
-- `-u`, `--upgrade`: Upgrade via the installer script.
-- `-h`, `--help`: Show help.
+- `-e`: Open `$VISUAL`, then `$EDITOR`, to compose a DM.
+- `-au`: Save a label pointing to a Slack user ID or email.
+- `-v`: Print version and exit.
+- `-u`: Upgrade via the installer script.
+- `-h`: Show help.
 
 ## Shell completion (bash)
 

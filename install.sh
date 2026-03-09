@@ -235,5 +235,5 @@ fi
 
 echo ""
 print_message info "${MUTED}Installed ${NC}${APP}${MUTED} to ${NC}${INSTALL_DIR}/${APP}"
-print_message info "${MUTED}Run:${NC} ${APP} --help"
+print_message info "${MUTED}Run:${NC} ${APP} -h"
 echo ""
