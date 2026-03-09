@@ -91,4 +91,4 @@ _slack_complete() {
   return 0
 }
 
-complete -o default -o bashdefault -F _slack_complete slack
+complete -F _slack_complete slack
