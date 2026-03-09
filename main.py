@@ -621,12 +621,25 @@ def list_dms(contacts, token, limit, filter_mode):
     user_cache = {}
     info_cache = {}
     rows = []
-    channels = list_api(
-        "users.conversations",
-        {"types": "im", "exclude_archived": "true", "limit": "200"},
-        token,
-    )
-    for channel in channels:
+    cursor = None
+    page_limit = max(50, min(200, limit * 5))
+
+    while True:
+        payload = {
+            "types": "im",
+            "exclude_archived": "true",
+            "limit": str(page_limit),
+        }
+        if cursor:
+            payload["cursor"] = cursor
+        data = slack_request(
+            "users.conversations",
+            payload,
+            token,
+            http_method="GET",
+        )
+        channels = data.get("channels") or []
+        for channel in channels:
             channel_id = channel.get("id")
             if not channel_id:
                 continue
@@ -685,6 +698,16 @@ def list_dms(contacts, token, limit, filter_mode):
                     ],
                 }
             )
+
+            if len(rows) >= limit:
+                break
+
+        if len(rows) >= limit:
+            break
+
+        cursor = ((data.get("response_metadata") or {}).get("next_cursor") or "").strip()
+        if not cursor:
+            break
 
     if not rows:
         if filter_mode == "unread":
