@@ -25,19 +25,19 @@ HELP_TEXT = """Slack CLI
 
 flags:
   slack -h
-    show this help
+  # show this help
   slack -v
-    print the installed version
+  # print the installed version
   slack -u
-    upgrade to the latest release
+  # upgrade to the latest release
 
 features:
-  save a contact label
+  # save a contact label
   # slack ac <label> <email>
   slack ac mom mom@example.com
   slack ac boss boss@company.com
 
-  send a direct message, with an optional file and optional zipped directory
+  # send a direct message, with an optional file and optional zipped directory
   # slack dm <contact_label|email> <message> [file_path] [dir_path]
   slack dm mom "hello"
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
