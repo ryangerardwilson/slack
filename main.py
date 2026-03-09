@@ -678,59 +678,65 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id):
     rows = []
     for contact_dm in get_contact_dm_infos(contacts, token):
         info_channel = contact_dm["info"]
-        user = contact_dm["user"]
-        profile = user.get("profile") or {}
-        display_name = (
-            profile.get("display_name")
-            or profile.get("real_name")
-            or user.get("name")
-            or contact_dm["user_id"]
-        )
         last_read = info_channel.get("last_read") or "0"
         try:
             last_read_value = float(last_read)
         except (TypeError, ValueError):
             last_read_value = 0.0
 
-        history = slack_request(
-            "conversations.history",
-            {"channel": contact_dm["channel_id"], "limit": str(limit)},
-            token,
-            http_method="GET",
-        )
-        messages = history.get("messages") or []
-        for message in messages:
-            ts = message.get("ts")
-            if not ts:
-                continue
-            try:
-                ts_value = float(ts)
-            except (TypeError, ValueError):
-                continue
-            if message.get("user") == self_user_id:
-                continue
-            is_unread = ts_value > last_read_value
-            if filter_mode == "unread" and not is_unread:
-                continue
-            if filter_mode == "read" and is_unread:
-                continue
-
-            rows.append(
+        cursor = None
+        matched = 0
+        while True:
+            history = slack_request(
+                "conversations.history",
                 {
-                    "sort_ts": ts_value,
-                    "row": [
-                        ("label", contact_dm["label"]),
-                        ("name", display_name),
-                        ("email", contact_dm["email"]),
-                        ("dm_id", contact_dm["channel_id"]),
-                        ("user_id", contact_dm["user_id"]),
-                        ("state", "unread" if is_unread else "read"),
-                        ("from", "other"),
-                        ("date", format_ts(ts)),
-                        ("text", compact_text(message.get("text"))),
-                    ],
-                }
+                    "channel": contact_dm["channel_id"],
+                    "limit": str(max(20, limit * 3)),
+                    **({"cursor": cursor} if cursor else {}),
+                },
+                token,
+                http_method="GET",
             )
+            messages = history.get("messages") or []
+            for message in messages:
+                ts = message.get("ts")
+                if not ts:
+                    continue
+                try:
+                    ts_value = float(ts)
+                except (TypeError, ValueError):
+                    continue
+                if message.get("user") == self_user_id:
+                    continue
+                is_unread = ts_value > last_read_value
+                if filter_mode == "unread" and not is_unread:
+                    continue
+                if filter_mode == "read" and is_unread:
+                    continue
+
+                rows.append(
+                    {
+                        "sort_ts": ts_value,
+                        "row": [
+                            ("email", contact_dm["email"]),
+                            ("dm_id", contact_dm["channel_id"]),
+                            ("date", format_ts(ts)),
+                            ("text", compact_text(message.get("text"))),
+                        ],
+                    }
+                )
+                matched += 1
+                if matched >= limit:
+                    break
+
+            if matched >= limit:
+                break
+
+            cursor = (
+                (history.get("response_metadata") or {}).get("next_cursor") or ""
+            ).strip()
+            if not cursor:
+                break
 
     if not rows:
         if filter_mode == "unread":
