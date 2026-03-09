@@ -58,7 +58,7 @@ Send a DM with a file and a directory zipped on the fly:
 python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 ```
 
-List DMs:
+List saved-contact DMs:
 
 ```bash
 python main.py ls -dms 10
@@ -80,6 +80,8 @@ Mark all unread DMs as read:
 python main.py mra
 ```
 
+`ls -dms ...` and `mra` only operate on contacts you have saved with `ac`.
+
 ## Contacts
 
 Contacts are stored in `~/.config/slack/config.json`.
@@ -98,10 +100,10 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
-- `ls -dms <number>`: List that many latest direct messages, oldest first and latest last.
-- `ls -dms -ur <number>`: List that many latest unread direct messages.
-- `ls -dms -r <number>`: List that many latest read direct messages.
-- `mra`: Mark all unread DMs as read.
+- `ls -dms <number>`: List that many latest saved-contact direct messages, oldest first and latest last.
+- `ls -dms -ur <number>`: List that many latest unread saved-contact direct messages.
+- `ls -dms -r <number>`: List that many latest read saved-contact direct messages.
+- `mra`: Mark all unread saved-contact direct messages as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
 - `-v`: Print version and exit.
 - `-u`: Upgrade via the installer script.

@@ -3,6 +3,7 @@
 - `slack` is a minimal CLI for sending Slack direct messages as the authenticated user.
 - Keep the scope narrow: direct message send, contact management, DM listing, DM read-state actions, stale conversation cleanup, optional file delivery, version, and upgrade.
 - Do not expand this app into a general Slack client, channel browser, or interactive TUI without explicit user direction.
+- Treat saved contacts as the authoritative DM set for list/read-state operations unless the user explicitly asks otherwise.
 
 ## Interface Rules
 

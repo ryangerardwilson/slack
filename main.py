@@ -45,7 +45,7 @@ features:
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
-  # list unread direct messages or unread mentions
+  # list saved-contact direct messages
   # slack ls -dms [-ur|-r] <number>
   slack ls -dms 10
   slack ls -dms -ur 10
@@ -55,7 +55,7 @@ features:
   # slack sc
   slack sc
 
-  # mark all unread direct messages as read
+  # mark all unread saved-contact direct messages as read
   # slack mra
   slack mra
 """
@@ -619,98 +619,87 @@ def list_api(method, params, token):
     return items
 
 
-def list_dms(contacts, token, limit, filter_mode):
-    inverse_contacts = {email: label for label, email in contacts.items()}
-    user_cache = {}
-    info_cache = {}
-    rows = []
-    cursor = None
-    page_limit = max(50, min(200, limit * 5))
+def get_contact_dm_infos(contacts, token):
+    im_channels = list_api(
+        "users.conversations",
+        {"types": "im", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    user_to_channel = {}
+    for channel in im_channels:
+        user_id = channel.get("user")
+        channel_id = channel.get("id")
+        if user_id and channel_id:
+            user_to_channel[user_id] = channel_id
 
-    while True:
-        payload = {
-            "types": "im",
-            "exclude_archived": "true",
-            "limit": str(page_limit),
-        }
-        if cursor:
-            payload["cursor"] = cursor
-        data = slack_request(
-            "users.conversations",
-            payload,
+    infos = []
+    for label, email in contacts.items():
+        try:
+            user_id = lookup_user_id_by_email(email, token)
+        except SystemExit:
+            continue
+        channel_id = user_to_channel.get(user_id)
+        if not channel_id:
+            continue
+        info = slack_request(
+            "conversations.info",
+            {"channel": channel_id, "include_num_members": "false"},
             token,
             http_method="GET",
+        ).get("channel") or {}
+        infos.append(
+            {
+                "label": label,
+                "email": email,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "info": info,
+            }
         )
-        channels = data.get("channels") or []
-        for channel in channels:
-            channel_id = channel.get("id")
-            if not channel_id:
-                continue
+    return infos
 
-            if channel_id not in info_cache:
-                info_data = slack_request(
-                    "conversations.info",
-                    {"channel": channel_id, "include_num_members": "false"},
-                    token,
-                    http_method="GET",
-                )
-                info_cache[channel_id] = info_data.get("channel") or {}
 
-            info_channel = info_cache[channel_id]
-            unread = info_channel.get("unread_count_display") or info_channel.get(
-                "unread_count"
-            ) or 0
-            user_id = info_channel.get("user") or channel.get("user") or "-"
-            if user_id not in user_cache:
-                user_cache[user_id] = get_user_info(user_id, token)
-            user = user_cache[user_id]
-            profile = user.get("profile") or {}
-            email = profile.get("email") or "-"
-            if email == "-":
-                continue
-            is_unread = unread > 0
-            if filter_mode == "unread" and not is_unread:
-                continue
-            if filter_mode == "read" and is_unread:
-                continue
-            display_name = (
-                profile.get("display_name")
-                or profile.get("real_name")
-                or user.get("name")
-                or user_id
-            )
-            label = inverse_contacts.get(email, "-")
-            latest = info_channel.get("latest") or {}
-            latest_ts = latest.get("ts") if isinstance(latest, dict) else None
-            latest_text = (
-                compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
-            )
+def list_dms(contacts, token, limit, filter_mode):
+    rows = []
+    for contact_dm in get_contact_dm_infos(contacts, token):
+        info_channel = contact_dm["info"]
+        unread = info_channel.get("unread_count_display") or info_channel.get(
+            "unread_count"
+        ) or 0
+        is_unread = unread > 0
+        if filter_mode == "unread" and not is_unread:
+            continue
+        if filter_mode == "read" and is_unread:
+            continue
+        user = get_user_info(contact_dm["user_id"], token)
+        profile = user.get("profile") or {}
+        display_name = (
+            profile.get("display_name")
+            or profile.get("real_name")
+            or user.get("name")
+            or contact_dm["user_id"]
+        )
+        latest = info_channel.get("latest") or {}
+        latest_ts = latest.get("ts") if isinstance(latest, dict) else None
+        latest_text = (
+            compact_text(latest.get("text")) if isinstance(latest, dict) else "-"
+        )
 
-            rows.append(
-                {
-                    "sort_ts": float(extract_ts(info_channel)),
-                    "row": [
-                        ("label", label),
-                        ("name", display_name),
-                        ("email", email),
-                        ("dm_id", channel_id),
-                        ("user_id", user_id),
-                        ("unread", str(unread)),
-                        ("date", format_ts(latest_ts)),
-                        ("latest", latest_text),
-                    ],
-                }
-            )
-
-            if len(rows) >= limit:
-                break
-
-        if len(rows) >= limit:
-            break
-
-        cursor = ((data.get("response_metadata") or {}).get("next_cursor") or "").strip()
-        if not cursor:
-            break
+        rows.append(
+            {
+                "sort_ts": float(extract_ts(info_channel)),
+                "row": [
+                    ("label", contact_dm["label"]),
+                    ("name", display_name),
+                    ("email", contact_dm["email"]),
+                    ("dm_id", contact_dm["channel_id"]),
+                    ("user_id", contact_dm["user_id"]),
+                    ("unread", str(unread)),
+                    ("date", format_ts(latest_ts)),
+                    ("latest", latest_text),
+                ],
+            }
+        )
 
     if not rows:
         if filter_mode == "unread":
@@ -759,26 +748,12 @@ def summarize_reasons(reasons):
     return ",".join(reasons) if reasons else "-"
 
 
-def mark_all_unread_dms_as_read(token):
-    user_cache = {}
+def mark_all_unread_dms_as_read(contacts, token):
     rows = []
     marked = 0
 
-    channels = list_api(
-        "users.conversations",
-        {"types": "im", "exclude_archived": "true", "limit": "200"},
-        token,
-    )
-    for channel in channels:
-        channel_id = channel.get("id")
-        if not channel_id:
-            continue
-        info = slack_request(
-            "conversations.info",
-            {"channel": channel_id, "include_num_members": "false"},
-            token,
-            http_method="GET",
-        ).get("channel") or {}
+    for contact_dm in get_contact_dm_infos(contacts, token):
+        info = contact_dm["info"]
         unread = info.get("unread_count_display") or info.get("unread_count") or 0
         if unread <= 0:
             continue
@@ -788,31 +763,28 @@ def mark_all_unread_dms_as_read(token):
         if not latest_ts:
             continue
 
-        user_id = info.get("user") or channel.get("user") or "-"
-        if user_id not in user_cache:
-            user_cache[user_id] = get_user_info(user_id, token)
-        user = user_cache[user_id]
+        user = get_user_info(contact_dm["user_id"], token)
         profile = user.get("profile") or {}
         display_name = (
             profile.get("display_name")
             or profile.get("real_name")
             or user.get("name")
-            or user_id
+            or contact_dm["user_id"]
         )
-        email = profile.get("email") or "-"
 
         slack_request(
             "conversations.mark",
-            {"channel": channel_id, "ts": latest_ts},
+            {"channel": contact_dm["channel_id"], "ts": latest_ts},
             token,
             use_form=True,
         )
         marked += 1
         rows.append(
             [
+                ("label", contact_dm["label"]),
                 ("name", display_name),
-                ("email", email),
-                ("dm_id", channel_id),
+                ("email", contact_dm["email"]),
+                ("dm_id", contact_dm["channel_id"]),
                 ("unread", str(unread)),
                 ("date", format_ts(latest_ts)),
                 ("action", "marked_read"),
@@ -1033,7 +1005,7 @@ def main():
         raise SystemExit("Use: slack ls -dms [-ur|-r] <number>")
 
     if args["command"] == "mra":
-        mark_all_unread_dms_as_read(token)
+        mark_all_unread_dms_as_read(contacts, token)
         return
 
     if args["command"] == "sc":
