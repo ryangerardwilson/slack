@@ -51,12 +51,17 @@ features:
   # slack df <dm_id> <file_id> [output_path]
   slack df D0466D63H7B F0AH0LD4133
 
+  # open a DM, mark it read, show text, download files, and print code blocks
+  # slack o <dm_id>
+  slack o D0466D63H7B
+
   # list saved-contact direct message history with attached files
-  # slack ls [label] [-ur|-r] <number>
+  # slack ls [label] [-ur|-r] [-o] <number>
   slack ls 10
   slack ls md 10
   slack ls -ur 10
   slack ls md -r 10
+  slack ls md -o 5
 
   # list all registered contact labels
   # slack ls rc
@@ -156,6 +161,7 @@ def parse_args(argv):
         "output_path": None,
         "file_path": None,
         "dir_path": None,
+        "open_mode": False,
         "ls_label": None,
         "ls_registry": False,
         "ls_filter": "all",
@@ -229,33 +235,40 @@ def parse_args(argv):
             if len(remaining) == 3:
                 args["output_path"] = remaining[2]
             return args
+        if token == "o":
+            if len(remaining) != 1:
+                raise SystemExit("Use: slack o <dm_id>")
+            args["recipient"] = remaining[0]
+            args["open_mode"] = True
+            return args
         if token == "ls":
             if not remaining:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
             if remaining == ["rc"]:
                 args["ls_registry"] = True
                 return args
-            if len(remaining) == 1:
-                limit_token = remaining[0]
-            elif len(remaining) == 2:
-                if remaining[0] in ("-ur", "-r"):
-                    args["ls_filter"] = "unread" if remaining[0] == "-ur" else "read"
-                    limit_token = remaining[1]
-                else:
-                    args["ls_label"] = remaining[0]
-                    limit_token = remaining[1]
-            elif len(remaining) == 3:
-                args["ls_label"] = remaining[0]
-                if remaining[1] not in ("-ur", "-r"):
-                    raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
-                args["ls_filter"] = "unread" if remaining[1] == "-ur" else "read"
-                limit_token = remaining[2]
+            parts = list(remaining)
+            if "-o" in parts:
+                parts.remove("-o")
+                args["open_mode"] = True
+            filters = [item for item in parts if item in ("-ur", "-r")]
+            if len(filters) > 1:
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
+            if filters:
+                filter_token = filters[0]
+                args["ls_filter"] = "unread" if filter_token == "-ur" else "read"
+                parts.remove(filter_token)
+            if len(parts) == 1:
+                limit_token = parts[0]
+            elif len(parts) == 2:
+                args["ls_label"] = parts[0]
+                limit_token = parts[1]
             else:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
             try:
                 args["ls_limit"] = int(limit_token)
             except ValueError:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] <number>")
+                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
             if args["ls_limit"] <= 0:
                 raise SystemExit("Number must be greater than 0.")
             return args
@@ -268,7 +281,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls rc | slack ls [label] [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     return args
@@ -731,9 +744,268 @@ def get_contact_dm_infos(contacts, token):
     return infos
 
 
-def list_dms(contacts, token, limit, filter_mode, self_user_id):
-    rows = []
+def get_dm_info(channel_id, token):
+    info = slack_request(
+        "conversations.info",
+        {"channel": channel_id, "include_num_members": "false"},
+        token,
+        http_method="GET",
+    ).get("channel") or {}
+    user_id = info.get("user")
+    if not user_id:
+        raise SystemExit(f"Unable to resolve DM user for {channel_id}.")
+    user = get_user_info(user_id, token)
+    profile = user.get("profile") or {}
+    return {
+        "label": "-",
+        "email": profile.get("email") or "-",
+        "user_id": user_id,
+        "channel_id": channel_id,
+        "info": info,
+        "user": user,
+    }
+
+
+def _download_url_bytes(download_url, token):
+    with requests.get(
+        download_url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=120,
+        allow_redirects=True,
+    ) as response:
+        content_type = response.headers.get("content-type") or ""
+        if response.status_code != 200 or "text/html" in content_type:
+            raise SystemExit(
+                "Downloading files requires a token with file download access, typically files:read."
+            )
+        return response.content
+
+
+def _download_file_to_path(download_url, destination, token):
+    data = _download_url_bytes(download_url, token)
+    parent = os.path.dirname(destination)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(destination, "wb") as handle:
+        handle.write(data)
+
+
+def _snippet_text(file_payload, token):
+    download_url = file_payload.get("url_private_download")
+    if not download_url:
+        return "-"
+    data = _download_url_bytes(download_url, token)
+    return data.decode("utf-8", errors="replace")
+
+
+def _download_destination(dm_id, file_payload):
+    name = file_payload.get("name") or file_payload.get("title") or file_payload.get("id") or "attachment"
+    filename = f"{dm_id}-{file_payload.get('id')}-{name}"
+    return os.path.abspath(os.path.expanduser(filename))
+
+
+def _message_details(message, dm_id, token):
+    downloads = []
+    code_blocks = []
+    for file_payload in message.get("files") or []:
+        if file_payload.get("mode") == "snippet":
+            code_blocks.append(
+                {
+                    "id": file_payload.get("id") or "-",
+                    "name": file_payload.get("name") or "snippet",
+                    "text": _snippet_text(file_payload, token),
+                }
+            )
+            continue
+
+        download_url = file_payload.get("url_private_download")
+        if not download_url:
+            continue
+        destination = _download_destination(dm_id, file_payload)
+        _download_file_to_path(download_url, destination, token)
+        downloads.append(
+            {
+                "id": file_payload.get("id") or "-",
+                "name": file_payload.get("name") or "attachment",
+                "path": destination,
+            }
+        )
+    return downloads, code_blocks
+
+
+def _print_open_entries(entries, token):
+    for index, entry in enumerate(entries, start=1):
+        prefix = f"[{index}]"
+        print(prefix + ("-" * max(1, 79 - len(prefix))))
+        print(f"{'email':<8}: {entry['email']}")
+        print(f"{'dm_id':<8}: {entry['dm_id']}")
+        print(f"{'date':<8}: {format_ts(entry['message'].get('ts'))}")
+        text = (entry["message"].get("text") or "").rstrip()
+        print(f"{'text':<8}: {text if text else '-'}")
+
+        downloads, code_blocks = _message_details(entry["message"], entry["dm_id"], token)
+        if downloads:
+            for file_info in downloads:
+                print(f"{'file':<8}: {file_info['id']} {file_info['path']}")
+        else:
+            print(f"{'file':<8}: -")
+
+        if code_blocks:
+            for block in code_blocks:
+                print(f"{'code':<8}: {block['id']} {block['name']}")
+                print(block["text"])
+        else:
+            print(f"{'code':<8}: -")
+
+
+def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
+    entries = []
+    info_channel = contact_dm["info"]
+    last_read = info_channel.get("last_read") or "0"
+    try:
+        last_read_value = float(last_read)
+    except (TypeError, ValueError):
+        last_read_value = 0.0
+
+    cursor = None
+    matched = 0
+    while True:
+        history = slack_request(
+            "conversations.history",
+            {
+                "channel": contact_dm["channel_id"],
+                "limit": str(max(20, limit * 3)),
+                **({"cursor": cursor} if cursor else {}),
+            },
+            token,
+            http_method="GET",
+        )
+        messages = history.get("messages") or []
+        for message in messages:
+            ts = message.get("ts")
+            if not ts:
+                continue
+            try:
+                ts_value = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if message.get("user") == self_user_id:
+                continue
+            is_unread = ts_value > last_read_value
+            if filter_mode == "unread" and not is_unread:
+                continue
+            if filter_mode == "read" and is_unread:
+                continue
+
+            entries.append(
+                {
+                    "sort_ts": ts_value,
+                    "email": contact_dm["email"],
+                    "dm_id": contact_dm["channel_id"],
+                    "message": message,
+                }
+            )
+            matched += 1
+            if matched >= limit:
+                break
+
+        if matched >= limit:
+            break
+
+        cursor = (
+            (history.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+
+    return entries
+
+
+def list_dms(contacts, token, limit, filter_mode, self_user_id, open_mode):
+    entries = []
     for contact_dm in get_contact_dm_infos(contacts, token):
+        entries.extend(_collect_messages(contact_dm, token, limit, filter_mode, self_user_id))
+
+    if not entries:
+        if filter_mode == "unread":
+            print("No unread DMs.")
+        elif filter_mode == "read":
+            print("No read DMs.")
+        else:
+            print("No DMs.")
+        return
+
+    entries.sort(key=lambda item: item["sort_ts"], reverse=True)
+    selected = entries[:limit]
+    selected.sort(key=lambda item: item["sort_ts"])
+
+    if open_mode:
+        _print_open_entries(selected, token)
+        return
+
+    print_sections(
+        [
+            [
+                ("email", item["email"]),
+                ("dm_id", item["dm_id"]),
+                ("date", format_ts(item["message"].get("ts"))),
+            ]
+            for item in selected
+        ]
+    )
+
+
+def open_dm_messages(dm_id, token, self_user_id):
+    contact_dm = get_dm_info(dm_id, token)
+    info = contact_dm["info"]
+    last_read = info.get("last_read") or "0"
+    try:
+        last_read_value = float(last_read)
+    except (TypeError, ValueError):
+        last_read_value = 0.0
+
+    history = slack_request(
+        "conversations.history",
+        {"channel": dm_id, "limit": "200"},
+        token,
+        http_method="GET",
+    )
+    external = []
+    for message in history.get("messages") or []:
+        ts = message.get("ts")
+        if not ts or message.get("user") == self_user_id:
+            continue
+        try:
+            ts_value = float(ts)
+        except (TypeError, ValueError):
+            continue
+        external.append(
+            {
+                "sort_ts": ts_value,
+                "email": contact_dm["email"],
+                "dm_id": dm_id,
+                "message": message,
+                "unread": ts_value > last_read_value,
+            }
+        )
+
+    if not external:
+        print("No DM messages.")
+        return
+
+    unread = [item for item in external if item["unread"]]
+    selected = unread if unread else [max(external, key=lambda item: item["sort_ts"])]
+    selected.sort(key=lambda item: item["sort_ts"])
+    _print_open_entries(selected, token)
+
+    latest_ts = selected[-1]["message"].get("ts")
+    if latest_ts:
+        slack_request(
+            "conversations.mark",
+            {"channel": dm_id, "ts": latest_ts},
+            token,
+            use_form=True,
+        )
         info_channel = contact_dm["info"]
         last_read = info_channel.get("last_read") or "0"
         try:
@@ -918,26 +1190,7 @@ def download_dm_file(dm_id, file_id, output_path, token):
 
                 destination = output_path or filename
                 destination = os.path.expanduser(destination)
-                parent = os.path.dirname(destination)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-
-                with requests.get(
-                    download_url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    stream=True,
-                    timeout=120,
-                    allow_redirects=True,
-                ) as response:
-                    content_type = response.headers.get("content-type") or ""
-                    if response.status_code != 200 or "text/html" in content_type:
-                        raise SystemExit(
-                            "Downloading files requires a token with file download access, typically files:read."
-                        )
-                    with open(destination, "wb") as handle:
-                        for chunk in response.iter_content(chunk_size=65536):
-                            if chunk:
-                                handle.write(chunk)
+                _download_file_to_path(download_url, destination, token)
 
                 print(f"downloaded dm_id={dm_id} file_id={file_id} path={destination}")
                 return
@@ -1096,6 +1349,7 @@ def main():
             or args["email"]
             or args["file_path"]
             or args["dir_path"]
+            or args["open_mode"]
             or args["ls_label"]
         ):
             raise SystemExit("Use -u by itself to upgrade.")
@@ -1164,8 +1418,20 @@ def main():
                 raise SystemExit(f"Unknown contact label: {args['ls_label']}")
             list_contacts = {args["ls_label"]: contacts[args["ls_label"]]}
         list_dms(
-            list_contacts, token, args["ls_limit"], args["ls_filter"], self_user_id
+            list_contacts,
+            token,
+            args["ls_limit"],
+            args["ls_filter"],
+            self_user_id,
+            args["open_mode"],
         )
+        return
+
+    if args["command"] == "o":
+        self_user_id = auth_data.get("user_id")
+        if not self_user_id:
+            raise SystemExit("Unable to determine the current Slack user.")
+        open_dm_messages(args["recipient"], token, self_user_id)
         return
 
     if args["command"] == "mra":
@@ -1182,7 +1448,7 @@ def main():
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack ls rc | slack ls [label] [-ur|-r] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

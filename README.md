@@ -66,7 +66,14 @@ python main.py ls 10
 python main.py ls md 10
 python main.py ls -ur 10
 python main.py ls md -r 10
+python main.py ls md -o 5
 python main.py ls rc
+```
+
+Open a DM, mark it read, show text, download attachments, and print snippet code blocks:
+
+```bash
+python main.py o D0466D63H7B
 ```
 
 Clear stale conversations and bot-like conversations:
@@ -104,12 +111,14 @@ Example:
 - `ac`: Save a contact label for an email address.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `ls <number>`: List that many latest saved-contact DM messages across all saved labels, oldest first and latest last, with attached file ids.
+- `o <dm_id>`: Open a DM, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
+- `ls <number>`: List that many latest saved-contact DM messages across all saved labels, showing only email, dm id, and date.
 - `ls <label> <number>`: List that many latest saved-contact DM messages for one saved label.
 - `ls -ur <number>`: List that many latest unread saved-contact DM messages across all saved labels.
 - `ls <label> -ur <number>`: List that many latest unread saved-contact DM messages for one saved label.
 - `ls -r <number>`: List that many latest read saved-contact DM messages across all saved labels.
 - `ls <label> -r <number>`: List that many latest read saved-contact DM messages for one saved label.
+- `ls ... -o ...`: For the selected messages, also print full text, download non-snippet attachments, and print full snippet code blocks.
 - `ls rc`: List all registered contact labels and emails from local config.
 - `mra`: Mark all unread saved-contact direct messages as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
