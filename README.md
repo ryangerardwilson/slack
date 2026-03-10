@@ -2,6 +2,22 @@
 
 Minimal CLI to save Slack contacts and send direct messages as yourself.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh | bash
+```
+
+Canonical installer commands:
+
+```bash
+slack -h
+slack -v
+slack -u
+```
+
+`slack -v` prints the installed app version from the single release version source in `_version.py`.
+
 ## Setup
 
 Create a local venv and install dependencies:
@@ -26,60 +42,66 @@ Recommended for `df`: `files:read`.
 Show help:
 
 ```bash
-python main.py -h
+slack -h
 ```
 
 Add a contact:
 
 ```bash
-python main.py ac mom mom@example.com
+slack ac mom mom@example.com
+```
+
+Open the real config file in your editor:
+
+```bash
+slack cfg
 ```
 
 Send a DM by saved contact label:
 
 ```bash
-python main.py dm mom "hello"
+slack dm mom "hello"
 ```
 
 Send a DM by email:
 
 ```bash
-python main.py dm someone@company.com "hello"
+slack dm someone@company.com "hello"
 ```
 
 Send a DM with a file:
 
 ```bash
-python main.py dm boss@company.com "latest draft" ~/Downloads/draft.pdf
+slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
 ```
 
 Send a DM with a file and a directory zipped on the fly:
 
 ```bash
-python main.py dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
+slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 ```
 
 List saved-contact DM history, including attached file ids:
 
 ```bash
-python main.py ls 10
-python main.py ls md 10
-python main.py ls -ur 10
-python main.py ls md -r 10
-python main.py ls md -o 5
-python main.py ls rc
+slack ls 10
+slack ls md 10
+slack ls -ur 10
+slack ls md -r 10
+slack ls md -o 5
+slack ls rc
 ```
 
 Open a DM, mark it read, show text, download attachments, and print snippet code blocks:
 
 ```bash
-python main.py o D0466D63H7B
+slack o D0466D63H7B
 ```
 
 Clear stale conversations and bot-like conversations:
 
 ```bash
-python main.py sc
+slack sc
 ```
 
 `sc` closes DMs whose counterpart has no email or whose latest activity is older than about 6 months. It also leaves joined public channels whose creator has no email or whose channel update time is older than about 6 months. Private channels and group DMs are skipped when the token lacks the required scopes.
@@ -87,7 +109,7 @@ python main.py sc
 Mark all unread DMs as read:
 
 ```bash
-python main.py mra
+slack mra
 ```
 
 `ls ...` and `mra` only operate on contacts you have saved with `ac`.
@@ -95,6 +117,12 @@ python main.py mra
 ## Contacts
 
 Contacts are stored in `~/.config/slack/config.json`.
+
+Open that file directly with:
+
+```bash
+slack cfg
+```
 
 Example:
 
@@ -109,6 +137,7 @@ Example:
 ## Options
 
 - `ac`: Save a contact label for an email address.
+- `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
 - `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
 - `o <dm_id>`: Open a DM, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
@@ -126,10 +155,13 @@ Example:
 - `-u`: Upgrade via the installer script.
 - `-h`: Show help.
 
-## Install
+## Development
+
+Run from source while developing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh | bash
+python main.py -h
+python main.py -v
 ```
 
 The installer downloads the latest release binary into `~/.slack/app`.

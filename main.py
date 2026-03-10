@@ -11,12 +11,7 @@ from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import requests
-
-try:
-    from _version import __version__
-except Exception:
-    __version__ = "0.0.0"
+from _version import __version__
 
 
 INSTALL_URL = "https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh"
@@ -29,33 +24,37 @@ HELP_TEXT = """Slack CLI
 
 flags:
   slack -h
-  # show this help
+    show this help
   slack -v
-  # print the installed version
+    print the installed version
   slack -u
-  # upgrade to the latest release
+    upgrade to the latest release
 
 features:
-  # save a contact label
+  save a contact label for a frequently used Slack recipient
   # slack ac <label> <email>
   slack ac mom mom@example.com
   slack ac boss boss@company.com
 
-  # send a direct message, with an optional file and optional zipped directory
+  edit the saved-contact config directly in your editor
+  # slack cfg
+  slack cfg
+
+  send a direct message, with an optional file and optional zipped directory
   # slack dm <contact_label|email> <message> [file_path] [dir_path]
   slack dm mom "hello"
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
   slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
 
-  # download a file attachment from a DM by dm_id and file_id
+  download a file attachment from a DM by dm_id and file_id
   # slack df <dm_id> <file_id> [output_path]
   slack df D0466D63H7B F0AH0LD4133
 
-  # open a DM, mark it read, show text, download files, and print code blocks
+  open a DM, mark it read, show text, download files, and print code blocks
   # slack o <dm_id>
   slack o D0466D63H7B
 
-  # list saved-contact direct message history with attached files
+  list saved-contact direct message history with attached files
   # slack ls [label] [-ur|-r] [-o] <number>
   slack ls 10
   slack ls md 10
@@ -63,15 +62,15 @@ features:
   slack ls md -r 10
   slack ls md -o 5
 
-  # list all registered contact labels
+  list all registered contact labels
   # slack ls rc
   slack ls rc
 
-  # clear stale conversations and bot-like conversations
+  clear stale conversations and bot-like conversations
   # slack sc
   slack sc
 
-  # mark all unread saved-contact direct messages as read
+  mark all unread saved-contact direct messages as read
   # slack mra
   slack mra
 """
@@ -150,6 +149,12 @@ def print_help():
     print(style_help(HELP_TEXT.rstrip()))
 
 
+def _requests():
+    import requests
+
+    return requests
+
+
 def parse_args(argv):
     args = {
         "command": None,
@@ -199,7 +204,9 @@ def parse_args(argv):
             raise SystemExit(f"Unknown flag: {token}")
 
         if args["command"] is not None:
-            raise SystemExit("Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path]")
+            raise SystemExit(
+                "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+            )
 
         args["command"] = token
         remaining = argv[index + 1 :]
@@ -207,6 +214,10 @@ def parse_args(argv):
             if len(remaining) != 2:
                 raise SystemExit("Use: slack ac <label> <email>")
             args["label"], args["email"] = remaining
+            return args
+        if token == "cfg":
+            if remaining:
+                raise SystemExit("Use: slack cfg")
             return args
         if token == "dm":
             if len(remaining) < 2 or len(remaining) > 4:
@@ -281,7 +292,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     return args
@@ -353,39 +364,31 @@ def _get_latest_version(timeout=5.0):
 
 def _run_upgrade():
     try:
-        curl = subprocess.Popen(
-            ["curl", "-fsSL", INSTALL_URL],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        print("Upgrade requires curl", file=sys.stderr)
+        with urlopen(INSTALL_URL, timeout=30) as response:
+            script_body = response.read()
+    except (URLError, HTTPError, TimeoutError) as exc:
+        print(f"Unable to download installer: {exc}", file=sys.stderr)
         return 1
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix="-slack-install.sh") as handle:
+        handle.write(script_body)
+        script_path = handle.name
 
     try:
-        bash = subprocess.Popen(["bash"], stdin=curl.stdout)
-        if curl.stdout is not None:
-            curl.stdout.close()
+        os.chmod(script_path, 0o700)
+        result = subprocess.run(
+            ["bash", script_path, "-u"],
+            check=False,
+        )
+        return result.returncode
     except FileNotFoundError:
         print("Upgrade requires bash", file=sys.stderr)
-        curl.terminate()
-        curl.wait()
         return 1
-
-    bash_rc = bash.wait()
-    curl_rc = curl.wait()
-
-    if curl_rc != 0:
-        stderr = (
-            curl.stderr.read().decode("utf-8", errors="replace")
-            if curl.stderr
-            else ""
-        )
-        if stderr:
-            sys.stderr.write(stderr)
-        return curl_rc
-
-    return bash_rc
+    finally:
+        try:
+            os.remove(script_path)
+        except OSError:
+            pass
 
 
 def read_from_editor():
@@ -393,11 +396,7 @@ def read_from_editor():
         temp_path = tmp.name
 
     try:
-        editor = os.getenv("VISUAL") or os.getenv("EDITOR") or "vim"
-        editor = editor.strip()
-        editor_cmd = shlex.split(editor) if editor else ["vim"]
-        if not editor_cmd:
-            editor_cmd = ["vim"]
+        editor_cmd = resolve_editor_cmd()
         try:
             subprocess.run(editor_cmd + [temp_path], check=False)
         except FileNotFoundError:
@@ -415,6 +414,31 @@ def read_from_editor():
             pass
 
 
+def resolve_editor_cmd():
+    editor = os.getenv("VISUAL") or os.getenv("EDITOR") or "vim"
+    editor = editor.strip()
+    editor_cmd = shlex.split(editor) if editor else ["vim"]
+    if not editor_cmd:
+        editor_cmd = ["vim"]
+    return editor_cmd
+
+
+def open_config_in_editor(config_path):
+    directory = os.path.dirname(config_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    if not os.path.exists(config_path):
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+
+    editor_cmd = resolve_editor_cmd()
+    try:
+        subprocess.run(editor_cmd + [config_path], check=False)
+    except FileNotFoundError:
+        raise SystemExit(f"Editor not found: {editor_cmd[0]}")
+    print(f"Opened config: {config_path}")
+
+
 def resolve_token():
     token = get_env("SLACK_TOKEN")
     if not token:
@@ -427,6 +451,7 @@ def resolve_token():
 
 
 def slack_request(method, payload, token, use_form=False, http_method="POST"):
+    requests = _requests()
     url = f"https://slack.com/api/{method}"
     headers = {"Authorization": f"Bearer {token}"}
     if http_method == "GET":
@@ -568,6 +593,7 @@ def zip_directory(dir_path):
 
 
 def _upload_external_file(channel_id, thread_ts, path, filename, token):
+    requests = _requests()
     file_size = os.path.getsize(path)
     upload_data = slack_request(
         "files.getUploadURLExternal",
@@ -804,6 +830,7 @@ def get_dm_info(channel_id, token):
 
 
 def _download_url_bytes(download_url, token):
+    requests = _requests()
     with requests.get(
         download_url,
         headers={"Authorization": f"Bearer {token}"},
@@ -1370,8 +1397,8 @@ def clear_stale_conversations(token):
     )
 
 
-def main():
-    args = parse_args(sys.argv[1:])
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
 
     if args["version"]:
         print(__version__)
@@ -1400,22 +1427,20 @@ def main():
             rc = _run_upgrade()
             sys.exit(rc)
 
-        if (
-            __version__
-            and __version__ != "0.0.0"
-            and not _is_version_newer(latest, __version__)
-        ):
+        if not _is_version_newer(latest, __version__):
             print(f"Already running the latest version ({__version__}).")
             sys.exit(0)
 
-        if __version__ and __version__ != "0.0.0":
-            print(f"Upgrading from {__version__} to {latest}…")
-        else:
-            print(f"Upgrading to {latest}…")
+        print(f"Upgrading from {__version__} to {latest}…")
         rc = _run_upgrade()
         sys.exit(rc)
 
     config_path = get_config_path(args["config"])
+
+    if args["command"] == "cfg":
+        open_config_in_editor(config_path)
+        return
+
     config = load_config(config_path)
     contacts = normalize_contacts(config)
 
@@ -1485,7 +1510,7 @@ def main():
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

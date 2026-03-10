@@ -8,7 +8,7 @@
 
 ## Interface Rules
 
-- Keep the top-level interface flat: `slack ac <label> <email>`, `slack dm <contact_label|email> <message> [file_path] [dir_path]`, `slack ls -dms [-ur|-r] <number>`, `slack mra`, and `slack sc`.
+- Keep the top-level interface flat: `slack ac <label> <email>`, `slack cfg`, `slack dm <contact_label|email> <message> [file_path] [dir_path]`, `slack df <dm_id> <file_id> [output_path]`, `slack o <dm_id>`, `slack ls [label] [-ur|-r] [-o] <number>`, `slack ls rc`, `slack mra`, and `slack sc`.
 - Treat short flags as canonical. `-h`, `-v`, and `-u` are reserved for help, version, and upgrade.
 - `slack` with no args must print the same help as `slack -h`.
 - Help output must stay human-written, compact, and styled in muted gray only on real TTYs.
