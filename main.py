@@ -37,8 +37,8 @@ features:
   slack ac boss boss@company.com
 
   edit the saved-contact config directly in your editor
-  # slack cfg
-  slack cfg
+  # slack conf
+  slack conf
 
   send a direct message, with an optional file and optional zipped directory
   # slack dm <contact_label|email> <message> [file_path] [dir_path]
@@ -205,7 +205,7 @@ def parse_args(argv):
 
         if args["command"] is not None:
             raise SystemExit(
-                "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+                "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path]"
             )
 
         args["command"] = token
@@ -215,9 +215,9 @@ def parse_args(argv):
                 raise SystemExit("Use: slack ac <label> <email>")
             args["label"], args["email"] = remaining
             return args
-        if token == "cfg":
+        if token in {"cfg", "conf"}:
             if remaining:
-                raise SystemExit("Use: slack cfg")
+                raise SystemExit("Use: slack conf")
             return args
         if token == "dm":
             if len(remaining) < 2 or len(remaining) > 4:
@@ -292,7 +292,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     return args
@@ -1437,7 +1437,7 @@ def main(argv=None):
 
     config_path = get_config_path(args["config"])
 
-    if args["command"] == "cfg":
+    if args["command"] in {"cfg", "conf"}:
         open_config_in_editor(config_path)
         return
 
@@ -1510,7 +1510,7 @@ def main(argv=None):
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack cfg | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)
