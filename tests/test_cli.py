@@ -123,6 +123,63 @@ class CliContractTests(unittest.TestCase):
             self.assertFalse(recorded["check"])
             self.assertIn(str(config_path), stdout.getvalue())
 
+    def test_dm_accepts_multiple_attachment_paths(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(
+            [
+                "dm",
+                "ar",
+                "hello",
+                "/tmp/file1.csv",
+                "/tmp/folder",
+                "/tmp/file2.csv",
+            ]
+        )
+
+        self.assertEqual(parsed["command"], "dm")
+        self.assertEqual(parsed["recipient"], "ar")
+        self.assertEqual(parsed["message"], "hello")
+        self.assertEqual(
+            parsed["paths"],
+            ["/tmp/file1.csv", "/tmp/folder", "/tmp/file2.csv"],
+        )
+
+    def test_send_attachments_uploads_all_files_and_directories(self):
+        module = load_main_module()
+        recorded = []
+
+        def fake_upload(channel_id, thread_ts, path, filename, token):
+            recorded.append((channel_id, thread_ts, path, filename, token))
+            return f"id-{filename}"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            file_one = temp_path / "one.csv"
+            file_two = temp_path / "two.csv"
+            folder = temp_path / "export"
+            nested = folder / "nested.txt"
+            file_one.write_text("a\n", encoding="utf-8")
+            file_two.write_text("b\n", encoding="utf-8")
+            folder.mkdir()
+            nested.write_text("c\n", encoding="utf-8")
+
+            with mock.patch.object(module, "_upload_external_file", side_effect=fake_upload):
+                uploaded = module.send_attachments(
+                    "C123",
+                    "123.456",
+                    [str(file_one), str(folder), str(file_two)],
+                    "token",
+                )
+
+        self.assertEqual(uploaded[0], "one.csv")
+        self.assertEqual(uploaded[1], "export.zip")
+        self.assertEqual(uploaded[2], "two.csv")
+        self.assertEqual(len(recorded), 3)
+        self.assertEqual(recorded[0][3], "one.csv")
+        self.assertEqual(recorded[1][3], "export.zip")
+        self.assertEqual(recorded[2][3], "two.csv")
+
 
 if __name__ == "__main__":
     unittest.main()

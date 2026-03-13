@@ -16,7 +16,7 @@ slack -v
 slack -u
 ```
 
-`slack -v` prints the installed app version from the single release version source in `_version.py`.
+`slack -v` prints the installed app version from `_version.py`. Source checkouts may keep a placeholder value until release automation stamps the shipped artifact.
 
 ## Setup
 
@@ -75,10 +75,16 @@ Send a DM with a file:
 slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
 ```
 
-Send a DM with a file and a directory zipped on the fly:
+Send a DM with multiple files:
 
 ```bash
-slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
+slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf ~/Downloads/summary.txt
+```
+
+Send a DM with files and directories zipped on the fly:
+
+```bash
+slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
 ```
 
 List saved-contact DM history, including attached file ids:
@@ -138,7 +144,7 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `dm`: Send a DM to a saved contact label or email, with an optional file and optional zipped directory.
+- `dm`: Send a DM to a saved contact label or email, with any number of file or directory attachments. Directories are zipped on the fly.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
 - `o <dm_id>`: Open a DM, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
 - `ls <number>`: List that many latest saved-contact DM messages across all saved labels, showing only email, dm id, and date.

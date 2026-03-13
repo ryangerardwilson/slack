@@ -40,11 +40,11 @@ features:
   # slack conf
   slack conf
 
-  send a direct message, with an optional file and optional zipped directory
-  # slack dm <contact_label|email> <message> [file_path] [dir_path]
+  send a direct message, with any number of file or directory attachments
+  # slack dm <contact_label|email> <message> [path...]
   slack dm mom "hello"
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
-  slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export
+  slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
 
   download a file attachment from a DM by dm_id and file_id
   # slack df <dm_id> <file_id> [output_path]
@@ -164,8 +164,7 @@ def parse_args(argv):
         "message": None,
         "file_id": None,
         "output_path": None,
-        "file_path": None,
-        "dir_path": None,
+        "paths": [],
         "open_mode": False,
         "ls_label": None,
         "ls_registry": False,
@@ -205,7 +204,7 @@ def parse_args(argv):
 
         if args["command"] is not None:
             raise SystemExit(
-                "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path]"
+                "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...]"
             )
 
         args["command"] = token
@@ -220,23 +219,13 @@ def parse_args(argv):
                 raise SystemExit("Use: slack conf")
             return args
         if token == "dm":
-            if len(remaining) < 2 or len(remaining) > 4:
+            if len(remaining) < 2:
                 raise SystemExit(
-                    "Use: slack dm <contact_label|email> <message> [file_path] [dir_path]"
+                    "Use: slack dm <contact_label|email> <message> [path...]"
                 )
             args["recipient"] = remaining[0]
             args["message"] = remaining[1]
-            extra_paths = remaining[2:]
-            for path in extra_paths:
-                expanded = os.path.expanduser(path)
-                if os.path.isdir(expanded):
-                    if args["dir_path"] is not None:
-                        raise SystemExit("Use at most one directory path.")
-                    args["dir_path"] = path
-                else:
-                    if args["file_path"] is not None:
-                        raise SystemExit("Use at most one file path.")
-                    args["file_path"] = path
+            args["paths"] = remaining[2:]
             return args
         if token == "df":
             if len(remaining) < 2 or len(remaining) > 3:
@@ -292,7 +281,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     return args
@@ -629,28 +618,30 @@ def _upload_external_file(channel_id, thread_ts, path, filename, token):
     return file_id
 
 
-def send_attachments(channel_id, thread_ts, file_path, dir_path, token):
+def send_attachments(channel_id, thread_ts, paths, token):
     uploaded = []
+    temporary_archives = []
 
-    if file_path:
-        expanded = expand_existing_path(file_path, "file")
-        filename = os.path.basename(expanded)
-        file_id = _upload_external_file(
-            channel_id, thread_ts, expanded, filename, token
-        )
-        uploaded.append(filename)
-
-    archive_path = None
-    archive_name = None
     try:
-        if dir_path:
-            archive_path, archive_name = zip_directory(dir_path)
-            file_id = _upload_external_file(
-                channel_id, thread_ts, archive_path, archive_name, token
+        for path in paths:
+            expanded = os.path.expanduser(path)
+            if os.path.isdir(expanded):
+                archive_path, archive_name = zip_directory(path)
+                temporary_archives.append(archive_path)
+                _upload_external_file(
+                    channel_id, thread_ts, archive_path, archive_name, token
+                )
+                uploaded.append(archive_name)
+                continue
+
+            expanded = expand_existing_path(path, "file")
+            filename = os.path.basename(expanded)
+            _upload_external_file(
+                channel_id, thread_ts, expanded, filename, token
             )
-            uploaded.append(archive_name)
+            uploaded.append(filename)
     finally:
-        if archive_path:
+        for archive_path in temporary_archives:
             try:
                 os.remove(archive_path)
             except OSError:
@@ -1411,8 +1402,7 @@ def main(argv=None):
             or args["message"]
             or args["label"]
             or args["email"]
-            or args["file_path"]
-            or args["dir_path"]
+            or args["paths"]
             or args["open_mode"]
             or args["ls_label"]
         ):
@@ -1510,15 +1500,13 @@ def main(argv=None):
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [file_path] [dir_path] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)
     user_id = lookup_user_id_by_email(recipient_email, token)
     channel_id, ts = send_dm(token, user_id, args["message"])
-    uploaded = send_attachments(
-        channel_id, ts, args["file_path"], args["dir_path"], token
-    )
+    uploaded = send_attachments(channel_id, ts, args["paths"], token)
 
     if uploaded:
         print(
