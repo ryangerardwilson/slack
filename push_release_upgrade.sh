@@ -92,7 +92,10 @@ release_is_published() {
   if command -v gh >/dev/null 2>&1; then
     gh release view "v${version}" -R "$REPO_SLUG" >/dev/null 2>&1 && return 0
   fi
-  curl -fsSLo /dev/null "https://github.com/${REPO_SLUG}/releases/tag/v${version}" >/dev/null 2>&1
+  curl -fsS \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO_SLUG}/releases/tags/v${version}" \
+    >/dev/null 2>&1
 }
 
 wait_for_release() {
