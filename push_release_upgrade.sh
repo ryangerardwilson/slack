@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 APP=""
 REMOTE="origin"
+REPO_SLUG=""
 POLL_ATTEMPTS=60
 POLL_INTERVAL_SECONDS=5
 
@@ -42,6 +43,26 @@ current_branch() {
   git symbolic-ref --quiet --short HEAD || true
 }
 
+remote_repo_slug() {
+  local remote_url
+  remote_url="$(git remote get-url "$REMOTE")"
+  remote_url="${remote_url%.git}"
+  case "$remote_url" in
+    git@github.com:*)
+      printf '%s\n' "${remote_url#git@github.com:}"
+      ;;
+    https://github.com/*)
+      printf '%s\n' "${remote_url#https://github.com/}"
+      ;;
+    http://github.com/*)
+      printf '%s\n' "${remote_url#http://github.com/}"
+      ;;
+    *)
+      die "Unsupported remote URL for ${REMOTE}: ${remote_url}"
+      ;;
+  esac
+}
+
 latest_remote_version() {
   git ls-remote --tags --refs "$REMOTE" 'v*' \
     | awk '{print $2}' \
@@ -64,19 +85,37 @@ next_patch_version() {
   echo "${major}.${minor}.$((patch + 1))"
 }
 
+release_is_published() {
+  local version="$1"
+  if command -v gh >/dev/null 2>&1; then
+    gh release view "v${version}" -R "$REPO_SLUG" >/dev/null 2>&1 && return 0
+  fi
+  curl -fsSLo /dev/null "https://github.com/${REPO_SLUG}/releases/tag/v${version}" >/dev/null 2>&1
+}
+
 wait_for_release() {
   local version="$1"
-  local published=""
   local attempt
   for ((attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1)); do
-    published="$(./install.sh -v 2>/dev/null || true)"
-    published="${published#v}"
-    if [[ "$published" == "$version" ]]; then
+    if release_is_published "$version"; then
       return 0
     fi
     sleep "$POLL_INTERVAL_SECONDS"
   done
   die "Timed out waiting for GitHub release v${version} to become latest"
+}
+
+run_local_tests() {
+  if [[ -d "tests" ]]; then
+    python3 -m pytest tests
+  else
+    info "No tests/ directory; skipping local tests."
+  fi
+}
+
+install_requested_release() {
+  local version="$1"
+  bash ./install.sh -v "$version"
 }
 
 verify_installed_version() {
@@ -106,6 +145,7 @@ main() {
   require_command python3
 
   APP="$(basename "$ROOT_DIR")"
+  REPO_SLUG="$(remote_repo_slug)"
 
   [[ -f "install.sh" ]] || die "install.sh not found in $ROOT_DIR"
   [[ -f ".github/workflows/release.yml" ]] || die "release workflow not found"
@@ -119,7 +159,7 @@ main() {
   require_clean_tree
 
   info "Running local tests..."
-  python3 -m pytest tests
+  run_local_tests
 
   info "Pushing ${branch}..."
   git push "$REMOTE" "HEAD:${branch}"
@@ -145,7 +185,7 @@ main() {
   wait_for_release "$next_version"
 
   info "Upgrading installed ${APP}..."
-  ./install.sh -u
+  install_requested_release "$next_version"
   verify_installed_version "$next_version"
 
   info "Released and upgraded ${APP} ${next_version}"
