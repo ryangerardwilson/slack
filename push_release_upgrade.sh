@@ -9,6 +9,8 @@ REMOTE="origin"
 REPO_SLUG=""
 POLL_ATTEMPTS=60
 POLL_INTERVAL_SECONDS=5
+INSTALL_ATTEMPTS=12
+INSTALL_RETRY_INTERVAL_SECONDS=10
 
 usage() {
   cat <<'EOF'
@@ -115,7 +117,19 @@ run_local_tests() {
 
 install_requested_release() {
   local version="$1"
-  bash ./install.sh -v "$version"
+  local attempt
+  local rc
+  for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt += 1)); do
+    if bash ./install.sh -v "$version"; then
+      return 0
+    fi
+    rc=$?
+    if (( attempt == INSTALL_ATTEMPTS )); then
+      return "$rc"
+    fi
+    info "Install artifact for ${APP} ${version} not ready yet; retrying (${attempt}/${INSTALL_ATTEMPTS})..."
+    sleep "$INSTALL_RETRY_INTERVAL_SECONDS"
+  done
 }
 
 verify_installed_version() {
