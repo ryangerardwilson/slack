@@ -1,3 +1,9 @@
+## Workspace Defaults
+
+- Follow `/home/ryan/Documents/agent_context/CLI_TUI_STYLE_GUIDE.md` for CLI/TUI taste and help shape.
+- Follow `/home/ryan/Documents/agent_context/CANONICAL_REFERENCE_IMPLEMENTATION_FOR_CLI_AND_TUI_APPS.md` for executable contract details such as `-h`, `-v`, `-u`, installer behavior, release workflow expectations, and regression expectations.
+- This file only records `slack`-specific constraints or durable deviations.
+
 ## Product Boundaries
 
 - `slack` is a minimal CLI for sending Slack direct messages as the authenticated user.
