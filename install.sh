@@ -55,13 +55,21 @@ normalize_version() {
   printf '%s\n' "$version"
 }
 
+get_latest_version_from_redirect() {
+  curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" \
+    | sed -n 's#.*/releases/tag/v\([^/?#[:space:]]*\).*#\1#p' \
+    | head -n 1
+}
+
 get_latest_version() {
-  local latest
-  latest="$(
-    curl -fsSL "$LATEST_RELEASE_API" \
-      | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' \
-      | head -n 1
-  )"
+  local latest=""
+  if command -v gh >/dev/null 2>&1; then
+    latest="$(gh release view --repo "${REPO}" --json tagName --jq '.tagName' 2>/dev/null || true)"
+    latest="$(normalize_version "$latest")"
+  fi
+  if [[ -z "$latest" ]]; then
+    latest="$(get_latest_version_from_redirect || true)"
+  fi
   [[ -n "$latest" ]] || {
     print_message error "Unable to determine the latest release version"
     exit 1
