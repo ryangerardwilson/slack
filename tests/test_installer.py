@@ -43,7 +43,7 @@ class InstallerContractTests(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     if [[ "$*" == *"releases/latest"* ]]; then
-                      printf '%s\n' '{"tag_name":"v9.8.7"}'
+                      printf '%s' 'https://github.com/ryangerardwilson/slack/releases/tag/v9.8.7'
                       exit 0
                     fi
                     echo "unexpected curl invocation: $*" >&2
@@ -111,7 +111,7 @@ class InstallerContractTests(unittest.TestCase):
             result = self.run_installer(temp_home, fake_bin, "-u", "-b", "/tmp/slack", "--no-modify-path")
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Do not combine -u with -b.", result.stdout)
+            self.assertIn("-u cannot be used with -b", result.stdout)
 
 
 if __name__ == "__main__":

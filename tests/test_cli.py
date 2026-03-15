@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,10 @@ from unittest import mock
 APP_DIR = Path(__file__).resolve().parents[1]
 MAIN_PATH = APP_DIR / "main.py"
 VERSION_PATH = APP_DIR / "_version.py"
+CONTRACT_SRC = APP_DIR.parent / "rgw_cli_contract" / "src"
+
+sys.path.insert(0, str(APP_DIR))
+sys.path.insert(0, str(CONTRACT_SRC))
 
 
 def load_main_module():
@@ -29,12 +34,19 @@ def load_version():
 
 class CliContractTests(unittest.TestCase):
     def run_cli(self, *args):
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH")
+        parts = [str(CONTRACT_SRC)]
+        if existing:
+            parts.append(existing)
+        env["PYTHONPATH"] = os.pathsep.join(parts)
         return subprocess.run(
             [sys.executable, str(MAIN_PATH), *args],
             cwd=APP_DIR,
             check=False,
             capture_output=True,
             text=True,
+            env=env,
         )
 
     def test_no_args_matches_help(self):

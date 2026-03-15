@@ -6,6 +6,8 @@ import unittest
 
 
 INSTALLER = Path(__file__).resolve().parent / "install.sh"
+if not INSTALLER.exists():
+    INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 
 
 class InstallContractTests(unittest.TestCase):
