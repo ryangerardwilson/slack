@@ -65,6 +65,7 @@ jobs:
                 --hidden-import charset_normalizer \
                 main.py
               mkdir -p dist/slack/completions
+              cp install.sh dist/slack/
               cp completions/slack.bash dist/slack/completions/slack.bash
               tar -C dist -czf slack-linux-x64.tar.gz slack
             '

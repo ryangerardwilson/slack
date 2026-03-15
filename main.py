@@ -8,18 +8,22 @@ import tempfile
 import time
 import zipfile
 from datetime import datetime
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from _version import __version__
-
-
-INSTALL_URL = "https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh"
-LATEST_RELEASE_API = "https://api.github.com/repos/ryangerardwilson/slack/releases/latest"
+from rgw_cli_contract import (
+    AppSpec,
+    open_config_in_editor,
+    resolve_install_script_path,
+    run_app,
+)
 
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+INSTALL_SCRIPT = resolve_install_script_path(__file__)
 HELP_TEXT = """Slack CLI
 
 flags:
@@ -139,16 +143,6 @@ def normalize_contacts(payload):
     return cleaned
 
 
-def style_help(text):
-    if sys.stdout.isatty() and not os.getenv("NO_COLOR"):
-        return f"\033[38;5;245m{text}\033[0m"
-    return text
-
-
-def print_help():
-    print(style_help(HELP_TEXT.rstrip()))
-
-
 def _requests():
     import requests
 
@@ -182,17 +176,6 @@ def parse_args(argv):
     while index < len(argv):
         token = argv[index]
 
-        if token == "-h":
-            print_help()
-            raise SystemExit(0)
-        if token == "-v":
-            args["version"] = True
-            index += 1
-            continue
-        if token == "-u":
-            args["upgrade"] = True
-            index += 1
-            continue
         if token == "-cfg":
             if index + 1 >= len(argv):
                 raise SystemExit("Use: slack -cfg <config_path>")
@@ -303,83 +286,6 @@ def list_registered_contacts(contacts):
     print_sections(rows)
 
 
-def _version_tuple(version):
-    if not version:
-        return (0,)
-    version = version.strip()
-    if version.startswith("v"):
-        version = version[1:]
-    parts = []
-    for segment in version.split("."):
-        digits = ""
-        for ch in segment:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        if digits == "":
-            break
-        parts.append(int(digits))
-    return tuple(parts) if parts else (0,)
-
-
-def _is_version_newer(candidate, current):
-    cand_tuple = _version_tuple(candidate)
-    curr_tuple = _version_tuple(current)
-    length = max(len(cand_tuple), len(curr_tuple))
-    cand_tuple += (0,) * (length - len(cand_tuple))
-    curr_tuple += (0,) * (length - len(curr_tuple))
-    return cand_tuple > curr_tuple
-
-
-def _get_latest_version(timeout=5.0):
-    try:
-        request = Request(
-            LATEST_RELEASE_API, headers={"User-Agent": "slack-updater"}
-        )
-        with urlopen(request, timeout=timeout) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-    except (URLError, HTTPError, TimeoutError):
-        return None
-    try:
-        payload = json.loads(data)
-    except json.JSONDecodeError:
-        return None
-    tag = payload.get("tag_name") or payload.get("name")
-    if isinstance(tag, str) and tag.strip():
-        return tag.strip()
-    return None
-
-
-def _run_upgrade():
-    try:
-        with urlopen(INSTALL_URL, timeout=30) as response:
-            script_body = response.read()
-    except (URLError, HTTPError, TimeoutError) as exc:
-        print(f"Unable to download installer: {exc}", file=sys.stderr)
-        return 1
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix="-slack-install.sh") as handle:
-        handle.write(script_body)
-        script_path = handle.name
-
-    try:
-        os.chmod(script_path, 0o700)
-        result = subprocess.run(
-            ["bash", script_path, "-u"],
-            check=False,
-        )
-        return result.returncode
-    except FileNotFoundError:
-        print("Upgrade requires bash", file=sys.stderr)
-        return 1
-    finally:
-        try:
-            os.remove(script_path)
-        except OSError:
-            pass
-
-
 def read_from_editor():
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         temp_path = tmp.name
@@ -410,22 +316,6 @@ def resolve_editor_cmd():
     if not editor_cmd:
         editor_cmd = ["vim"]
     return editor_cmd
-
-
-def open_config_in_editor(config_path):
-    directory = os.path.dirname(config_path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    if not os.path.exists(config_path):
-        with open(config_path, "w", encoding="utf-8") as handle:
-            handle.write("{}\n")
-
-    editor_cmd = resolve_editor_cmd()
-    try:
-        subprocess.run(editor_cmd + [config_path], check=False)
-    except FileNotFoundError:
-        raise SystemExit(f"Editor not found: {editor_cmd[0]}")
-    print(f"Opened config: {config_path}")
 
 
 def resolve_token():
@@ -1388,48 +1278,16 @@ def clear_stale_conversations(token):
     )
 
 
-def main(argv=None):
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+def _config_path() -> Path:
+    return Path(get_config_path())
 
-    if args["version"]:
-        print(__version__)
-        return
 
-    if args["upgrade"]:
-        if (
-            args["command"]
-            or args["recipient"]
-            or args["message"]
-            or args["label"]
-            or args["email"]
-            or args["paths"]
-            or args["open_mode"]
-            or args["ls_label"]
-        ):
-            raise SystemExit("Use -u by itself to upgrade.")
-
-        latest = _get_latest_version()
-        if latest is None:
-            print(
-                "Unable to determine latest version; attempting upgrade…",
-                file=sys.stderr,
-            )
-            rc = _run_upgrade()
-            sys.exit(rc)
-
-        if not _is_version_newer(latest, __version__):
-            print(f"Already running the latest version ({__version__}).")
-            sys.exit(0)
-
-        print(f"Upgrading from {__version__} to {latest}…")
-        rc = _run_upgrade()
-        sys.exit(rc)
-
+def _dispatch(argv: list[str]) -> int:
+    args = parse_args(argv)
     config_path = get_config_path(args["config"])
 
     if args["command"] in {"cfg", "conf"}:
-        open_config_in_editor(config_path)
-        return
+        return open_config_in_editor(lambda: Path(config_path))
 
     config = load_config(config_path)
     contacts = normalize_contacts(config)
@@ -1447,15 +1305,14 @@ def main(argv=None):
             del config["user_labels"]
         save_config(config_path, config)
         print(f"Saved contact '{label}' -> {email}")
-        return
+        return 0
 
     if not args["command"]:
-        print_help()
-        return
+        return 0
 
     if args["command"] == "ls" and args["ls_registry"]:
         list_registered_contacts(contacts)
-        return
+        return 0
 
     token = resolve_token()
     auth_data = auth_test(token)
@@ -1477,26 +1334,26 @@ def main(argv=None):
             self_user_id,
             args["open_mode"],
         )
-        return
+        return 0
 
     if args["command"] == "o":
         self_user_id = auth_data.get("user_id")
         if not self_user_id:
             raise SystemExit("Unable to determine the current Slack user.")
         open_dm_messages(args["recipient"], token, self_user_id)
-        return
+        return 0
 
     if args["command"] == "mra":
         mark_all_unread_dms_as_read(contacts, token)
-        return
+        return 0
 
     if args["command"] == "df":
         download_dm_file(args["recipient"], args["file_id"], args["output_path"], token)
-        return
+        return 0
 
     if args["command"] == "sc":
         clear_stale_conversations(token)
-        return
+        return 0
 
     if args["command"] != "dm":
         raise SystemExit(
@@ -1512,11 +1369,29 @@ def main(argv=None):
         print(
             f"DM sent. email={recipient_email} channel={channel_id} ts={ts} files={','.join(uploaded)}"
         )
-    elif ts:
+        return 0
+    if ts:
         print(f"DM sent. email={recipient_email} channel={channel_id} ts={ts}")
-    else:
-        print(f"DM sent. email={recipient_email} channel={channel_id}")
+        return 0
+    print(f"DM sent. email={recipient_email} channel={channel_id}")
+    return 0
+
+
+APP_SPEC = AppSpec(
+    app_name="slack",
+    version=__version__,
+    help_text=HELP_TEXT,
+    install_script_path=INSTALL_SCRIPT,
+    no_args_mode="help",
+    config_path_factory=_config_path,
+    config_bootstrap_text="{}\n",
+)
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    return run_app(APP_SPEC, args, _dispatch)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

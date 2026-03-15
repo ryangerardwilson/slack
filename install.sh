@@ -6,7 +6,7 @@ REPO="ryangerardwilson/slack"
 APP_HOME="$HOME/.${APP}"
 INSTALL_DIR="$APP_HOME/bin"
 APP_DIR="$APP_HOME/app"
-LATEST_RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
+FILENAME="slack-linux-x64.tar.gz"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -20,86 +20,35 @@ ${APP} Installer
 Usage: install.sh [options]
 
 Options:
-  -h, --help           Show this help
-  -v, --version        Print the latest release version
-  -v <version>         Install a specific version (for example 0.1.0 or v0.1.0)
-  -u, --upgrade        Upgrade to the latest release when newer than installed
-  -b, --binary <path>  Install from a local binary instead of downloading
-      --no-modify-path Do not modify shell config files
-
-Examples:
-  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash
-  ./install.sh -v
-  ./install.sh -v 0.1.0
-  ./install.sh -u
-  ./install.sh -b /path/to/slack
+  -h                         Show this help and exit
+  -v [<version>]             Print the latest release version, or install a specific one
+  -u                         Upgrade to the latest release only when newer
+  -b <path>                  Install from a local binary instead of downloading
+  -n                         Do not modify shell config to add to PATH
+      --help                 Compatibility alias for -h
+      --version [<version>]  Compatibility alias for -v
+      --upgrade              Compatibility alias for -u
+      --binary <path>        Compatibility alias for -b
+      --no-modify-path       Compatibility alias for -n
 EOF
 }
 
-requested_version=""
+requested_version=${VERSION:-}
 show_latest=false
 upgrade=false
 no_modify_path=false
 binary_path=""
-
-print_message() {
-  local level=$1
-  local message=$2
-  local color="${NC}"
-  [[ "$level" == "error" ]] && color="${RED}"
-  echo -e "${color}${message}${NC}"
-}
-
-normalize_version() {
-  local version=${1#v}
-  printf '%s\n' "$version"
-}
-
-get_latest_version_from_redirect() {
-  curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" \
-    | sed -n 's#.*/releases/tag/v\([^/?#[:space:]]*\).*#\1#p' \
-    | head -n 1
-}
-
-get_latest_version() {
-  local latest=""
-  if command -v gh >/dev/null 2>&1; then
-    latest="$(gh release view --repo "${REPO}" --json tagName --jq '.tagName' 2>/dev/null || true)"
-    latest="$(normalize_version "$latest")"
-  fi
-  if [[ -z "$latest" ]]; then
-    latest="$(get_latest_version_from_redirect || true)"
-  fi
-  [[ -n "$latest" ]] || {
-    print_message error "Unable to determine the latest release version"
-    exit 1
-  }
-  printf '%s\n' "$(normalize_version "$latest")"
-}
-
-get_installed_version() {
-  if ! command -v "${APP}" >/dev/null 2>&1; then
-    return 0
-  fi
-  local installed
-  installed="$(${APP} -v 2>/dev/null || true)"
-  [[ -n "$installed" ]] || return 0
-  printf '%s\n' "$(normalize_version "$installed")"
-}
-
-version_is_newer() {
-  local candidate current
-  candidate="$(normalize_version "$1")"
-  current="$(normalize_version "$2")"
-  [[ "$(printf '%s\n%s\n' "$candidate" "$current" | sort -V | tail -n 1)" == "$candidate" && "$candidate" != "$current" ]]
-}
+latest_version_cache=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
     -v|--version)
       if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
-        requested_version="$2"
+        requested_version="${2#v}"
         shift 2
       else
         show_latest=true
@@ -111,49 +60,68 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -b|--binary)
-      [[ -n "${2:-}" ]] || { print_message error "-b requires a path"; exit 1; }
+      [[ -n "${2:-}" ]] || { echo -e "${RED}Error: -b requires a path${NC}"; exit 1; }
       binary_path="$2"
       shift 2
       ;;
-    --binary)
-      [[ -n "${2:-}" ]] || { print_message error "--binary requires a path"; exit 1; }
-      binary_path="$2"
-      shift 2
-      ;;
-    --no-modify-path)
+    -n|--no-modify-path)
       no_modify_path=true
       shift
       ;;
     *)
-      print_message error "Unknown option: $1"
-      exit 1
+      echo -e "${ORANGE}Warning: Unknown option '$1'${NC}" >&2
+      shift
       ;;
   esac
 done
 
-if [[ -n "$requested_version" && "$show_latest" == "true" ]]; then
-  print_message error "Use -v with no argument to print the latest release version."
-  exit 1
-fi
+print_message() {
+  local level=$1
+  local message=$2
+  local color="${NC}"
+  [[ "$level" == "error" ]] && color="${RED}"
+  echo -e "${color}${message}${NC}"
+}
 
-if [[ "$upgrade" == "true" && -n "$requested_version" ]]; then
-  print_message error "Do not combine -u with -v <version>."
+die() {
+  print_message error "$1"
   exit 1
-fi
+}
 
-if [[ "$upgrade" == "true" && -n "$binary_path" ]]; then
-  print_message error "Do not combine -u with -b."
-  exit 1
-fi
+get_latest_version() {
+  command -v curl >/dev/null 2>&1 || die "'curl' is required but not installed."
+  if [[ -z "$latest_version_cache" ]]; then
+    local release_url
+    local tag
+    release_url="$(curl -fsSL -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest")" \
+      || die "Unable to determine latest release"
+    tag="${release_url##*/}"
+    tag="${tag#v}"
+    [[ -n "$tag" && "$tag" != "latest" ]] || die "Unable to determine latest release"
+    latest_version_cache="$tag"
+  fi
+  printf '%s\n' "$latest_version_cache"
+}
 
-if [[ "$show_latest" == "true" && ( "$upgrade" == "true" || -n "$binary_path" ) ]]; then
-  print_message error "Use -v by itself to print the latest release version."
-  exit 1
-fi
-
-if [[ "$show_latest" == "true" ]]; then
+if $show_latest; then
+  [[ "$upgrade" == false && -z "$binary_path" && -z "$requested_version" ]] || \
+    die "-v (no arg) cannot be combined with other options"
   get_latest_version
   exit 0
+fi
+
+if $upgrade; then
+  [[ -z "$binary_path" ]] || die "-u cannot be used with -b"
+  [[ -z "$requested_version" ]] || die "-u cannot be combined with -v <version>"
+  requested_version="$(get_latest_version)"
+  if command -v "${APP}" >/dev/null 2>&1; then
+    installed_version="$(${APP} -v 2>/dev/null || true)"
+    installed_version="${installed_version#v}"
+    if [[ -n "$installed_version" && "$installed_version" == "$requested_version" ]]; then
+      print_message info "${MUTED}${APP} version ${NC}${requested_version}${MUTED} already installed${NC}"
+      exit 0
+    fi
+  fi
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -181,28 +149,13 @@ else
   command -v curl >/dev/null 2>&1 || { print_message error "'curl' is required but not installed."; exit 1; }
   command -v tar  >/dev/null 2>&1 || { print_message error "'tar' is required but not installed."; exit 1; }
 
-  filename="${APP}-linux-x64.tar.gz"
   mkdir -p "$APP_DIR"
 
-  if [[ "$upgrade" == "true" ]]; then
-    latest_version="$(get_latest_version)"
-    installed_version="$(get_installed_version)"
-    if [[ -n "$installed_version" ]] && ! version_is_newer "$latest_version" "$installed_version"; then
-      print_message info "${MUTED}${APP} ${NC}${installed_version}${MUTED} is already the latest installed version${NC}"
-      exit 0
-    fi
-    requested_version="$latest_version"
-  fi
-
   if [[ -z "$requested_version" ]]; then
-    latest_version="$(get_latest_version)"
-    specific_version="$latest_version"
-    url="https://github.com/${REPO}/releases/latest/download/${filename}"
+    specific_version="$(get_latest_version)"
   else
-    requested_version="$(normalize_version "$requested_version")"
-    url="https://github.com/${REPO}/releases/download/v${requested_version}/${filename}"
+    requested_version="${requested_version#v}"
     specific_version="${requested_version}"
-
     http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
     if [[ "$http_status" == "404" ]]; then
       print_message error "Release v${requested_version} not found"
@@ -211,8 +164,10 @@ else
     fi
   fi
 
+  url="https://github.com/${REPO}/releases/download/v${specific_version}/${FILENAME}"
+
   if command -v "${APP}" >/dev/null 2>&1; then
-    installed_version="$(get_installed_version)"
+    installed_version="$(${APP} -v 2>/dev/null || true)"
     if [[ -n "$installed_version" && "$installed_version" == "$specific_version" ]]; then
       print_message info "${MUTED}${APP} version ${NC}${specific_version}${MUTED} already installed${NC}"
       exit 0
@@ -223,8 +178,8 @@ else
   tmp_dir="${TMPDIR:-/tmp}/${APP}_install_$$"
   mkdir -p "$tmp_dir"
 
-  curl -# -L -o "$tmp_dir/$filename" "$url"
-  tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+  curl -# -L -o "$tmp_dir/$FILENAME" "$url"
+  tar -xzf "$tmp_dir/$FILENAME" -C "$tmp_dir"
 
   if [[ ! -f "$tmp_dir/${APP}/${APP}" ]]; then
     print_message error "Archive did not contain expected directory '${APP}/${APP}'"
@@ -234,17 +189,8 @@ else
 
   rm -rf "$APP_DIR"
   mkdir -p "$APP_DIR"
-
   mv "$tmp_dir/${APP}" "$APP_DIR"
   rm -rf "$tmp_dir"
-
-  completion_src="$APP_DIR/${APP}/completions/slack.bash"
-  completion_dst="$APP_HOME/completions/slack.bash"
-  if [[ -f "$completion_src" ]]; then
-    mkdir -p "$APP_HOME/completions"
-    cp "$completion_src" "$completion_dst"
-    chmod 644 "$completion_dst"
-  fi
 
   cat > "${INSTALL_DIR}/${APP}" <<EOF
 #!/usr/bin/env bash
@@ -274,22 +220,25 @@ add_to_path() {
 }
 
 if [[ "$no_modify_path" != "true" ]]; then
-  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-  current_shell=$(basename "${SHELL:-bash}")
-
-  case "$current_shell" in
-    zsh)  config_candidates=("$HOME/.zshrc" "$HOME/.zshenv" "$XDG_CONFIG_HOME/zsh/.zshrc" "$XDG_CONFIG_HOME/zsh/.zshenv") ;;
-    bash) config_candidates=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$XDG_CONFIG_HOME/bash/.bashrc" "$XDG_CONFIG_HOME/bash/.bash_profile") ;;
-    fish) config_candidates=("$HOME/.config/fish/config.fish") ;;
-    *)    config_candidates=("$HOME/.profile" "$HOME/.bashrc") ;;
-  esac
-
-  config_file=""
-  for f in "${config_candidates[@]}"; do
-    if [[ -f "$f" ]]; then config_file="$f"; break; fi
-  done
-
   if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+    current_shell=$(basename "${SHELL:-bash}")
+
+    case "$current_shell" in
+      zsh)  config_candidates=("$HOME/.zshrc" "$HOME/.zshenv" "$XDG_CONFIG_HOME/zsh/.zshrc" "$XDG_CONFIG_HOME/zsh/.zshenv") ;;
+      bash) config_candidates=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$XDG_CONFIG_HOME/bash/.bashrc" "$XDG_CONFIG_HOME/bash/.bash_profile") ;;
+      fish) config_candidates=("$HOME/.config/fish/config.fish") ;;
+      *)    config_candidates=("$HOME/.profile" "$HOME/.bashrc") ;;
+    esac
+
+    config_file=""
+    for f in "${config_candidates[@]}"; do
+      if [[ -f "$f" ]]; then
+        config_file="$f"
+        break
+      fi
+    done
+
     if [[ -z "$config_file" ]]; then
       print_message info "${MUTED}No shell config file found. Manually add:${NC}"
       print_message info "  export PATH=$INSTALL_DIR:\$PATH"
@@ -303,7 +252,4 @@ if [[ "$no_modify_path" != "true" ]]; then
   fi
 fi
 
-echo ""
-print_message info "${MUTED}Installed ${NC}${APP}${MUTED} to ${NC}${INSTALL_DIR}/${APP}"
 print_message info "${MUTED}Run:${NC} ${APP} -h"
-echo ""

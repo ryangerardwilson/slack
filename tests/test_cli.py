@@ -59,37 +59,15 @@ class CliContractTests(unittest.TestCase):
 
         self.assertNotIn('__version__ = "0.0.0"', source)
 
-    def test_upgrade_downloads_installer_and_calls_it_with_dash_u(self):
+    def test_main_delegates_upgrade_to_contract_runtime(self):
         module = load_main_module()
-        recorded = {}
-
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                return b"#!/usr/bin/env bash\nexit 0\n"
-
-        def fake_run(cmd, check):
-            recorded["cmd"] = cmd
-            recorded["check"] = check
-
-            class Result:
-                returncode = 0
-
-            return Result()
-
-        with mock.patch.object(module, "urlopen", return_value=FakeResponse()):
-            with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
-                rc = module._run_upgrade()
-
+        with mock.patch.object(module, "run_app", return_value=0) as run_app:
+            rc = module.main(["-u"])
         self.assertEqual(rc, 0)
-        self.assertEqual(recorded["cmd"][0], "bash")
-        self.assertEqual(recorded["cmd"][2], "-u")
-        self.assertFalse(recorded["check"])
+        run_app.assert_called_once()
+        self.assertEqual(run_app.call_args.args[0], module.APP_SPEC)
+        self.assertEqual(run_app.call_args.args[1], ["-u"])
+        self.assertIs(run_app.call_args.args[2], module._dispatch)
 
     def test_cfg_opens_real_config_file_with_editor_resolution_order(self):
         module = load_main_module()
@@ -121,7 +99,7 @@ class CliContractTests(unittest.TestCase):
             self.assertEqual(config_path.read_text(encoding="utf-8"), "{}\n")
             self.assertEqual(recorded["cmd"], ["nano", str(config_path)])
             self.assertFalse(recorded["check"])
-            self.assertIn(str(config_path), stdout.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
 
     def test_dm_accepts_multiple_attachment_paths(self):
         module = load_main_module()

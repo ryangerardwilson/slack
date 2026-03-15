@@ -111,11 +111,36 @@ wait_for_release() {
 }
 
 run_local_tests() {
-  if [[ -d "tests" ]]; then
-    python3 -m pytest tests
-  else
-    info "No tests/ directory; skipping local tests."
+  local test_venv=""
+  local python_cmd="python3"
+  local pip_cmd=()
+  local rc=0
+
+  if [[ -d "tests" || -n "$(compgen -G 'test_*.py' || true)" || -n "$(compgen -G '*_test.py' || true)" ]]; then
+    test_venv="$(mktemp -d "${TMPDIR:-/tmp}/${APP}_release_test_XXXXXX")"
+    python3 -m venv "$test_venv"
+    pip_cmd=("$test_venv/bin/pip" "install" "--disable-pip-version-check")
+    if [[ -s "requirements.txt" ]]; then
+      pip_cmd+=("-r" "requirements.txt")
+    fi
+    pip_cmd+=("pytest")
+    "${pip_cmd[@]}"
+    python_cmd="$test_venv/bin/python"
   fi
+
+  if [[ -d "tests" ]]; then
+    "$python_cmd" -m pytest tests || rc=$?
+  elif compgen -G 'test_*.py' >/dev/null || compgen -G '*_test.py' >/dev/null; then
+    "$python_cmd" -m pytest || rc=$?
+  else
+    info "No local test targets found; skipping local tests."
+  fi
+
+  if [[ -n "$test_venv" ]]; then
+    rm -rf "$test_venv"
+  fi
+
+  return "$rc"
 }
 
 install_requested_release() {
@@ -148,6 +173,14 @@ verify_installed_version() {
   fi
   installed="${installed#v}"
   [[ "$installed" == "$version" ]] || die "Installed ${APP} version is '$installed', expected '$version'"
+}
+
+verify_upgrade_command() {
+  local app_cmd="$HOME/.${APP}/bin/${APP}"
+  if [[ ! -x "$app_cmd" ]]; then
+    return 0
+  fi
+  "$app_cmd" -u >/dev/null
 }
 
 main() {
@@ -204,6 +237,7 @@ main() {
   info "Upgrading installed ${APP}..."
   install_requested_release "$next_version"
   verify_installed_version "$next_version"
+  verify_upgrade_command
 
   info "Released and upgraded ${APP} ${next_version}"
 }

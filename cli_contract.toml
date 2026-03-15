@@ -1,0 +1,6 @@
+[app]
+name = "slack"
+repo = "ryangerardwilson/slack"
+install_strategy = "standalone-binary"
+release_asset = "slack-linux-x64.tar.gz"
+install_test_path = "test_install_contract.py"
