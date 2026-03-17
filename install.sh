@@ -8,11 +8,6 @@ INSTALL_DIR="$APP_HOME/bin"
 APP_DIR="$APP_HOME/app"
 FILENAME="slack-linux-x64.tar.gz"
 
-MUTED='\033[0;2m'
-RED='\033[0;31m'
-ORANGE='\033[38;5;214m'
-NC='\033[0m'
-
 usage() {
   cat <<EOF
 ${APP} Installer
@@ -60,7 +55,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -b|--binary)
-      [[ -n "${2:-}" ]] || { echo -e "${RED}Error: -b requires a path${NC}"; exit 1; }
+      [[ -n "${2:-}" ]] || { echo "Error: -b requires a path"; exit 1; }
       binary_path="$2"
       shift 2
       ;;
@@ -69,7 +64,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo -e "${ORANGE}Warning: Unknown option '$1'${NC}" >&2
+      echo "Warning: Unknown option '$1'" >&2
       shift
       ;;
   esac
@@ -78,9 +73,7 @@ done
 print_message() {
   local level=$1
   local message=$2
-  local color="${NC}"
-  [[ "$level" == "error" ]] && color="${RED}"
-  echo -e "${color}${message}${NC}"
+  printf '%b\n' "$message"
 }
 
 die() {
@@ -118,7 +111,7 @@ if $upgrade; then
     installed_version="$(${APP} -v 2>/dev/null || true)"
     installed_version="${installed_version#v}"
     if [[ -n "$installed_version" && "$installed_version" == "$requested_version" ]]; then
-      print_message info "${MUTED}${APP} version ${NC}${requested_version}${MUTED} already installed${NC}"
+      print_message info "${APP} version ${requested_version} already installed"
       exit 0
     fi
   fi
@@ -128,7 +121,7 @@ mkdir -p "$INSTALL_DIR"
 
 if [[ -n "$binary_path" ]]; then
   [[ -f "$binary_path" ]] || { print_message error "Binary not found: $binary_path"; exit 1; }
-  print_message info "\n${MUTED}Installing ${NC}${APP}${MUTED} from local binary: ${NC}${binary_path}"
+  print_message info "\nInstalling ${APP} from local binary: ${binary_path}"
   cp "$binary_path" "${INSTALL_DIR}/${APP}"
   chmod 755 "${INSTALL_DIR}/${APP}"
   specific_version="local"
@@ -159,7 +152,7 @@ else
     http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
     if [[ "$http_status" == "404" ]]; then
       print_message error "Release v${requested_version} not found"
-      print_message info  "${MUTED}See available releases: ${NC}https://github.com/${REPO}/releases"
+      print_message info "See available releases: https://github.com/${REPO}/releases"
       exit 1
     fi
   fi
@@ -169,12 +162,12 @@ else
   if command -v "${APP}" >/dev/null 2>&1; then
     installed_version="$(${APP} -v 2>/dev/null || true)"
     if [[ -n "$installed_version" && "$installed_version" == "$specific_version" ]]; then
-      print_message info "${MUTED}${APP} version ${NC}${specific_version}${MUTED} already installed${NC}"
+      print_message info "${APP} version ${specific_version} already installed"
       exit 0
     fi
   fi
 
-  print_message info "\n${MUTED}Installing ${NC}${APP} ${MUTED}version: ${NC}${specific_version}"
+  print_message info "\nInstalling ${APP} version: ${specific_version}"
   tmp_dir="${TMPDIR:-/tmp}/${APP}_install_$$"
   mkdir -p "$tmp_dir"
 
@@ -205,14 +198,14 @@ add_to_path() {
   local command=$2
 
   if grep -Fxq "$command" "$config_file" 2>/dev/null; then
-    print_message info "${MUTED}PATH entry already present in ${NC}$config_file"
+    print_message info "PATH entry already present in $config_file"
   elif [[ -w "$config_file" ]]; then
     {
       echo ""
       echo "# ${APP}"
       echo "$command"
     } >> "$config_file"
-    print_message info "${MUTED}Added ${NC}${APP}${MUTED} to PATH in ${NC}$config_file"
+    print_message info "Added ${APP} to PATH in $config_file"
   else
     print_message info "Add this to your shell config:"
     print_message info "  $command"
@@ -240,7 +233,7 @@ if [[ "$no_modify_path" != "true" ]]; then
     done
 
     if [[ -z "$config_file" ]]; then
-      print_message info "${MUTED}No shell config file found. Manually add:${NC}"
+      print_message info "No shell config file found. Manually add:"
       print_message info "  export PATH=$INSTALL_DIR:\$PATH"
     else
       if [[ "$current_shell" == "fish" ]]; then
@@ -252,4 +245,4 @@ if [[ "$no_modify_path" != "true" ]]; then
   fi
 fi
 
-print_message info "${MUTED}Run:${NC} ${APP} -h"
+print_message info "Run: ${APP} -h"
