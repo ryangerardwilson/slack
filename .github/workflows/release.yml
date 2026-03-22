@@ -64,9 +64,8 @@ jobs:
               "$PYBIN" -m PyInstaller --clean --onedir --name slack \
                 --hidden-import charset_normalizer \
                 main.py
-              mkdir -p dist/slack/completions
+              "$PYBIN" .github/scripts/clear-execstack.py dist/slack
               cp install.sh dist/slack/
-              cp completions/slack.bash dist/slack/completions/slack.bash
               tar -C dist -czf slack-linux-x64.tar.gz slack
             '
 

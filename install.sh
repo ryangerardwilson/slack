@@ -19,7 +19,7 @@ Options:
   -v [<version>]             Print the latest release version, or install a specific one
   -u                         Upgrade to the latest release only when newer
   -b <path>                  Install from a local binary instead of downloading
-  -n                         Do not modify shell config to add to PATH
+  -n                         Compatibility no-op; installer never modifies shell config
       --help                 Compatibility alias for -h
       --version [<version>]  Compatibility alias for -v
       --upgrade              Compatibility alias for -u
@@ -193,56 +193,6 @@ EOF
   chmod 755 "${INSTALL_DIR}/${APP}"
 fi
 
-add_to_path() {
-  local config_file=$1
-  local command=$2
-
-  if grep -Fxq "$command" "$config_file" 2>/dev/null; then
-    print_message info "PATH entry already present in $config_file"
-  elif [[ -w "$config_file" ]]; then
-    {
-      echo ""
-      echo "# ${APP}"
-      echo "$command"
-    } >> "$config_file"
-    print_message info "Added ${APP} to PATH in $config_file"
-  else
-    print_message info "Add this to your shell config:"
-    print_message info "  $command"
-  fi
-}
-
-if [[ "$no_modify_path" != "true" ]]; then
-  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-    current_shell=$(basename "${SHELL:-bash}")
-
-    case "$current_shell" in
-      zsh)  config_candidates=("$HOME/.zshrc" "$HOME/.zshenv" "$XDG_CONFIG_HOME/zsh/.zshrc" "$XDG_CONFIG_HOME/zsh/.zshenv") ;;
-      bash) config_candidates=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$XDG_CONFIG_HOME/bash/.bashrc" "$XDG_CONFIG_HOME/bash/.bash_profile") ;;
-      fish) config_candidates=("$HOME/.config/fish/config.fish") ;;
-      *)    config_candidates=("$HOME/.profile" "$HOME/.bashrc") ;;
-    esac
-
-    config_file=""
-    for f in "${config_candidates[@]}"; do
-      if [[ -f "$f" ]]; then
-        config_file="$f"
-        break
-      fi
-    done
-
-    if [[ -z "$config_file" ]]; then
-      print_message info "No shell config file found. Manually add:"
-      print_message info "  export PATH=$INSTALL_DIR:\$PATH"
-    else
-      if [[ "$current_shell" == "fish" ]]; then
-        add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
-      else
-        add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
-      fi
-    fi
-  fi
-fi
-
+print_message info "Manually add to ~/.bashrc: export PATH=$INSTALL_DIR:\$PATH"
+print_message info "Reload your shell: source ~/.bashrc"
 print_message info "Run: ${APP} -h"

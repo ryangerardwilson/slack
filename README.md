@@ -8,6 +8,13 @@ Minimal CLI to save Slack contacts and send direct messages as yourself.
 curl -fsSL https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh | bash
 ```
 
+Manually add this to `~/.bashrc`, then reload your shell:
+
+```bash
+export PATH="$HOME/.slack/bin:$PATH"
+source ~/.bashrc
+```
+
 Canonical installer commands:
 
 ```bash
