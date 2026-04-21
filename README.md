@@ -1,6 +1,6 @@
 # slack
 
-Minimal CLI to save Slack contacts and send direct messages as yourself.
+Minimal CLI for Slack direct-message workflows through a configured Slack app token.
 
 ## Install
 
@@ -36,14 +36,29 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-Set a Slack user token:
+By default `slack` reads the same OpenClaw-style local bot credential file used
+by the wider Slack automation setup:
 
 ```bash
-export SLACK_TOKEN="xoxp-..."
+mkdir -p ~/.openclaw/credentials
+printf '%s\n' 'xoxb-...' > ~/.openclaw/credentials/slack-bot-token
+chmod 600 ~/.openclaw/credentials/slack-bot-token
 ```
 
-Required scopes: `chat:write`, `im:write`, `im:read`, `im:history`, `users:read`, `users:read.email`, `files:write`.
-Recommended for `df`: `files:read`.
+You can override that with `SLACK_BOT_TOKEN`, `SLACK_TOKEN`, or config keys such
+as `bot_token_file`, `token_file`, and `user_token_file`.
+
+`slack ls` prioritizes the OpenClaw user-token file at
+`~/.openclaw/credentials/slack-user-token` so it can use Slack's
+`search.messages` fast path across all user-visible DMs, matching Lobster's
+bridge approach. Bot tokens fall back to conversation listing and history reads
+for conversations visible to the bot only.
+
+Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
+`im:history`, `users:read`, `users:read.email`, `files:write`.
+Recommended for `df` and `ls -o`: `files:read`.
+For the user-token fast path, use `search:read`, `im:read`, `im:history`,
+`users:read`, `users:read.email`, and `files:read` when attachment reads matter.
 
 ## Usage
 
@@ -95,21 +110,28 @@ Send a DM with files and directories zipped on the fly:
 slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
 ```
 
-List saved-contact DM history, including attached file ids:
+List accessible DM history, including message ids, sender, text, and attached
+file ids:
 
 ```bash
+slack ls
 slack ls 10
 slack ls md 10
+slack ls -l 20
+slack ls -f maanas -tl 2w -l 10
+slack ls -c invoice -tl "jan 2025" -l 20
 slack ls -ur 10
 slack ls md -r 10
 slack ls md -o 5
 slack ls rc
 ```
 
-Open a DM, mark it read, show text, download attachments, and print snippet code blocks:
+Open a DM or exact message id, mark it read, show text, download attachments,
+and print snippet code blocks:
 
 ```bash
 slack o D0466D63H7B
+slack o D0466D63H7B:1712764800.000100
 ```
 
 Clear stale conversations and bot-like conversations:
@@ -126,7 +148,9 @@ Mark all unread DMs as read:
 slack mra
 ```
 
-`ls ...` and `mra` only operate on contacts you have saved with `ac`.
+`slack ls` scans direct-message conversations visible to the configured token.
+Saved contacts are still used for friendly labels such as `slack ls md -l 10`.
+`mra` still operates on contacts you have saved with `ac`.
 
 ## Contacts
 
@@ -142,6 +166,7 @@ Example:
 
 ```json
 {
+  "bot_token_file": "~/.openclaw/credentials/slack-bot-token",
   "contacts": {
     "mom": "mom@example.com"
   }
@@ -152,15 +177,17 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `dm`: Send a DM to a saved contact label or email, with any number of file or directory attachments. Directories are zipped on the fly.
+- `dm`: Send a DM to a saved contact label or email from the configured Slack app token, with any number of file or directory attachments. Directories are zipped on the fly.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `o <dm_id>`: Open a DM, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
-- `ls <number>`: List that many latest saved-contact DM messages across all saved labels, showing only email, dm id, and date.
-- `ls <label> <number>`: List that many latest saved-contact DM messages for one saved label.
-- `ls -ur <number>`: List that many latest unread saved-contact DM messages across all saved labels.
-- `ls <label> -ur <number>`: List that many latest unread saved-contact DM messages for one saved label.
-- `ls -r <number>`: List that many latest read saved-contact DM messages across all saved labels.
-- `ls <label> -r <number>`: List that many latest read saved-contact DM messages for one saved label.
+- `o <dm_id|message_id>`: Open a DM or exact message id, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
+- `ls`: List the latest 10 accessible DM messages.
+- `ls <number>`: List that many latest accessible DM messages.
+- `ls <label> <number>`: List that many latest DM messages for one saved label.
+- `ls -l <limit>`: List a specific number of messages.
+- `ls -f <from>`: Filter by sender name, email, user id, or saved contact metadata.
+- `ls -c <contains>`: Filter by message text.
+- `ls -tl <time_limit>`: Filter by time, using shapes such as `2w`, `14d`, `2025-01`, `"jan 2025"`, `2025-01-10`, or `2025-01-10..2025-01-20`.
+- `ls -ur` / `ls -r`: Filter unread or read DM messages.
 - `ls ... -o ...`: For the selected messages, also print full text, download non-snippet attachments, and print full snippet code blocks.
 - `ls rc`: List all registered contact labels and emails from local config.
 - `mra`: Mark all unread saved-contact direct messages as read.

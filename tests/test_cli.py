@@ -170,6 +170,217 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(recorded[1][3], "export.zip")
         self.assertEqual(recorded[2][3], "two.csv")
 
+    def test_resolve_token_prefers_openclaw_bot_token_file(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_path = Path(temp_dir) / "slack-bot-token"
+            token_path.write_text("xoxb-bot-token\n", encoding="utf-8")
+
+            with mock.patch.dict(module.os.environ, {}, clear=True):
+                token = module.resolve_token({"bot_token_file": str(token_path)})
+
+        self.assertEqual(token, "xoxb-bot-token")
+
+    def test_auth_test_accepts_bot_tokens(self):
+        module = load_main_module()
+
+        with mock.patch.object(
+            module,
+            "slack_request",
+            return_value={"ok": True, "bot_id": "B123", "user_id": "U123"},
+        ) as slack_request:
+            data = module.auth_test("xoxb-token")
+
+        self.assertEqual(data["bot_id"], "B123")
+        slack_request.assert_called_once_with("auth.test", {}, "xoxb-token")
+
+    def test_ls_accepts_gmail_style_filters(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(
+            ["ls", "-f", "maanas", "-c", "invoice", "-tl", "2w", "-l", "20", "-o"]
+        )
+
+        self.assertEqual(parsed["command"], "ls")
+        self.assertEqual(parsed["ls_limit"], 20)
+        self.assertEqual(parsed["ls_from"], "maanas")
+        self.assertEqual(parsed["ls_contains"], "invoice")
+        self.assertEqual(parsed["ls_time_limit"], "2w")
+        self.assertTrue(parsed["open_mode"])
+
+    def test_ls_without_label_scans_accessible_dms(self):
+        module = load_main_module()
+        calls = {}
+
+        def fake_list_dms(
+            contacts,
+            token,
+            limit,
+            filter_mode,
+            self_user_id,
+            open_mode,
+            label=None,
+            sender_filter=None,
+            contains_filter=None,
+            time_limit=None,
+        ):
+            calls.update(
+                {
+                    "contacts": contacts,
+                    "token": token,
+                    "limit": limit,
+                    "filter_mode": filter_mode,
+                    "self_user_id": self_user_id,
+                    "open_mode": open_mode,
+                    "label": label,
+                    "sender_filter": sender_filter,
+                    "contains_filter": contains_filter,
+                    "time_limit": time_limit,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text('{"contacts": {"md": "md@example.com"}}\n', encoding="utf-8")
+            token_path = Path(temp_dir) / "user-token"
+            token_path.write_text("xoxp-token\n", encoding="utf-8")
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(token_path)):
+                    with mock.patch.object(
+                        module,
+                        "auth_test",
+                        return_value={"ok": True, "user_id": "U123"},
+                    ):
+                        with mock.patch.object(module, "list_dms", side_effect=fake_list_dms):
+                            rc = module.main(["ls", "-ur", "-f", "maanas", "-l", "5"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls["contacts"], {"md": "md@example.com"})
+        self.assertEqual(calls["token"], "xoxp-token")
+        self.assertEqual(calls["limit"], 5)
+        self.assertEqual(calls["filter_mode"], "unread")
+        self.assertEqual(calls["self_user_id"], "U123")
+        self.assertFalse(calls["open_mode"])
+        self.assertIsNone(calls["label"])
+        self.assertEqual(calls["sender_filter"], "maanas")
+
+    def test_search_dms_uses_user_token_fast_path(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(token, "xoxp-token")
+            if method == "search.messages":
+                self.assertEqual(payload["query"], "is:dm")
+                return {
+                    "ok": True,
+                    "messages": {
+                        "matches": [
+                            {
+                                "channel": {"id": "D123"},
+                                "ts": "100.000100",
+                                "user": "U222",
+                                "text": "hello",
+                            }
+                        ]
+                    },
+                }
+            raise AssertionError(method)
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(
+                module,
+                "get_dm_info",
+                return_value={
+                    "email": "sender@example.com",
+                    "info": {"last_read": "50.0"},
+                    "channel_id": "D123",
+                },
+            ):
+                with mock.patch.object(
+                    module,
+                    "_hydrate_message",
+                    return_value={"ts": "100.000100", "user": "U222", "text": "hello"},
+                ):
+                    with mock.patch.object(
+                        module,
+                        "_sender_info",
+                        return_value={
+                            "id": "U222",
+                            "name": "Sender",
+                            "email": "sender@example.com",
+                            "label": "Sender <sender@example.com>",
+                        },
+                    ):
+                        entries = module.search_dms(
+                            {},
+                            "xoxp-token",
+                            10,
+                            "all",
+                            "U111",
+                            False,
+                        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["dm_id"], "D123")
+        self.assertEqual(entries[0]["sender"]["name"], "Sender")
+
+    def test_lookup_user_id_by_name_resolves_unique_exact_match(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(method, "users.list")
+            return {
+                "ok": True,
+                "members": [
+                    {
+                        "id": "U1",
+                        "name": "rohan.agarwal",
+                        "profile": {"real_name": "Rohan Agarwal"},
+                    },
+                    {
+                        "id": "U2",
+                        "name": "rohan.choudhary",
+                        "profile": {"real_name": "Rohan Choudhary"},
+                    },
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            self.assertEqual(module.lookup_user_id_by_name("Rohan Choudhary", "token"), "U2")
+
+    def test_lookup_user_id_by_name_leaves_ambiguous_partial_unresolved(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            return {
+                "ok": True,
+                "members": [
+                    {
+                        "id": "U1",
+                        "name": "rohan.agarwal",
+                        "profile": {"real_name": "Rohan Agarwal"},
+                    },
+                    {
+                        "id": "U2",
+                        "name": "rohan.choudhary",
+                        "profile": {"real_name": "Rohan Choudhary"},
+                    },
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            self.assertIsNone(module.lookup_user_id_by_name("rohan", "token"))
+
 
 if __name__ == "__main__":
     unittest.main()

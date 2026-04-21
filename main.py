@@ -7,10 +7,8 @@ import sys
 import tempfile
 import time
 import zipfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from _version import __version__
 from rgw_cli_contract import (
@@ -23,6 +21,40 @@ from rgw_cli_contract import (
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
+DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
+DEFAULT_LIST_LIMIT = 10
+_RELATIVE_TIME_RE = re.compile(r"^(?P<amount>\d+)(?P<unit>[dwmy])$", re.IGNORECASE)
+_ISO_MONTH_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})$")
+_ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$")
+_NAMED_MONTH_RE = re.compile(r"^(?P<month>[A-Za-z]+)[ -]+(?P<year>\d{4})$", re.IGNORECASE)
+_MONTH_NAMES = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_TIME_LIMIT_SHAPE = '2w | 14d | 3m | 1y | 2025-01 | "jan 2025" | 2025-01-10 | 2025-01-10..2025-01-20'
 INSTALL_SCRIPT = resolve_install_script_path(__file__)
 HELP_TEXT = """Slack CLI
 
@@ -44,7 +76,7 @@ features:
   # slack conf
   slack conf
 
-  send a direct message, with any number of file or directory attachments
+  send a direct message from the configured Slack app token, with any number of file or directory attachments
   # slack dm <contact_label|email> <message> [path...]
   slack dm mom "hello"
   slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
@@ -54,14 +86,19 @@ features:
   # slack df <dm_id> <file_id> [output_path]
   slack df D0466D63H7B F0AH0LD4133
 
-  open a DM, mark it read, show text, download files, and print code blocks
-  # slack o <dm_id>
+  open a DM or exact message id, mark it read, show text, download files, and print code blocks
+  # slack o <dm_id|message_id>
   slack o D0466D63H7B
+  slack o D0466D63H7B:1712764800.000100
 
-  list saved-contact direct message history with attached files
-  # slack ls [label] [-ur|-r] [-o] <number>
+  list direct message history with Gmail-style filters and attached file ids
+  # slack ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
+  slack ls
   slack ls 10
   slack ls md 10
+  slack ls -l 20
+  slack ls -f maanas -tl 2w -l 10
+  slack ls -c invoice -tl "jan 2025" -l 20
   slack ls -ur 10
   slack ls md -r 10
   slack ls md -o 5
@@ -149,6 +186,23 @@ def _requests():
     return requests
 
 
+def _ls_usage():
+    return (
+        "Use: slack ls rc | slack ls [label] [-ur|-r] [-o] "
+        "[-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]"
+    )
+
+
+def _parse_positive_int(value, label):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise SystemExit(f"{label} must be a positive integer")
+    if parsed <= 0:
+        raise SystemExit(f"{label} must be > 0")
+    return parsed
+
+
 def parse_args(argv):
     args = {
         "command": None,
@@ -163,7 +217,10 @@ def parse_args(argv):
         "ls_label": None,
         "ls_registry": False,
         "ls_filter": "all",
-        "ls_limit": None,
+        "ls_limit": DEFAULT_LIST_LIMIT,
+        "ls_from": None,
+        "ls_contains": None,
+        "ls_time_limit": None,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -225,35 +282,71 @@ def parse_args(argv):
             args["open_mode"] = True
             return args
         if token == "ls":
-            if not remaining:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
             if remaining == ["rc"]:
                 args["ls_registry"] = True
                 return args
             parts = list(remaining)
-            if "-o" in parts:
-                parts.remove("-o")
-                args["open_mode"] = True
-            filters = [item for item in parts if item in ("-ur", "-r")]
-            if len(filters) > 1:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
-            if filters:
-                filter_token = filters[0]
-                args["ls_filter"] = "unread" if filter_token == "-ur" else "read"
-                parts.remove(filter_token)
-            if len(parts) == 1:
-                limit_token = parts[0]
-            elif len(parts) == 2:
-                args["ls_label"] = parts[0]
-                limit_token = parts[1]
-            else:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
-            try:
-                args["ls_limit"] = int(limit_token)
-            except ValueError:
-                raise SystemExit("Use: slack ls rc | slack ls [label] [-ur|-r] [-o] <number>")
-            if args["ls_limit"] <= 0:
-                raise SystemExit("Number must be greater than 0.")
+            positionals = []
+            saw_limit = False
+            i = 0
+            while i < len(parts):
+                item = parts[i]
+                if item == "-o":
+                    args["open_mode"] = True
+                    i += 1
+                    continue
+                if item in ("-ur", "-r"):
+                    if args["ls_filter"] != "all":
+                        raise SystemExit(_ls_usage())
+                    args["ls_filter"] = "unread" if item == "-ur" else "read"
+                    i += 1
+                    continue
+                if item == "-l":
+                    if i + 1 >= len(parts):
+                        raise SystemExit("ls -l requires: <limit>")
+                    if saw_limit:
+                        raise SystemExit("ls accepts only one -l <limit>")
+                    args["ls_limit"] = _parse_positive_int(parts[i + 1], "ls -l limit")
+                    saw_limit = True
+                    i += 2
+                    continue
+                if item == "-f":
+                    if i + 1 >= len(parts):
+                        raise SystemExit("ls -f requires: <from>")
+                    args["ls_from"] = parts[i + 1]
+                    i += 2
+                    continue
+                if item == "-c":
+                    if i + 1 >= len(parts):
+                        raise SystemExit("ls -c requires: <contains>")
+                    args["ls_contains"] = parts[i + 1]
+                    i += 2
+                    continue
+                if item == "-tl":
+                    if i + 1 >= len(parts):
+                        raise SystemExit("ls -tl requires: <time_limit>")
+                    args["ls_time_limit"] = parts[i + 1]
+                    i += 2
+                    continue
+                if item.startswith("-"):
+                    raise SystemExit(f"Unknown ls option: {item}")
+                positionals.append(item)
+                i += 1
+
+            if len(positionals) > 2:
+                raise SystemExit(_ls_usage())
+            if len(positionals) == 2:
+                if saw_limit:
+                    raise SystemExit(_ls_usage())
+                args["ls_label"] = positionals[0]
+                args["ls_limit"] = _parse_positive_int(positionals[1], "ls limit")
+            elif len(positionals) == 1:
+                if positionals[0].isdigit():
+                    if saw_limit:
+                        raise SystemExit("ls accepts only one limit")
+                    args["ls_limit"] = _parse_positive_int(positionals[0], "ls limit")
+                else:
+                    args["ls_label"] = positionals[0]
             return args
         if token == "mra":
             if remaining:
@@ -318,45 +411,128 @@ def resolve_editor_cmd():
     return editor_cmd
 
 
-def resolve_token():
-    token = get_env("SLACK_TOKEN")
-    if not token:
-        raise SystemExit("Missing SLACK_TOKEN env var.")
+def style_help(value):
+    return value
+
+
+def _token_kind(token):
     if token.startswith(BOT_TOKEN_PREFIX):
-        raise SystemExit("Bot tokens are not supported. Use a user token.")
-    if not token.startswith(USER_TOKEN_PREFIXES):
-        raise SystemExit("SLACK_TOKEN must be a user token (xoxp- or xoxc-).")
+        return "bot"
+    if token.startswith(USER_TOKEN_PREFIXES):
+        return "user"
+    return "unknown"
+
+
+def _read_token_file(path):
+    expanded = Path(os.path.expandvars(path)).expanduser()
+    if not expanded.exists():
+        return None
+    try:
+        token = expanded.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"Unable to read Slack token file: {expanded}: {exc}")
+    return token or None
+
+
+def _read_first_config_token(config, keys):
+    for key in keys:
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            token = _read_token_file(value.strip())
+            if token:
+                return token
+    return None
+
+
+def resolve_token(config=None):
+    config = config or {}
+    token = get_env("SLACK_BOT_TOKEN")
+    if not token:
+        token = get_env("SLACK_TOKEN")
+    if not token:
+        for key in ("bot_token_file", "token_file", "user_token_file"):
+            value = config.get(key)
+            if isinstance(value, str) and value.strip():
+                token = _read_token_file(value.strip())
+                if token:
+                    break
+    if not token:
+        token = _read_token_file(DEFAULT_BOT_TOKEN_FILE)
+    if not token:
+        token = _read_token_file(DEFAULT_USER_TOKEN_FILE)
+    if not token:
+        raise SystemExit("Missing Slack token. Set SLACK_BOT_TOKEN or add bot_token_file to slack conf.")
+    if _token_kind(token) == "unknown":
+        raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
     return token
 
 
-def slack_request(method, payload, token, use_form=False, http_method="POST"):
+def resolve_list_token(config=None):
+    config = config or {}
+    token = get_env("SLACK_TOKEN")
+    if not token:
+        token = _read_first_config_token(config, ("token_file", "user_token_file"))
+    if not token:
+        token = _read_token_file(DEFAULT_USER_TOKEN_FILE)
+    if not token:
+        token = get_env("SLACK_BOT_TOKEN")
+    if not token:
+        token = _read_first_config_token(config, ("bot_token_file",))
+    if not token:
+        token = _read_token_file(DEFAULT_BOT_TOKEN_FILE)
+    if not token:
+        raise SystemExit(
+            "Missing Slack token. For all-contact ls, add ~/.openclaw/credentials/slack-user-token or set SLACK_TOKEN."
+        )
+    if _token_kind(token) == "unknown":
+        raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
+    return token
+
+
+def slack_request(method, payload, token, use_form=False, http_method="POST", allow_error=False):
     requests = _requests()
     url = f"https://slack.com/api/{method}"
     headers = {"Authorization": f"Bearer {token}"}
-    if http_method == "GET":
-        response = requests.get(
-            url,
-            headers=headers,
-            params=payload,
-            timeout=30,
-        )
-    elif use_form:
-        response = requests.post(
-            url,
-            headers=headers,
-            data=payload,
-            timeout=30,
-        )
-    else:
-        response = requests.post(
-            url,
-            headers={
-                **headers,
-                "Content-Type": "application/json; charset=utf-8",
-            },
-            json=payload,
-            timeout=30,
-        )
+    response = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            if http_method == "GET":
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=payload,
+                    timeout=30,
+                )
+            elif use_form:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    data=payload,
+                    timeout=30,
+                )
+            else:
+                response = requests.post(
+                    url,
+                    headers={
+                        **headers,
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                    json=payload,
+                    timeout=30,
+                )
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            time.sleep(2**attempt)
+            continue
+        if response.status_code != 429 and response.status_code < 500:
+            break
+        retry_after = response.headers.get("Retry-After")
+        delay = int(retry_after) if retry_after and retry_after.isdigit() else 2**attempt
+        time.sleep(min(delay, 30))
+    if response is None:
+        detail = f": {last_error}" if last_error else "."
+        raise SystemExit(f"Slack API request failed ({method}){detail}")
     if response.status_code != 200:
         raise SystemExit(
             f"Slack API HTTP {response.status_code}: {response.text.strip()}"
@@ -365,7 +541,7 @@ def slack_request(method, payload, token, use_form=False, http_method="POST"):
         data = response.json()
     except json.JSONDecodeError:
         raise SystemExit("Slack API returned invalid JSON.")
-    if not data.get("ok"):
+    if not data.get("ok") and not allow_error:
         error = data.get("error") or "unknown_error"
         metadata = data.get("response_metadata") or {}
         messages = metadata.get("messages") or []
@@ -379,8 +555,6 @@ def slack_request(method, payload, token, use_form=False, http_method="POST"):
 
 def auth_test(token):
     data = slack_request("auth.test", {}, token)
-    if data.get("bot_id"):
-        raise SystemExit("Token belongs to a bot. Use a user token.")
     return data
 
 
@@ -604,6 +778,104 @@ def format_ts(ts_value):
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _month_bounds(year, month):
+    start = date(year, month, 1)
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
+    return start, next_month
+
+
+def _parse_iso_date(value):
+    match = _ISO_DATE_RE.match(value)
+    if not match:
+        return None
+    try:
+        return date(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Invalid ls -tl date '{value}'") from exc
+
+
+def _parse_iso_month(value):
+    match = _ISO_MONTH_RE.match(value)
+    if not match:
+        return None
+    try:
+        return _month_bounds(int(match.group("year")), int(match.group("month")))
+    except ValueError as exc:
+        raise SystemExit(f"Invalid ls -tl month '{value}'") from exc
+
+
+def _parse_named_month(value):
+    match = _NAMED_MONTH_RE.match(value.strip())
+    if not match:
+        return None
+    month = _MONTH_NAMES.get(match.group("month").lower())
+    if month is None:
+        raise SystemExit(f"Invalid ls -tl month '{value}'")
+    return _month_bounds(int(match.group("year")), month)
+
+
+def _start_ts(value):
+    return datetime.combine(value, datetime.min.time()).timestamp()
+
+
+def _time_window(value):
+    if not value:
+        return None, None
+    expr = value.strip()
+    if not expr:
+        raise SystemExit("ls -tl requires: <time_limit>")
+
+    if ".." in expr:
+        start_raw, _, end_raw = expr.partition("..")
+        start = _parse_iso_date(start_raw.strip())
+        end = _parse_iso_date(end_raw.strip())
+        if start is None or end is None:
+            raise SystemExit("ls -tl date ranges must use: YYYY-MM-DD..YYYY-MM-DD")
+        if end < start:
+            raise SystemExit("ls -tl range end must be on or after start")
+        return _start_ts(start), _start_ts(end + timedelta(days=1))
+
+    relative = _RELATIVE_TIME_RE.match(expr)
+    if relative:
+        amount = int(relative.group("amount"))
+        unit = relative.group("unit").lower()
+        if amount <= 0:
+            raise SystemExit("ls -tl duration must be > 0")
+        days_by_unit = {"d": 1, "w": 7, "m": 30, "y": 365}
+        return time.time() - (amount * days_by_unit[unit] * 24 * 60 * 60), None
+
+    month_bounds = _parse_iso_month(expr) or _parse_named_month(expr)
+    if month_bounds is not None:
+        start, next_month = month_bounds
+        return _start_ts(start), _start_ts(next_month)
+
+    exact_date = _parse_iso_date(expr)
+    if exact_date is not None:
+        return _start_ts(exact_date), _start_ts(exact_date + timedelta(days=1))
+
+    raise SystemExit(f"ls -tl supports: {_TIME_LIMIT_SHAPE}")
+
+
+def message_id(channel_id, ts):
+    return f"{channel_id}:{ts}"
+
+
+def parse_message_id(value):
+    if not value or ":" not in value:
+        return None
+    channel_id, ts = value.split(":", 1)
+    if not channel_id or not ts:
+        return None
+    return channel_id, ts
+
+
 def extract_ts(payload):
     latest = payload.get("latest")
     if isinstance(latest, dict):
@@ -637,6 +909,63 @@ def list_api(method, params, token):
     return items
 
 
+def _display_user(user, fallback="-"):
+    profile = user.get("profile") or {}
+    return (
+        profile.get("display_name")
+        or profile.get("real_name")
+        or user.get("name")
+        or fallback
+    )
+
+
+def _user_email(user, fallback="-"):
+    profile = user.get("profile") or {}
+    return profile.get("email") or fallback
+
+
+def _dm_info_from_channel(channel, token, user_cache):
+    channel_id = channel.get("id")
+    if not channel_id:
+        return None
+    info = slack_request(
+        "conversations.info",
+        {"channel": channel_id, "include_num_members": "false"},
+        token,
+        http_method="GET",
+    ).get("channel") or {}
+    user_id = info.get("user") or channel.get("user")
+    user = {}
+    if user_id:
+        if user_id not in user_cache:
+            user_cache[user_id] = get_user_info(user_id, token)
+        user = user_cache[user_id]
+    return {
+        "label": "-",
+        "email": _user_email(user),
+        "name": _display_user(user, user_id or "-"),
+        "user_id": user_id or "-",
+        "channel_id": channel_id,
+        "info": info,
+        "user": user,
+    }
+
+
+def get_all_dm_infos(token):
+    im_channels = list_api(
+        "users.conversations",
+        {"types": "im", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    infos = []
+    user_cache = {}
+    for channel in im_channels:
+        info = _dm_info_from_channel(channel, token, user_cache)
+        if info:
+            infos.append(info)
+    return infos
+
+
 def get_contact_dm_infos(contacts, token):
     im_channels = list_api(
         "users.conversations",
@@ -667,8 +996,7 @@ def get_contact_dm_infos(contacts, token):
         if user_id not in user_cache:
             user_cache[user_id] = get_user_info(user_id, token)
         user = user_cache[user_id]
-        profile = user.get("profile") or {}
-        email = profile.get("email") or target
+        email = _user_email(user, target)
         info = slack_request(
             "conversations.info",
             {"channel": channel_id, "include_num_members": "false"},
@@ -679,6 +1007,7 @@ def get_contact_dm_infos(contacts, token):
             {
                 "label": label,
                 "email": email,
+                "name": _display_user(user, user_id),
                 "user_id": user_id,
                 "channel_id": channel_id,
                 "info": info,
@@ -699,10 +1028,10 @@ def get_dm_info(channel_id, token):
     if not user_id:
         raise SystemExit(f"Unable to resolve DM user for {channel_id}.")
     user = get_user_info(user_id, token)
-    profile = user.get("profile") or {}
     return {
         "label": "-",
-        "email": profile.get("email") or "-",
+        "email": _user_email(user),
+        "name": _display_user(user, user_id),
         "user_id": user_id,
         "channel_id": channel_id,
         "info": info,
@@ -778,13 +1107,271 @@ def _message_details(message, dm_id, token):
     return downloads, code_blocks
 
 
+def _sender_info(message, token, user_cache):
+    user_id = message.get("user")
+    if user_id:
+        if user_id not in user_cache:
+            user_cache[user_id] = get_user_info(user_id, token)
+        user = user_cache[user_id]
+        name = _display_user(user, user_id)
+        email = _user_email(user)
+        return {
+            "id": user_id,
+            "name": name,
+            "email": email,
+            "label": f"{name} <{email}>" if email != "-" else name,
+        }
+    bot_profile = message.get("bot_profile") or {}
+    bot_id = message.get("bot_id") or bot_profile.get("id") or "-"
+    name = bot_profile.get("name") or message.get("username") or bot_id
+    return {"id": bot_id, "name": name, "email": "-", "label": name}
+
+
+def _matches_text(haystack, needle):
+    if not needle:
+        return True
+    return needle.strip().lower() in haystack.strip().lower()
+
+
+def _search_quote(value):
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if re.search(r"\s", cleaned):
+        return '"' + cleaned.replace('"', '\\"') + '"'
+    return cleaned
+
+
+def _resolve_filter_user_id(value, contacts, token):
+    target = contacts.get(value, value)
+    if USER_ID_RE.match(target):
+        return target
+    if "@" in target:
+        try:
+            return lookup_user_id_by_email(target, token)
+        except SystemExit:
+            return None
+    return lookup_user_id_by_name(target, token)
+
+
+def _normalized_user_name(value):
+    return " ".join(value.strip().lower().replace(".", " ").split())
+
+
+def lookup_user_id_by_name(name, token):
+    target = _normalized_user_name(name)
+    if not target:
+        return None
+    exact_matches = []
+    partial_matches = []
+    cursor = None
+    while True:
+        payload = {"limit": "200"}
+        if cursor:
+            payload["cursor"] = cursor
+        data = slack_request("users.list", payload, token, http_method="GET", allow_error=True)
+        if data.get("ok") is not True:
+            return None
+        for user in data.get("members") or []:
+            if not isinstance(user, dict) or user.get("deleted") or user.get("is_bot"):
+                continue
+            profile = user.get("profile") or {}
+            candidates = [
+                user.get("name"),
+                profile.get("real_name"),
+                profile.get("display_name"),
+            ]
+            normalized = [_normalized_user_name(str(item)) for item in candidates if item]
+            if target in normalized:
+                exact_matches.append(user)
+            elif any(target in item for item in normalized):
+                partial_matches.append(user)
+        cursor = ((data.get("response_metadata") or {}).get("next_cursor") or "").strip()
+        if not cursor:
+            break
+    matches = exact_matches or partial_matches
+    if len(matches) == 1:
+        return matches[0].get("id")
+    return None
+
+
+def _search_time_terms(time_limit):
+    if not time_limit:
+        return []
+    oldest, latest = _time_window(time_limit)
+    terms = []
+    if oldest is not None:
+        terms.append(f"after:{datetime.fromtimestamp(oldest).strftime('%Y-%m-%d')}")
+    if latest is not None:
+        terms.append(f"before:{datetime.fromtimestamp(latest).strftime('%Y-%m-%d')}")
+    return terms
+
+
+def _build_search_query(label, contacts, token, sender_filter, contains_filter, time_limit):
+    terms = ["is:dm"]
+    if label:
+        if label not in contacts:
+            raise SystemExit(f"Unknown contact label: {label}")
+        user_id = _resolve_filter_user_id(contacts[label], contacts, token)
+        if user_id:
+            terms.append(f"in:<@{user_id}>")
+    if sender_filter:
+        user_id = _resolve_filter_user_id(sender_filter, contacts, token)
+        if user_id:
+            terms.append(f"from:<@{user_id}>")
+        else:
+            terms.append(f"from:{_search_quote(sender_filter)}")
+    if contains_filter:
+        terms.append(_search_quote(contains_filter))
+    terms.extend(_search_time_terms(time_limit))
+    return " ".join(term for term in terms if term)
+
+
+def _hydrate_message(channel_id, ts, token):
+    payload = slack_request(
+        "conversations.history",
+        {
+            "channel": channel_id,
+            "latest": ts,
+            "inclusive": "true",
+            "limit": "1",
+        },
+        token,
+        http_method="GET",
+    )
+    messages = payload.get("messages") or []
+    for message in messages:
+        if str(message.get("ts") or "") == str(ts):
+            return message
+    return messages[0] if messages else None
+
+
+def _entry_passes_filters(entry, filter_mode, sender_filter, contains_filter, time_limit):
+    oldest, latest = _time_window(time_limit) if time_limit else (None, None)
+    ts_value = entry["sort_ts"]
+    if oldest is not None and ts_value < oldest:
+        return False
+    if latest is not None and ts_value >= latest:
+        return False
+    if filter_mode == "unread" and not entry.get("unread"):
+        return False
+    if filter_mode == "read" and entry.get("unread"):
+        return False
+    sender = entry.get("sender") or {}
+    sender_haystack = " ".join(
+        str(value)
+        for value in (
+            sender.get("id"),
+            sender.get("name"),
+            sender.get("email"),
+            entry.get("email"),
+        )
+        if value
+    )
+    if not _matches_text(sender_haystack, sender_filter):
+        return False
+    if not _matches_text(message_text(entry["message"]), contains_filter):
+        return False
+    return True
+
+
+def search_dms(
+    contacts,
+    token,
+    limit,
+    filter_mode,
+    self_user_id,
+    open_mode,
+    label=None,
+    sender_filter=None,
+    contains_filter=None,
+    time_limit=None,
+):
+    if _token_kind(token) != "user":
+        return None
+    query = _build_search_query(label, contacts, token, sender_filter, contains_filter, time_limit)
+    payload = slack_request(
+        "search.messages",
+        {
+            "query": query,
+            "sort": "timestamp",
+            "sort_dir": "desc",
+            "count": str(max(20, min(100, limit * 5))),
+        },
+        token,
+        http_method="GET",
+        allow_error=True,
+    )
+    if payload.get("ok") is not True:
+        if payload.get("error") in {"not_allowed_token_type", "missing_scope", "no_permission"}:
+            return None
+        error = payload.get("error") or "unknown_error"
+        raise SystemExit(f"Slack API error (search.messages): {error}")
+
+    entries = []
+    user_cache = {}
+    dm_cache = {}
+    for match in (payload.get("messages") or {}).get("matches", []) or []:
+        if not isinstance(match, dict):
+            continue
+        channel = match.get("channel") if isinstance(match.get("channel"), dict) else {}
+        channel_id = channel.get("id") or match.get("channel_id")
+        ts = str(match.get("ts") or "")
+        if not channel_id or not ts:
+            continue
+        try:
+            ts_value = float(ts)
+        except ValueError:
+            continue
+        if channel_id not in dm_cache:
+            try:
+                dm_cache[channel_id] = get_dm_info(channel_id, token)
+            except SystemExit:
+                dm_cache[channel_id] = {
+                    "email": "-",
+                    "name": str(channel.get("name") or channel_id),
+                    "info": {},
+                    "channel_id": channel_id,
+                }
+        dm_info = dm_cache[channel_id]
+        message = _hydrate_message(channel_id, ts, token) or {
+            "ts": ts,
+            "user": match.get("user"),
+            "text": match.get("text") or "",
+        }
+        sender = _sender_info(message, token, user_cache)
+        last_read = (dm_info.get("info") or {}).get("last_read") or "0"
+        try:
+            last_read_value = float(last_read)
+        except (TypeError, ValueError):
+            last_read_value = 0.0
+        is_self = bool(self_user_id and message.get("user") == self_user_id)
+        entry = {
+            "sort_ts": ts_value,
+            "email": dm_info.get("email") or "-",
+            "dm_id": channel_id,
+            "message": message,
+            "sender": sender,
+            "unread": bool(not is_self and ts_value > last_read_value),
+        }
+        if _entry_passes_filters(entry, filter_mode, sender_filter, contains_filter, time_limit):
+            entries.append(entry)
+        if len(entries) >= limit:
+            break
+    return entries
+
+
 def _print_open_entries(entries, token):
+    user_cache = {}
     for index, entry in enumerate(entries, start=1):
         prefix = f"[{index}]"
+        sender = entry.get("sender") or _sender_info(entry["message"], token, user_cache)
         print(prefix + ("-" * max(1, 79 - len(prefix))))
+        print(f"{'message_id':<10}: {message_id(entry['dm_id'], entry['message'].get('ts'))}")
         print(f"{'email':<8}: {entry['email']}")
         print(f"{'dm_id':<8}: {entry['dm_id']}")
         print(f"{'date':<8}: {format_ts(entry['message'].get('ts'))}")
+        print(f"{'from':<8}: {sender['label']}")
         text = message_text(entry["message"]).rstrip()
         print(style_help(f"{'text':<8}: {text if text else '-'}"))
 
@@ -803,7 +1390,16 @@ def _print_open_entries(entries, token):
             print(style_help(f"{'code':<8}: -"))
 
 
-def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
+def _collect_messages(
+    contact_dm,
+    token,
+    limit,
+    filter_mode,
+    self_user_id,
+    sender_filter=None,
+    contains_filter=None,
+    time_limit=None,
+):
     entries = []
     info_channel = contact_dm["info"]
     last_read = info_channel.get("last_read") or "0"
@@ -812,16 +1408,25 @@ def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
     except (TypeError, ValueError):
         last_read_value = 0.0
 
+    oldest, latest = _time_window(time_limit) if time_limit else (None, None)
+    user_cache = {}
     cursor = None
     matched = 0
     while True:
+        history_params = {
+            "channel": contact_dm["channel_id"],
+            "limit": str(max(20, min(100, limit * 3))),
+            **({"cursor": cursor} if cursor else {}),
+        }
+        if oldest is not None:
+            history_params["oldest"] = f"{oldest:.6f}"
+            history_params["inclusive"] = "true"
+        if latest is not None:
+            history_params["latest"] = f"{latest:.6f}"
+            history_params["inclusive"] = "true"
         history = slack_request(
             "conversations.history",
-            {
-                "channel": contact_dm["channel_id"],
-                "limit": str(max(20, limit * 3)),
-                **({"cursor": cursor} if cursor else {}),
-            },
+            history_params,
             token,
             http_method="GET",
         )
@@ -834,12 +1439,28 @@ def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
                 ts_value = float(ts)
             except (TypeError, ValueError):
                 continue
-            if message.get("user") == self_user_id:
-                continue
-            is_unread = ts_value > last_read_value
+            sender = _sender_info(message, token, user_cache)
+            is_self = bool(self_user_id and message.get("user") == self_user_id)
+            is_unread = bool(not is_self and ts_value > last_read_value)
             if filter_mode == "unread" and not is_unread:
                 continue
             if filter_mode == "read" and is_unread:
+                continue
+            sender_haystack = " ".join(
+                str(value)
+                for value in (
+                    sender.get("id"),
+                    sender.get("name"),
+                    sender.get("email"),
+                    contact_dm.get("label"),
+                    contact_dm.get("email"),
+                    contact_dm.get("name"),
+                )
+                if value
+            )
+            if not _matches_text(sender_haystack, sender_filter):
+                continue
+            if not _matches_text(message_text(message), contains_filter):
                 continue
 
             entries.append(
@@ -848,6 +1469,8 @@ def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
                     "email": contact_dm["email"],
                     "dm_id": contact_dm["channel_id"],
                     "message": message,
+                    "sender": sender,
+                    "unread": is_unread,
                 }
             )
             matched += 1
@@ -866,18 +1489,65 @@ def _collect_messages(contact_dm, token, limit, filter_mode, self_user_id):
     return entries
 
 
-def list_dms(contacts, token, limit, filter_mode, self_user_id, open_mode):
-    entries = []
-    for contact_dm in get_contact_dm_infos(contacts, token):
-        entries.extend(_collect_messages(contact_dm, token, limit, filter_mode, self_user_id))
+def _empty_dm_message(filter_mode):
+    if filter_mode == "unread":
+        return "No unread DMs."
+    if filter_mode == "read":
+        return "No read DMs."
+    return "No DMs."
+
+
+def list_dms(
+    contacts,
+    token,
+    limit,
+    filter_mode,
+    self_user_id,
+    open_mode,
+    label=None,
+    sender_filter=None,
+    contains_filter=None,
+    time_limit=None,
+):
+    entries = search_dms(
+        contacts,
+        token,
+        limit,
+        filter_mode,
+        self_user_id,
+        open_mode,
+        label=label,
+        sender_filter=sender_filter,
+        contains_filter=contains_filter,
+        time_limit=time_limit,
+    )
+    if entries is None:
+        entries = []
+        if label:
+            if label not in contacts:
+                raise SystemExit(f"Unknown contact label: {label}")
+            dm_infos = get_contact_dm_infos({label: contacts[label]}, token)
+        else:
+            dm_infos = get_all_dm_infos(token)
+
+        for contact_dm in dm_infos:
+            entries.extend(
+                _collect_messages(
+                    contact_dm,
+                    token,
+                    limit,
+                    filter_mode,
+                    self_user_id,
+                    sender_filter,
+                    contains_filter,
+                    time_limit,
+                )
+            )
+    else:
+        entries = list(entries)
 
     if not entries:
-        if filter_mode == "unread":
-            print("No unread DMs.")
-        elif filter_mode == "read":
-            print("No read DMs.")
-        else:
-            print("No DMs.")
+        print(_empty_dm_message(filter_mode))
         return
 
     entries.sort(key=lambda item: item["sort_ts"], reverse=True)
@@ -886,14 +1556,36 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id, open_mode):
 
     if open_mode:
         _print_open_entries(selected, token)
+        latest_by_channel = {}
+        for item in selected:
+            ts = item["message"].get("ts")
+            if not ts:
+                continue
+            current = latest_by_channel.get(item["dm_id"])
+            if current is None or float(ts) > float(current):
+                latest_by_channel[item["dm_id"]] = ts
+        marked = 0
+        for channel_id, ts in latest_by_channel.items():
+            slack_request(
+                "conversations.mark",
+                {"channel": channel_id, "ts": ts},
+                token,
+                use_form=True,
+            )
+            marked += 1
+        print(f"ls_opened messages={len(selected)} marked_conversations={marked}")
         return
 
     print_sections(
         [
             [
+                ("message_id", message_id(item["dm_id"], item["message"].get("ts"))),
                 ("email", item["email"]),
                 ("dm_id", item["dm_id"]),
                 ("date", format_ts(item["message"].get("ts"))),
+                ("from", item["sender"]["label"]),
+                ("text", compact_text(message_text(item["message"]))),
+                ("files", summarize_files(item["message"])),
             ]
             for item in selected
         ]
@@ -901,6 +1593,47 @@ def list_dms(contacts, token, limit, filter_mode, self_user_id, open_mode):
 
 
 def open_dm_messages(dm_id, token, self_user_id):
+    parsed_message_id = parse_message_id(dm_id)
+    if parsed_message_id:
+        channel_id, target_ts = parsed_message_id
+        contact_dm = get_dm_info(channel_id, token)
+        history = slack_request(
+            "conversations.history",
+            {
+                "channel": channel_id,
+                "latest": target_ts,
+                "inclusive": "true",
+                "limit": "1",
+            },
+            token,
+            http_method="GET",
+        )
+        messages = history.get("messages") or []
+        message = next(
+            (item for item in messages if str(item.get("ts") or "") == target_ts),
+            messages[0] if messages else None,
+        )
+        if not message:
+            print("No DM messages.")
+            return
+        user_cache = {}
+        entry = {
+            "sort_ts": float(target_ts),
+            "email": contact_dm["email"],
+            "dm_id": channel_id,
+            "message": message,
+            "sender": _sender_info(message, token, user_cache),
+        }
+        _print_open_entries([entry], token)
+        slack_request(
+            "conversations.mark",
+            {"channel": channel_id, "ts": target_ts},
+            token,
+            use_form=True,
+        )
+        print(f"opened_and_marked_read message_id={message_id(channel_id, target_ts)}")
+        return
+
     contact_dm = get_dm_info(dm_id, token)
     info = contact_dm["info"]
     last_read = info.get("last_read") or "0"
@@ -916,6 +1649,7 @@ def open_dm_messages(dm_id, token, self_user_id):
         http_method="GET",
     )
     external = []
+    user_cache = {}
     for message in history.get("messages") or []:
         ts = message.get("ts")
         if not ts or message.get("user") == self_user_id:
@@ -930,6 +1664,7 @@ def open_dm_messages(dm_id, token, self_user_id):
                 "email": contact_dm["email"],
                 "dm_id": dm_id,
                 "message": message,
+                "sender": _sender_info(message, token, user_cache),
                 "unread": ts_value > last_read_value,
             }
         )
@@ -951,81 +1686,7 @@ def open_dm_messages(dm_id, token, self_user_id):
             token,
             use_form=True,
         )
-        info_channel = contact_dm["info"]
-        last_read = info_channel.get("last_read") or "0"
-        try:
-            last_read_value = float(last_read)
-        except (TypeError, ValueError):
-            last_read_value = 0.0
-
-        cursor = None
-        matched = 0
-        while True:
-            history = slack_request(
-                "conversations.history",
-                {
-                    "channel": contact_dm["channel_id"],
-                    "limit": str(max(20, limit * 3)),
-                    **({"cursor": cursor} if cursor else {}),
-                },
-                token,
-                http_method="GET",
-            )
-            messages = history.get("messages") or []
-            for message in messages:
-                ts = message.get("ts")
-                if not ts:
-                    continue
-                try:
-                    ts_value = float(ts)
-                except (TypeError, ValueError):
-                    continue
-                if message.get("user") == self_user_id:
-                    continue
-                is_unread = ts_value > last_read_value
-                if filter_mode == "unread" and not is_unread:
-                    continue
-                if filter_mode == "read" and is_unread:
-                    continue
-
-                rows.append(
-                    {
-                        "sort_ts": ts_value,
-                        "row": [
-                        ("email", contact_dm["email"]),
-                        ("dm_id", contact_dm["channel_id"]),
-                        ("date", format_ts(ts)),
-                        ("text", compact_text(message.get("text"))),
-                        ("files", summarize_files(message)),
-                    ],
-                }
-            )
-                matched += 1
-                if matched >= limit:
-                    break
-
-            if matched >= limit:
-                break
-
-            cursor = (
-                (history.get("response_metadata") or {}).get("next_cursor") or ""
-            ).strip()
-            if not cursor:
-                break
-
-    if not rows:
-        if filter_mode == "unread":
-            print("No unread DMs.")
-        elif filter_mode == "read":
-            print("No read DMs.")
-        else:
-            print("No DMs.")
-        return
-
-    rows.sort(key=lambda item: item["sort_ts"], reverse=True)
-    selected = rows[:limit]
-    selected.sort(key=lambda item: item["sort_ts"])
-    print_sections([item["row"] for item in selected])
+        print(f"opened_and_marked_read dm_id={dm_id} ts={latest_ts}")
 
 
 def action_close_conversation(channel_id, token):
@@ -1314,27 +1975,28 @@ def _dispatch(argv: list[str]) -> int:
         list_registered_contacts(contacts)
         return 0
 
-    token = resolve_token()
-    auth_data = auth_test(token)
-
     if args["command"] == "ls":
+        token = resolve_list_token(config)
+        auth_data = auth_test(token)
         self_user_id = auth_data.get("user_id")
         if not self_user_id:
             raise SystemExit("Unable to determine the current Slack user.")
-        list_contacts = contacts
-        if args["ls_label"]:
-            if args["ls_label"] not in contacts:
-                raise SystemExit(f"Unknown contact label: {args['ls_label']}")
-            list_contacts = {args["ls_label"]: contacts[args["ls_label"]]}
         list_dms(
-            list_contacts,
+            contacts,
             token,
             args["ls_limit"],
             args["ls_filter"],
             self_user_id,
             args["open_mode"],
+            label=args["ls_label"],
+            sender_filter=args["ls_from"],
+            contains_filter=args["ls_contains"],
+            time_limit=args["ls_time_limit"],
         )
         return 0
+
+    token = resolve_token(config)
+    auth_data = auth_test(token)
 
     if args["command"] == "o":
         self_user_id = auth_data.get("user_id")
