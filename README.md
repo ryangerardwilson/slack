@@ -74,6 +74,13 @@ Add a contact:
 slack ac mom mom@example.com
 ```
 
+Search saved contacts and Slack workspace users:
+
+```bash
+slack su rohan
+slack su "rohan choudhary"
+```
+
 Open the real config file in your editor:
 
 ```bash
@@ -126,8 +133,8 @@ slack ls md -o 5
 slack ls rc
 ```
 
-Open a DM or exact message id, mark it read, show text, download attachments,
-and print snippet code blocks:
+Open a DM or exact message id, mark it read, download every attachment on the
+opened message, show text, and print snippet code blocks:
 
 ```bash
 slack o D0466D63H7B
@@ -176,10 +183,11 @@ Example:
 ## Options
 
 - `ac`: Save a contact label for an email address.
+- `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
 - `dm`: Send a DM to a saved contact label or email from the configured Slack app token, with any number of file or directory attachments. Directories are zipped on the fly.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `o <dm_id|message_id>`: Open a DM or exact message id, mark it read, print full text, download non-snippet attachments, and print snippet code blocks inline.
+- `o <dm_id|message_id>`: Open a DM or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
 - `ls`: List the latest 10 accessible DM messages.
 - `ls <number>`: List that many latest accessible DM messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

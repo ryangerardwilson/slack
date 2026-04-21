@@ -107,6 +107,11 @@ features:
   # slack ls rc
   slack ls rc
 
+  search saved contacts and Slack workspace users
+  # slack su <query>
+  slack su rohan
+  slack su "rohan choudhary"
+
   clear stale conversations and bot-like conversations
   # slack sc
   slack sc
@@ -221,6 +226,7 @@ def parse_args(argv):
         "ls_from": None,
         "ls_contains": None,
         "ls_time_limit": None,
+        "query": None,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -348,6 +354,14 @@ def parse_args(argv):
                 else:
                     args["ls_label"] = positionals[0]
             return args
+        if token in {"su", "u"}:
+            if not remaining:
+                raise SystemExit("Use: slack su <query>")
+            query = " ".join(remaining).strip()
+            if not query:
+                raise SystemExit("Use: slack su <query>")
+            args["query"] = query
+            return args
         if token == "mra":
             if remaining:
                 raise SystemExit("Use: slack mra")
@@ -357,7 +371,7 @@ def parse_args(argv):
                 raise SystemExit("Use: slack sc")
             return args
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack su <query> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id|message_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] [-l <limit>] | slack sc | slack mra"
         )
 
     return args
@@ -377,6 +391,99 @@ def list_registered_contacts(contacts):
             ]
         )
     print_sections(rows)
+
+
+def _contact_labels_by_target(contacts):
+    labels = {}
+    for label, target in contacts.items():
+        labels.setdefault(target.strip().lower(), []).append(label)
+    return labels
+
+
+def _contact_search_rows(contacts, query):
+    needle = query.strip().lower()
+    rows = []
+    for label, target in sorted(contacts.items()):
+        haystack = f"{label} {target}".lower()
+        if needle not in haystack:
+            continue
+        rows.append(
+            [
+                ("source", "contact"),
+                ("label", label),
+                ("name", "-"),
+                ("email", target),
+                ("user_id", target if USER_ID_RE.match(target) else "-"),
+            ]
+        )
+    return rows
+
+
+def _user_matches_query(user, query):
+    needle = query.strip().lower()
+    normalized_needle = _normalized_user_name(query)
+    profile = user.get("profile") or {}
+    fields = [
+        user.get("id"),
+        user.get("name"),
+        profile.get("real_name"),
+        profile.get("display_name"),
+        profile.get("email"),
+    ]
+    raw_haystack = " ".join(str(item or "") for item in fields).lower()
+    normalized_haystack = _normalized_user_name(raw_haystack)
+    return needle in raw_haystack or normalized_needle in normalized_haystack
+
+
+def _slack_user_rows(token, contacts, query, limit):
+    rows = []
+    labels_by_target = _contact_labels_by_target(contacts)
+    cursor = None
+    while True:
+        payload = {"limit": "200"}
+        if cursor:
+            payload["cursor"] = cursor
+        data = slack_request("users.list", payload, token, http_method="GET")
+        for user in data.get("members") or []:
+            if not isinstance(user, dict) or user.get("deleted") or user.get("is_bot"):
+                continue
+            if not _user_matches_query(user, query):
+                continue
+            profile = user.get("profile") or {}
+            user_id = str(user.get("id") or "-")
+            email = str(profile.get("email") or "-")
+            labels = sorted(
+                set(
+                    labels_by_target.get(user_id.lower(), [])
+                    + labels_by_target.get(email.lower(), [])
+                )
+            )
+            rows.append(
+                [
+                    ("source", "user"),
+                    ("label", ",".join(labels) if labels else "-"),
+                    ("name", _display_user(user, user_id)),
+                    ("email", email),
+                    ("user_id", user_id),
+                ]
+            )
+            if len(rows) >= limit:
+                return rows
+        cursor = ((data.get("response_metadata") or {}).get("next_cursor") or "").strip()
+        if not cursor:
+            break
+    return rows
+
+
+def search_users_and_contacts(contacts, token, query, limit=20):
+    contact_rows = _contact_search_rows(contacts, query)
+    remaining = max(0, limit - len(contact_rows))
+    user_rows = _slack_user_rows(token, contacts, query, remaining) if remaining else []
+    rows = contact_rows + user_rows
+    if not rows:
+        print("No users or contacts found.")
+        return
+    print_sections(rows[:limit])
 
 
 def read_from_editor():
@@ -1082,6 +1189,18 @@ def _message_details(message, dm_id, token):
     downloads = []
     code_blocks = []
     for file_payload in message_files(message):
+        download_url = file_payload.get("url_private_download")
+        if download_url:
+            destination = _download_destination(dm_id, file_payload)
+            _download_file_to_path(download_url, destination, token)
+            downloads.append(
+                {
+                    "id": file_payload.get("id") or "-",
+                    "name": file_payload.get("name") or "attachment",
+                    "path": destination,
+                }
+            )
+
         if file_payload.get("mode") == "snippet":
             code_blocks.append(
                 {
@@ -1090,20 +1209,6 @@ def _message_details(message, dm_id, token):
                     "text": _snippet_text(file_payload, token),
                 }
             )
-            continue
-
-        download_url = file_payload.get("url_private_download")
-        if not download_url:
-            continue
-        destination = _download_destination(dm_id, file_payload)
-        _download_file_to_path(download_url, destination, token)
-        downloads.append(
-            {
-                "id": file_payload.get("id") or "-",
-                "name": file_payload.get("name") or "attachment",
-                "path": destination,
-            }
-        )
     return downloads, code_blocks
 
 
@@ -1975,6 +2080,12 @@ def _dispatch(argv: list[str]) -> int:
         list_registered_contacts(contacts)
         return 0
 
+    if args["command"] in {"su", "u"}:
+        token = resolve_token(config)
+        auth_test(token)
+        search_users_and_contacts(contacts, token, args["query"])
+        return 0
+
     if args["command"] == "ls":
         token = resolve_list_token(config)
         auth_data = auth_test(token)
@@ -2019,7 +2130,7 @@ def _dispatch(argv: list[str]) -> int:
 
     if args["command"] != "dm":
         raise SystemExit(
-            "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] <number> | slack sc | slack mra"
+            "Use: slack ac <label> <email> | slack su <query> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id|message_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] [-l <limit>] | slack sc | slack mra"
         )
 
     recipient_email = resolve_contact_email(args["recipient"], contacts)

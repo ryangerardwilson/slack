@@ -209,6 +209,14 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(parsed["ls_time_limit"], "2w")
         self.assertTrue(parsed["open_mode"])
 
+    def test_su_accepts_query(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["su", "rohan", "choudhary"])
+
+        self.assertEqual(parsed["command"], "su")
+        self.assertEqual(parsed["query"], "rohan choudhary")
+
     def test_ls_without_label_scans_accessible_dms(self):
         module = load_main_module()
         calls = {}
@@ -380,6 +388,105 @@ class CliContractTests(unittest.TestCase):
 
         with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
             self.assertIsNone(module.lookup_user_id_by_name("rohan", "token"))
+
+    def test_search_users_and_contacts_prints_contact_and_user_matches(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(method, "users.list")
+            return {
+                "ok": True,
+                "members": [
+                    {
+                        "id": "U2",
+                        "name": "rohan.choudhary",
+                        "profile": {
+                            "real_name": "Rohan Choudhary",
+                            "email": "rohan.choudhary@example.com",
+                        },
+                    }
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+        contacts = {"rohan": "rohan.choudhary@example.com"}
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                module.search_users_and_contacts(contacts, "token", "rohan", limit=5)
+
+        output = stdout.getvalue()
+        self.assertIn("source  : contact", output)
+        self.assertIn("source  : user", output)
+        self.assertIn("label   : rohan", output)
+        self.assertIn("user_id : U2", output)
+
+    def test_open_message_id_downloads_all_message_attachments(self):
+        module = load_main_module()
+
+        message = {
+            "ts": "100.000100",
+            "user": "U2",
+            "text": "see files",
+            "files": [
+                {
+                    "id": "F1",
+                    "name": "note.txt",
+                    "url_private_download": "https://files.example/note",
+                },
+                {
+                    "id": "F2",
+                    "name": "snippet.py",
+                    "mode": "snippet",
+                    "url_private_download": "https://files.example/snippet",
+                },
+            ],
+        }
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            if method == "conversations.info":
+                return {"ok": True, "channel": {"user": "U2", "last_read": "0"}}
+            if method == "conversations.history":
+                return {"ok": True, "messages": [message]}
+            if method == "conversations.mark":
+                return {"ok": True}
+            raise AssertionError(method)
+
+        def fake_download_bytes(url, token):
+            if url.endswith("/snippet"):
+                return b"print('hi')\n"
+            return b"hello\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            def fake_destination(dm_id, file_payload):
+                return str(temp_path / f"{dm_id}-{file_payload['id']}-{file_payload['name']}")
+
+            with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+                with mock.patch.object(
+                    module,
+                    "get_user_info",
+                    return_value={
+                        "id": "U2",
+                        "name": "rohan.choudhary",
+                        "profile": {
+                            "real_name": "Rohan Choudhary",
+                            "email": "rohan.choudhary@example.com",
+                        },
+                    },
+                ):
+                    with mock.patch.object(module, "_download_url_bytes", side_effect=fake_download_bytes):
+                        with mock.patch.object(module, "_download_destination", side_effect=fake_destination):
+                            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                module.open_dm_messages("D123:100.000100", "token", "U1")
+
+            self.assertEqual((temp_path / "D123-F1-note.txt").read_text(encoding="utf-8"), "hello\n")
+            self.assertEqual((temp_path / "D123-F2-snippet.py").read_text(encoding="utf-8"), "print('hi')\n")
+            output = stdout.getvalue()
+            self.assertIn("message_id: D123:100.000100", output)
+            self.assertIn("file    : F1", output)
+            self.assertIn("file    : F2", output)
+            self.assertIn("code    : F2 snippet.py", output)
 
 
 if __name__ == "__main__":
