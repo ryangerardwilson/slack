@@ -1,6 +1,6 @@
 # slack
 
-Minimal CLI for Slack direct-message workflows through a configured Slack app token.
+Minimal CLI for Slack message workflows through configured account presets.
 
 ## Install
 
@@ -36,23 +36,28 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-By default `slack` reads the same OpenClaw-style local bot credential file used
-by the wider Slack automation setup:
+Slack account tokens are stored in `~/.config/slack/config.json` as account
+presets, similar to the Gmail CLI:
 
 ```bash
-mkdir -p ~/.openclaw/credentials
-printf '%s\n' 'xoxb-...' > ~/.openclaw/credentials/slack-bot-token
-chmod 600 ~/.openclaw/credentials/slack-bot-token
+slack auth 1 -bt xoxb-... -ut xoxp-... -n personal
+slack auth 2 -bt xoxb-... -ut xoxp-... -n work
+slack auth
 ```
 
-You can override that with `SLACK_BOT_TOKEN`, `SLACK_TOKEN`, or config keys such
-as `bot_token_file`, `token_file`, and `user_token_file`.
+If you already have the older OpenClaw token files, import them into preset `1`:
 
-`slack ls` prioritizes the OpenClaw user-token file at
-`~/.openclaw/credentials/slack-user-token` so it can use Slack's
-`search.messages` fast path across all user-visible DMs, matching Lobster's
-bridge approach. Bot tokens fall back to conversation listing and history reads
-for conversations visible to the bot only.
+```bash
+slack auth 1 -i
+```
+
+Legacy env vars and token files still work as fallback when no account preset is
+configured. Prefer config presets for normal use.
+
+`slack ls` prioritizes a preset's `user_token` so it can use Slack's
+`search.messages` fast path across all user-visible conversations, matching
+Lobster's bridge approach. Bot tokens fall back to conversation listing and
+history reads for conversations visible to the bot only.
 
 Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
 `im:history`, `users:read`, `users:read.email`, `files:write`.
@@ -71,14 +76,14 @@ slack -h
 Add a contact:
 
 ```bash
-slack ac mom mom@example.com
+slack 1 ac mom mom@example.com
 ```
 
 Search saved contacts and Slack workspace users:
 
 ```bash
-slack su rohan
-slack su "rohan choudhary"
+slack 1 su rohan
+slack 1 su "rohan choudhary"
 ```
 
 Open the real config file in your editor:
@@ -87,58 +92,64 @@ Open the real config file in your editor:
 slack cfg
 ```
 
-Send a DM by saved contact label:
+Post to a saved contact label:
 
 ```bash
-slack dm mom "hello"
+slack 1 post mom "hello"
 ```
 
-Send a DM by email:
+Post to an email address:
 
 ```bash
-slack dm someone@company.com "hello"
+slack 1 post someone@company.com "hello"
 ```
 
-Send a DM with a file:
+Post to a channel or group conversation id:
 
 ```bash
-slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
+slack 1 post C0AE059EU5T "sharing the update here"
 ```
 
-Send a DM with multiple files:
+Post to the same conversation as a message id without replying in-thread:
 
 ```bash
-slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf ~/Downloads/summary.txt
+slack 1 post C0AE059EU5T:1712764800.000100 "new top-level message in this conversation"
 ```
 
-Send a DM with files and directories zipped on the fly:
+Reply in the thread for a message id:
 
 ```bash
-slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
+slack 1 reply C0AE059EU5T:1712764800.000100 "replying in thread"
+```
+
+Post with files and directories zipped on the fly:
+
+```bash
+slack 1 post design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
 ```
 
 List accessible Slack message history, including message ids, conversation
 surface, sender, text, and attached file ids:
 
 ```bash
-slack ls
-slack ls 10
-slack ls md 10
-slack ls -l 20
-slack ls -f maanas -tl 2w -l 10
-slack ls -c invoice -tl "jan 2025" -l 20
-slack ls -ur 10
-slack ls md -r 10
-slack ls md -o 5
-slack ls rc
+slack 1 ls
+slack 1 ls 10
+slack 1 ls md 10
+slack 1 ls -l 20
+slack 1 ls -f maanas -tl 2w -l 10
+slack 1 ls -c invoice -tl "jan 2025" -l 20
+slack 1 ls -ur 10
+slack 1 ls md -r 10
+slack 1 ls md -o 5
+slack 1 ls rc
 ```
 
 Open a conversation or exact message id, mark it read, download every attachment
 on the opened message, show text, and print snippet code blocks:
 
 ```bash
-slack o D0466D63H7B
-slack o D0466D63H7B:1712764800.000100
+slack 1 o D0466D63H7B
+slack 1 o D0466D63H7B:1712764800.000100
 ```
 
 Clear stale conversations and bot-like conversations:
@@ -158,12 +169,12 @@ slack mra
 `slack ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
 and channels are distinguishable. Saved contacts are still used for friendly
-labels such as `slack ls md -l 10`.
+labels such as `slack 1 ls md -l 10`.
 `mra` still operates on contacts you have saved with `ac`.
 
 ## Contacts
 
-Contacts are stored in `~/.config/slack/config.json`.
+Account presets, tokens, and contacts are stored in `~/.config/slack/config.json`.
 
 Open that file directly with:
 
@@ -175,21 +186,42 @@ Example:
 
 ```json
 {
-  "bot_token_file": "~/.openclaw/credentials/slack-bot-token",
-  "contacts": {
-    "mom": "mom@example.com"
+  "defaults": {
+    "preset": "1"
+  },
+  "accounts": {
+    "1": {
+      "name": "personal",
+      "bot_token": "xoxb-...",
+      "user_token": "xoxp-...",
+      "contacts": {
+        "mom": "mom@example.com"
+      }
+    },
+    "2": {
+      "name": "work",
+      "bot_token": "xoxb-...",
+      "user_token": "xoxp-..."
+    }
   }
 }
 ```
 
+Commands may omit the preset when `defaults.preset` is set; for example,
+`slack ls` uses the default account and `slack 2 ls` uses preset `2`.
+
 ## Options
 
 - `ac`: Save a contact label for an email address.
+- `auth`: List configured account presets.
+- `auth <preset> -i`: Import legacy OpenClaw token files into a config preset.
+- `auth <preset> -bt <bot_token> [-ut <user_token>] [-n <name>]`: Create or update an account preset with tokens stored in config.
 - `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `dm`: Send a DM to a saved contact label or email from the configured Slack app token, with any number of file or directory attachments. Directories are zipped on the fly.
-- `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `o <dm_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
+- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. Files and directories are supported; directories are zipped on the fly.
+- `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
+- `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
+- `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

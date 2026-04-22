@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -108,17 +109,20 @@ class CliContractTests(unittest.TestCase):
                         module.main(["cfg"])
 
             self.assertTrue(config_path.exists())
-            self.assertEqual(config_path.read_text(encoding="utf-8"), "{}\n")
+            self.assertEqual(
+                config_path.read_text(encoding="utf-8"),
+                '{\n  "defaults": {\n    "preset": "1"\n  },\n  "accounts": {}\n}\n',
+            )
             self.assertEqual(recorded["cmd"], ["nano", str(config_path)])
             self.assertFalse(recorded["check"])
             self.assertEqual(stdout.getvalue(), "")
 
-    def test_dm_accepts_multiple_attachment_paths(self):
+    def test_post_accepts_multiple_attachment_paths(self):
         module = load_main_module()
 
         parsed = module.parse_args(
             [
-                "dm",
+                "post",
                 "ar",
                 "hello",
                 "/tmp/file1.csv",
@@ -127,12 +131,283 @@ class CliContractTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(parsed["command"], "dm")
+        self.assertEqual(parsed["command"], "post")
         self.assertEqual(parsed["recipient"], "ar")
         self.assertEqual(parsed["message"], "hello")
         self.assertEqual(
             parsed["paths"],
             ["/tmp/file1.csv", "/tmp/folder", "/tmp/file2.csv"],
+        )
+
+    def test_preset_prefix_parses_command(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["2", "post", "C123", "hello"])
+
+        self.assertEqual(parsed["preset"], "2")
+        self.assertEqual(parsed["command"], "post")
+        self.assertEqual(parsed["recipient"], "C123")
+        self.assertEqual(parsed["message"], "hello")
+
+    def test_dm_alias_parses_as_post(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["dm", "ar", "hello"])
+
+        self.assertEqual(parsed["command"], "post")
+        self.assertEqual(parsed["recipient"], "ar")
+        self.assertEqual(parsed["message"], "hello")
+
+    def test_auth_parses_token_storage_flags(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(
+            ["auth", "2", "-bt", "xoxb-bot", "-ut", "xoxp-user", "-n", "work"]
+        )
+
+        self.assertEqual(parsed["command"], "auth")
+        self.assertEqual(parsed["auth_preset"], "2")
+        self.assertEqual(parsed["auth_bot_token"], "xoxb-bot")
+        self.assertEqual(parsed["auth_user_token"], "xoxp-user")
+        self.assertEqual(parsed["auth_name"], "work")
+
+        prefixed = module.parse_args(["2", "auth", "-i"])
+        self.assertEqual(prefixed["command"], "auth")
+        self.assertEqual(prefixed["auth_preset"], "2")
+        self.assertTrue(prefixed["auth_import"])
+
+    def test_select_account_uses_default_preset(self):
+        module = load_main_module()
+
+        preset, account = module.select_account(
+            {
+                "defaults": {"preset": "2"},
+                "accounts": {
+                    "1": {"bot_token": "xoxb-one"},
+                    "2": {"bot_token": "xoxb-two"},
+                },
+            }
+        )
+
+        self.assertEqual(preset, "2")
+        self.assertEqual(account["bot_token"], "xoxb-two")
+
+    def test_contacts_merge_root_and_account_contacts(self):
+        module = load_main_module()
+
+        contacts = module.contacts_for_account(
+            {"contacts": {"root": "root@example.com"}},
+            {"contacts": {"acct": "acct@example.com", "root": "override@example.com"}},
+        )
+
+        self.assertEqual(
+            contacts,
+            {"root": "override@example.com", "acct": "acct@example.com"},
+        )
+
+    def test_resolve_token_reads_direct_config_tokens(self):
+        module = load_main_module()
+
+        self.assertEqual(module.resolve_token({"bot_token": "xoxb-config"}), "xoxb-config")
+        self.assertEqual(module.resolve_list_token({"user_token": "xoxp-config"}), "xoxp-config")
+
+    def test_reply_requires_message_id_target(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["reply", "C123:100.000100", "hello"])
+
+        self.assertEqual(parsed["command"], "reply")
+        self.assertEqual(parsed["recipient"], "C123:100.000100")
+        self.assertEqual(parsed["message"], "hello")
+        with self.assertRaises(SystemExit):
+            module.parse_args(["reply", "C123", "hello"])
+
+    def test_resolve_post_target_accepts_channel_and_message_ids(self):
+        module = load_main_module()
+
+        channel_target = module.resolve_post_target("C123", {}, "token")
+        message_target = module.resolve_post_target("C123:100.000100", {}, "token")
+
+        self.assertEqual(channel_target["kind"], "conversation")
+        self.assertEqual(channel_target["channel_id"], "C123")
+        self.assertEqual(message_target["kind"], "message")
+        self.assertEqual(message_target["channel_id"], "C123")
+        self.assertEqual(message_target["message_ts"], "100.000100")
+
+    def test_resolve_post_target_accepts_contact_labels(self):
+        module = load_main_module()
+
+        with mock.patch.object(module, "lookup_user_id_by_email", return_value="U123"):
+            with mock.patch.object(module, "open_dm", return_value="D123"):
+                target = module.resolve_post_target(
+                    "ar",
+                    {"ar": "ashish.raj@example.com"},
+                    "token",
+                )
+
+        self.assertEqual(target["kind"], "email")
+        self.assertEqual(target["label"], "ar")
+        self.assertEqual(target["target"], "ar")
+        self.assertEqual(target["channel_id"], "D123")
+
+    def test_post_dispatch_sends_to_channel_id(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            token_path = Path(temp_dir) / "bot-token"
+            config_path.parent.mkdir(parents=True)
+            token_path.write_text("xoxb-token\n", encoding="utf-8")
+            config_path.write_text(
+                '{"bot_token_file": "' + str(token_path) + '"}\n',
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "auth_test", return_value={"ok": True}):
+                    with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
+                        with mock.patch.object(
+                            module,
+                            "send_attachments",
+                            return_value=["report.csv"],
+                        ) as send_attachments:
+                            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                rc = module.main(["post", "C123", "hello", "/tmp/report.csv"])
+
+        self.assertEqual(rc, 0)
+        send_post.assert_called_once_with("xoxb-token", "C123", "hello")
+        send_attachments.assert_called_once_with(
+            "C123",
+            "200.000100",
+            ["/tmp/report.csv"],
+            "xoxb-token",
+        )
+        self.assertIn(
+            "posted target=C123 kind=conversation channel=C123 ts=200.000100 files=report.csv",
+            stdout.getvalue(),
+        )
+
+    def test_auth_stores_tokens_inside_config_accounts(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(
+                    module,
+                    "auth_test",
+                    return_value={"ok": True, "team": "Work", "team_id": "T123", "user_id": "U123"},
+                ):
+                    with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                        rc = module.main(
+                            [
+                                "auth",
+                                "1",
+                                "-bt",
+                                "xoxb-token",
+                                "-ut",
+                                "xoxp-token",
+                                "-n",
+                                "work",
+                            ]
+                        )
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 0)
+        account = config["accounts"]["1"]
+        self.assertEqual(account["bot_token"], "xoxb-token")
+        self.assertEqual(account["user_token"], "xoxp-token")
+        self.assertEqual(account["name"], "work")
+        self.assertEqual(config["defaults"]["preset"], "1")
+        self.assertIn("authorized preset=1", stdout.getvalue())
+        self.assertNotIn("xoxb-token", stdout.getvalue())
+        self.assertNotIn("xoxp-token", stdout.getvalue())
+
+    def test_auth_import_reads_legacy_token_files(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            bot_path = Path(temp_dir) / "bot-token"
+            user_path = Path(temp_dir) / "user-token"
+            bot_path.write_text("xoxb-token\n", encoding="utf-8")
+            user_path.write_text("xoxp-token\n", encoding="utf-8")
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "DEFAULT_BOT_TOKEN_FILE", str(bot_path)):
+                    with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(user_path)):
+                        with mock.patch.object(module, "auth_test", return_value={"ok": True}):
+                            rc = module.main(["auth", "1", "-i"])
+
+            config_path = config_home / "slack" / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(config["accounts"]["1"]["bot_token"], "xoxb-token")
+        self.assertEqual(config["accounts"]["1"]["user_token"], "xoxp-token")
+
+    def test_reply_dispatch_sends_thread_reply(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            token_path = Path(temp_dir) / "bot-token"
+            config_path.parent.mkdir(parents=True)
+            token_path.write_text("xoxb-token\n", encoding="utf-8")
+            config_path.write_text(
+                '{"bot_token_file": "' + str(token_path) + '"}\n',
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "auth_test", return_value={"ok": True}):
+                    with mock.patch.object(
+                        module,
+                        "resolve_reply_thread_ts",
+                        return_value="100.000100",
+                    ):
+                        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
+                            with mock.patch.object(
+                                module,
+                                "send_attachments",
+                                return_value=[],
+                            ) as send_attachments:
+                                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                    rc = module.main(
+                                        ["reply", "C123:100.000100", "hello"]
+                                    )
+
+        self.assertEqual(rc, 0)
+        send_post.assert_called_once_with(
+            "xoxb-token",
+            "C123",
+            "hello",
+            thread_ts="100.000100",
+        )
+        send_attachments.assert_called_once_with("C123", "100.000100", [], "xoxb-token")
+        self.assertIn(
+            "replied message_id=C123:100.000100 channel=C123 thread_ts=100.000100 ts=200.000100",
+            stdout.getvalue(),
         )
 
     def test_send_attachments_uploads_all_files_and_directories(self):

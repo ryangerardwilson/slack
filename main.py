@@ -21,6 +21,23 @@ from rgw_cli_contract import (
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+CONVERSATION_ID_RE = re.compile(r"^[CDG][A-Z0-9]+$")
+COMMANDS = {
+    "ac",
+    "auth",
+    "cfg",
+    "conf",
+    "df",
+    "dm",
+    "ls",
+    "mra",
+    "o",
+    "post",
+    "reply",
+    "sc",
+    "su",
+    "u",
+}
 DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
 DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
 DEFAULT_LIST_LIMIT = 10
@@ -56,6 +73,7 @@ _MONTH_NAMES = {
 }
 _TIME_LIMIT_SHAPE = '2w | 14d | 3m | 1y | 2025-01 | "jan 2025" | 2025-01-10 | 2025-01-10..2025-01-20'
 INSTALL_SCRIPT = resolve_install_script_path(__file__)
+CONFIG_BOOTSTRAP_TEXT = '{\n  "defaults": {\n    "preset": "1"\n  },\n  "accounts": {}\n}\n'
 HELP_TEXT = """Slack CLI
 
 flags:
@@ -68,57 +86,70 @@ flags:
 
 features:
   save a contact label for a frequently used Slack recipient
-  # slack ac <label> <email>
-  slack ac mom mom@example.com
-  slack ac boss boss@company.com
+  # slack [preset] ac <label> <email>
+  slack 1 ac mom mom@example.com
+  slack 1 ac boss boss@company.com
 
   edit the saved-contact config directly in your editor
   # slack conf
   slack conf
 
-  send a direct message from the configured Slack app token, with any number of file or directory attachments
-  # slack dm <contact_label|email> <message> [path...]
-  slack dm mom "hello"
-  slack dm boss@company.com "latest draft" ~/Downloads/draft.pdf
-  slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
+  configure Slack account presets with tokens stored in config.json
+  # slack auth
+  # slack auth <preset> -i
+  # slack auth <preset> -bt <bot_token> [-ut <user_token>] [-n <name>]
+  slack auth
+  slack auth 1 -i
+  slack auth 2 -bt xoxb-... -ut xoxp-... -n work
 
-  download a file attachment from a DM by dm_id and file_id
-  # slack df <dm_id> <file_id> [output_path]
-  slack df D0466D63H7B F0AH0LD4133
+  post a message from a configured Slack account to a contact, channel, or conversation
+  # slack [preset] post <contact_label|email|message_id|channel_id> <message> [path...]
+  slack 1 post mom "hello"
+  slack 1 post boss@company.com "latest draft" ~/Downloads/draft.pdf
+  slack 1 post C0AE059EU5T "group update"
+  slack 1 post C0AE059EU5T:1712764800.000100 "same conversation, new top-level message"
 
-  open a DM or exact message id, mark it read, show text, download files, and print code blocks
-  # slack o <dm_id|message_id>
-  slack o D0466D63H7B
-  slack o D0466D63H7B:1712764800.000100
+  reply in the thread for an exact Slack message id
+  # slack [preset] reply <message_id> <message> [path...]
+  slack 1 reply C0AE059EU5T:1712764800.000100 "reply in thread"
+
+  download a file attachment from a conversation by channel_id and file_id
+  # slack [preset] df <channel_id> <file_id> [output_path]
+  slack 1 df D0466D63H7B F0AH0LD4133
+
+  open a conversation or exact message id, mark it read, show text, download files, and print code blocks
+  # slack [preset] o <channel_id|message_id>
+  slack 1 o D0466D63H7B
+  slack 1 o D0466D63H7B:1712764800.000100
 
   list Slack message history with Gmail-style filters, surface labels, and attached file ids
-  # slack ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
-  slack ls
-  slack ls 10
-  slack ls md 10
-  slack ls -l 20
-  slack ls -f maanas -tl 2w -l 10
-  slack ls -c invoice -tl "jan 2025" -l 20
-  slack ls -ur 10
-  slack ls md -r 10
-  slack ls md -o 5
+  # slack [preset] ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
+  slack 1 ls
+  slack 1 ls 10
+  slack 1 ls md 10
+  slack 1 ls -l 20
+  slack 1 ls -f maanas -tl 2w -l 10
+  slack 1 ls -c invoice -tl "jan 2025" -l 20
+  slack 1 ls -ur 10
+  slack 1 ls md -r 10
+  slack 1 ls md -o 5
 
   list all registered contact labels
-  # slack ls rc
-  slack ls rc
+  # slack [preset] ls rc
+  slack 1 ls rc
 
   search saved contacts and Slack workspace users
-  # slack su <query>
-  slack su rohan
-  slack su "rohan choudhary"
+  # slack [preset] su <query>
+  slack 1 su rohan
+  slack 1 su "rohan choudhary"
 
   clear stale conversations and bot-like conversations
-  # slack sc
-  slack sc
+  # slack [preset] sc
+  slack 1 sc
 
   mark all unread saved-contact direct messages as read
-  # slack mra
-  slack mra
+  # slack [preset] mra
+  slack 1 mra
 """
 
 
@@ -161,6 +192,65 @@ def save_config(config_path, payload):
     with open(config_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    try:
+        os.chmod(directory, 0o700)
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+
+
+def _accounts(config):
+    accounts = config.get("accounts")
+    if accounts is None:
+        return {}
+    if not isinstance(accounts, dict):
+        raise SystemExit("accounts must be a JSON object.")
+    return accounts
+
+
+def _defaults(config):
+    defaults = config.get("defaults")
+    if defaults is None:
+        return {}
+    if not isinstance(defaults, dict):
+        raise SystemExit("defaults must be a JSON object.")
+    return defaults
+
+
+def _sorted_presets(accounts):
+    def key(value):
+        text = str(value)
+        return (0, int(text)) if text.isdigit() else (1, text)
+
+    return sorted((str(item) for item in accounts), key=key)
+
+
+def default_preset(config):
+    accounts = _accounts(config)
+    if not accounts:
+        return None
+    configured = config.get("default_preset") or _defaults(config).get("preset")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    ordered = _sorted_presets(accounts)
+    return "1" if "1" in accounts else ordered[0]
+
+
+def select_account(config, preset=None):
+    accounts = _accounts(config)
+    if not accounts:
+        if preset:
+            raise SystemExit(f"Preset '{preset}' not found in config.")
+        return None, config
+
+    selected = (preset or default_preset(config) or "").strip()
+    if not selected:
+        raise SystemExit("No Slack account presets configured. Use: slack auth <preset> -i")
+    account = accounts.get(selected)
+    if not isinstance(account, dict):
+        available = ", ".join(_sorted_presets(accounts)) or "-"
+        raise SystemExit(f"Preset '{selected}' not found in config. Available presets: {available}")
+    return selected, account
 
 
 def normalize_contacts(payload):
@@ -185,6 +275,31 @@ def normalize_contacts(payload):
     return cleaned
 
 
+def contacts_for_account(config, account):
+    contacts = normalize_contacts(config)
+    if account is not config:
+        merged = dict(contacts)
+        merged.update(normalize_contacts(account))
+        return merged
+    return contacts
+
+
+def save_contact(config, preset, label, target):
+    if preset:
+        accounts = config.setdefault("accounts", {})
+        account = accounts.setdefault(preset, {})
+        contacts = normalize_contacts(account)
+        contacts[label] = target
+        account["contacts"] = contacts
+        return
+
+    contacts = normalize_contacts(config)
+    contacts[label] = target
+    config["contacts"] = contacts
+    if "user_labels" in config:
+        del config["user_labels"]
+
+
 def _requests():
     import requests
 
@@ -195,6 +310,19 @@ def _ls_usage():
     return (
         "Use: slack ls rc | slack ls [label] [-ur|-r] [-o] "
         "[-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]"
+    )
+
+
+def _top_level_usage():
+    return (
+        "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>]] | "
+        "slack [preset] ac <label> <email> | slack [preset] su <query> | slack conf | "
+        "slack [preset] post <contact_label|email|message_id|channel_id> <message> [path...] | "
+        "slack [preset] reply <message_id> <message> [path...] | "
+        "slack [preset] df <channel_id> <file_id> [output_path] | "
+        "slack [preset] o <channel_id|message_id> | slack [preset] ls rc | "
+        "slack [preset] ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] "
+        "[-c <contains>] [-tl <time_limit>] | slack [preset] sc | slack [preset] mra"
     )
 
 
@@ -211,6 +339,7 @@ def _parse_positive_int(value, label):
 def parse_args(argv):
     args = {
         "command": None,
+        "preset": None,
         "label": None,
         "email": None,
         "recipient": None,
@@ -227,6 +356,12 @@ def parse_args(argv):
         "ls_contains": None,
         "ls_time_limit": None,
         "query": None,
+        "auth_preset": None,
+        "auth_bot_token": None,
+        "auth_user_token": None,
+        "auth_name": None,
+        "auth_import": False,
+        "auth_list": False,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -236,6 +371,9 @@ def parse_args(argv):
         return args
 
     index = 0
+    if len(argv) >= 2 and argv[0].isdigit() and argv[1] in COMMANDS:
+        args["preset"] = argv[0]
+        index = 1
     while index < len(argv):
         token = argv[index]
 
@@ -249,9 +387,7 @@ def parse_args(argv):
             raise SystemExit(f"Unknown flag: {token}")
 
         if args["command"] is not None:
-            raise SystemExit(
-                "Use: slack ac <label> <email> | slack conf | slack dm <contact_label|email> <message> [path...]"
-            )
+            raise SystemExit(_top_level_usage())
 
         args["command"] = token
         remaining = argv[index + 1 :]
@@ -264,18 +400,70 @@ def parse_args(argv):
             if remaining:
                 raise SystemExit("Use: slack conf")
             return args
-        if token == "dm":
+        if token == "auth":
+            if not remaining:
+                if args["preset"]:
+                    args["auth_preset"] = args["preset"]
+                    return args
+                args["auth_list"] = True
+                return args
+            if args["preset"] and remaining[0].startswith("-"):
+                auth_preset = args["preset"]
+                i = 0
+            else:
+                auth_preset = remaining[0]
+                i = 1
+            if not auth_preset or auth_preset.startswith("-"):
+                raise SystemExit("Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-n <name>]")
+            args["auth_preset"] = auth_preset
+            while i < len(remaining):
+                item = remaining[i]
+                if item == "-i":
+                    args["auth_import"] = True
+                    i += 1
+                    continue
+                if item == "-bt":
+                    if i + 1 >= len(remaining):
+                        raise SystemExit("auth -bt requires: <bot_token>")
+                    args["auth_bot_token"] = remaining[i + 1]
+                    i += 2
+                    continue
+                if item == "-ut":
+                    if i + 1 >= len(remaining):
+                        raise SystemExit("auth -ut requires: <user_token>")
+                    args["auth_user_token"] = remaining[i + 1]
+                    i += 2
+                    continue
+                if item == "-n":
+                    if i + 1 >= len(remaining):
+                        raise SystemExit("auth -n requires: <name>")
+                    args["auth_name"] = remaining[i + 1]
+                    i += 2
+                    continue
+                raise SystemExit(f"Unknown auth option: {item}")
+            return args
+        if token in {"post", "dm"}:
             if len(remaining) < 2:
                 raise SystemExit(
-                    "Use: slack dm <contact_label|email> <message> [path...]"
+                    "Use: slack post <contact_label|email|message_id|channel_id> <message> [path...]"
                 )
+            args["command"] = "post"
+            args["recipient"] = remaining[0]
+            args["message"] = remaining[1]
+            args["paths"] = remaining[2:]
+            return args
+        if token == "reply":
+            if len(remaining) < 2:
+                raise SystemExit("Use: slack reply <message_id> <message> [path...]")
+            if not parse_message_id(remaining[0]):
+                raise SystemExit("Use: slack reply <message_id> <message> [path...]")
             args["recipient"] = remaining[0]
             args["message"] = remaining[1]
             args["paths"] = remaining[2:]
             return args
         if token == "df":
             if len(remaining) < 2 or len(remaining) > 3:
-                raise SystemExit("Use: slack df <dm_id> <file_id> [output_path]")
+                raise SystemExit("Use: slack df <channel_id> <file_id> [output_path]")
             args["recipient"] = remaining[0]
             args["file_id"] = remaining[1]
             if len(remaining) == 3:
@@ -283,7 +471,7 @@ def parse_args(argv):
             return args
         if token == "o":
             if len(remaining) != 1:
-                raise SystemExit("Use: slack o <dm_id>")
+                raise SystemExit("Use: slack o <channel_id|message_id>")
             args["recipient"] = remaining[0]
             args["open_mode"] = True
             return args
@@ -370,9 +558,7 @@ def parse_args(argv):
             if remaining:
                 raise SystemExit("Use: slack sc")
             return args
-        raise SystemExit(
-            "Use: slack ac <label> <email> | slack su <query> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id|message_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] [-l <limit>] | slack sc | slack mra"
-        )
+        raise SystemExit(_top_level_usage())
 
     return args
 
@@ -541,6 +727,14 @@ def _read_token_file(path):
     return token or None
 
 
+def _direct_token(config, keys):
+    for key in keys:
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _read_first_config_token(config, keys):
     for key in keys:
         value = config.get(key)
@@ -553,7 +747,9 @@ def _read_first_config_token(config, keys):
 
 def resolve_token(config=None):
     config = config or {}
-    token = get_env("SLACK_BOT_TOKEN")
+    token = _direct_token(config, ("bot_token", "token", "user_token"))
+    if not token:
+        token = get_env("SLACK_BOT_TOKEN")
     if not token:
         token = get_env("SLACK_TOKEN")
     if not token:
@@ -576,7 +772,9 @@ def resolve_token(config=None):
 
 def resolve_list_token(config=None):
     config = config or {}
-    token = get_env("SLACK_TOKEN")
+    token = _direct_token(config, ("user_token", "token", "bot_token"))
+    if not token:
+        token = get_env("SLACK_TOKEN")
     if not token:
         token = _read_first_config_token(config, ("token_file", "user_token_file"))
     if not token:
@@ -665,12 +863,178 @@ def auth_test(token):
     return data
 
 
-def resolve_contact_email(recipient, contacts):
-    if recipient in contacts:
-        return contacts[recipient]
-    if recipient and "@" in recipient:
-        return recipient.strip()
-    raise SystemExit("Recipient must be a contact label or email.")
+def _token_bool(value):
+    return "yes" if isinstance(value, str) and value.strip() else "no"
+
+
+def list_account_presets(config):
+    accounts = _accounts(config)
+    if not accounts:
+        print("No account presets configured.")
+        return
+    rows = []
+    for preset in _sorted_presets(accounts):
+        account = accounts.get(preset) or {}
+        rows.append(
+            [
+                ("preset", preset),
+                ("name", account.get("name") or "-"),
+                ("team", account.get("team") or account.get("team_id") or "-"),
+                ("bot_token", _token_bool(account.get("bot_token"))),
+                ("user_token", _token_bool(account.get("user_token"))),
+                ("contacts", str(len(normalize_contacts(account)))),
+            ]
+        )
+    print_sections(rows)
+
+
+def _validate_token_kind(token, expected_kind, label):
+    if not token:
+        return None
+    token = token.strip()
+    actual = _token_kind(token)
+    if actual != expected_kind:
+        raise SystemExit(f"{label} must be a {expected_kind} token.")
+    return token
+
+
+def _import_bot_token(config):
+    for candidate in (
+        _direct_token(config, ("bot_token",)),
+        _read_first_config_token(config, ("bot_token_file",)),
+        _read_token_file(DEFAULT_BOT_TOKEN_FILE),
+    ):
+        if candidate and _token_kind(candidate) == "bot":
+            return candidate
+    return None
+
+
+def _import_user_token(config):
+    for candidate in (
+        _direct_token(config, ("user_token", "token")),
+        _read_first_config_token(config, ("user_token_file", "token_file")),
+        _read_token_file(DEFAULT_USER_TOKEN_FILE),
+    ):
+        if candidate and _token_kind(candidate) == "user":
+            return candidate
+    return None
+
+
+def configure_account(config_path, config, preset, bot_token, user_token, name, import_tokens):
+    if not preset:
+        raise SystemExit("Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-n <name>]")
+    if import_tokens:
+        bot_token = bot_token or _import_bot_token(config)
+        user_token = user_token or _import_user_token(config)
+
+    accounts = config.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        raise SystemExit("accounts must be a JSON object.")
+    account = accounts.get(preset)
+    if account is None:
+        account = {}
+    if not isinstance(account, dict):
+        raise SystemExit(f"accounts['{preset}'] must be a JSON object.")
+
+    bot_token = _validate_token_kind(bot_token, "bot", "bot_token")
+    user_token = _validate_token_kind(user_token, "user", "user_token")
+
+    effective_bot = bot_token or account.get("bot_token")
+    effective_user = user_token or account.get("user_token")
+    if not effective_bot and not effective_user:
+        raise SystemExit("Provide -bt, -ut, or -i to store at least one Slack token.")
+
+    auth_data = auth_test(user_token or bot_token or effective_user or effective_bot)
+    if name:
+        account["name"] = name.strip()
+    if bot_token:
+        account["bot_token"] = bot_token
+    if user_token:
+        account["user_token"] = user_token
+    if "contacts" not in account:
+        root_contacts = normalize_contacts(config)
+        if root_contacts:
+            account["contacts"] = root_contacts
+    for target_key, source_key in (
+        ("team", "team"),
+        ("team_id", "team_id"),
+        ("url", "url"),
+        ("user_id", "user_id"),
+    ):
+        if auth_data.get(source_key):
+            account[target_key] = auth_data[source_key]
+    accounts[preset] = account
+
+    defaults = config.setdefault("defaults", {})
+    if isinstance(defaults, dict) and not defaults.get("preset"):
+        defaults["preset"] = preset
+    save_config(config_path, config)
+    print(
+        "authorized "
+        f"preset={preset} "
+        f"name={account.get('name') or '-'} "
+        f"team={account.get('team') or account.get('team_id') or '-'} "
+        f"bot_token={_token_bool(account.get('bot_token'))} "
+        f"user_token={_token_bool(account.get('user_token'))}"
+    )
+
+
+def _resolve_post_target_value(value, token):
+    parsed_message_id = parse_message_id(value)
+    if parsed_message_id:
+        channel_id, message_ts = parsed_message_id
+        return {
+            "kind": "message",
+            "target": value,
+            "channel_id": channel_id,
+            "message_ts": message_ts,
+        }
+    if CONVERSATION_ID_RE.match(value):
+        return {
+            "kind": "conversation",
+            "target": value,
+            "channel_id": value,
+            "message_ts": None,
+        }
+    if USER_ID_RE.match(value):
+        channel_id = open_dm(value, token)
+        return {
+            "kind": "user",
+            "target": value,
+            "channel_id": channel_id,
+            "message_ts": None,
+            "user_id": value,
+        }
+    if "@" in value:
+        email = value.strip()
+        user_id = lookup_user_id_by_email(email, token)
+        channel_id = open_dm(user_id, token)
+        return {
+            "kind": "email",
+            "target": email,
+            "channel_id": channel_id,
+            "message_ts": None,
+            "email": email,
+            "user_id": user_id,
+        }
+    return None
+
+
+def resolve_post_target(recipient, contacts, token):
+    raw = (recipient or "").strip()
+    if not raw:
+        raise SystemExit("Post target cannot be empty.")
+    if raw in contacts:
+        resolved = _resolve_post_target_value(contacts[raw].strip(), token)
+        if resolved:
+            resolved["label"] = raw
+            resolved["target"] = raw
+            return resolved
+        raise SystemExit(f"Saved contact '{raw}' is not an email, user id, channel id, or message id.")
+    resolved = _resolve_post_target_value(raw, token)
+    if resolved:
+        return resolved
+    raise SystemExit("Post target must be a contact label, email, Slack user id, channel id, or message id.")
 
 
 def lookup_user_id_by_email(email, token):
@@ -706,13 +1070,25 @@ def open_dm(user_id, token):
     return channel_id
 
 
-def send_dm(token, user_id, text):
-    channel_id = open_dm(user_id, token)
+def send_post(token, channel_id, text, thread_ts=None):
+    payload = {"channel": channel_id, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     data = slack_request(
-        "chat.postMessage", {"channel": channel_id, "text": text}, token
+        "chat.postMessage", payload, token
     )
     message = data.get("message") or {}
-    return channel_id, message.get("ts")
+    return message.get("ts")
+
+
+def resolve_reply_thread_ts(channel_id, message_ts, token):
+    try:
+        message = _hydrate_message(channel_id, message_ts, token)
+    except SystemExit:
+        message = None
+    if not message:
+        return message_ts
+    return str(message.get("thread_ts") or message_ts)
 
 
 def expand_existing_path(path, kind):
@@ -1924,7 +2300,7 @@ def open_dm_messages(dm_id, token, self_user_id):
             token,
             use_form=True,
         )
-        print(f"opened_and_marked_read dm_id={dm_id} ts={latest_ts}")
+        print(f"opened_and_marked_read channel_id={dm_id} ts={latest_ts}")
 
 
 def action_close_conversation(channel_id, token):
@@ -2036,7 +2412,7 @@ def download_dm_file(dm_id, file_id, output_path, token):
                 destination = os.path.expanduser(destination)
                 _download_file_to_path(download_url, destination, token)
 
-                print(f"downloaded dm_id={dm_id} file_id={file_id} path={destination}")
+                print(f"downloaded channel_id={dm_id} file_id={file_id} path={destination}")
                 return
 
         cursor = (
@@ -2045,7 +2421,7 @@ def download_dm_file(dm_id, file_id, output_path, token):
         if not cursor:
             break
 
-    raise SystemExit(f"File not found in dm_id={dm_id}: {file_id}")
+    raise SystemExit(f"File not found in channel_id={dm_id}: {file_id}")
 
 
 def clear_stale_conversations(token):
@@ -2186,10 +2562,30 @@ def _dispatch(argv: list[str]) -> int:
     config_path = get_config_path(args["config"])
 
     if args["command"] in {"cfg", "conf"}:
-        return open_config_in_editor(lambda: Path(config_path))
+        return open_config_in_editor(
+            lambda: Path(config_path),
+            bootstrap_text=CONFIG_BOOTSTRAP_TEXT,
+        )
 
     config = load_config(config_path)
-    contacts = normalize_contacts(config)
+
+    if args["command"] == "auth":
+        if args["auth_list"]:
+            list_account_presets(config)
+            return 0
+        configure_account(
+            config_path,
+            config,
+            args["auth_preset"],
+            args["auth_bot_token"],
+            args["auth_user_token"],
+            args["auth_name"],
+            args["auth_import"],
+        )
+        return 0
+
+    preset, account = select_account(config, args["preset"])
+    contacts = contacts_for_account(config, account)
 
     if args["command"] == "ac":
         label = (args["label"] or "").strip()
@@ -2198,10 +2594,7 @@ def _dispatch(argv: list[str]) -> int:
             raise SystemExit("Label cannot be empty.")
         if "@" not in email:
             raise SystemExit("Use: slack ac <label> <email>")
-        contacts[label] = email
-        config["contacts"] = contacts
-        if "user_labels" in config:
-            del config["user_labels"]
+        save_contact(config, preset, label, email)
         save_config(config_path, config)
         print(f"Saved contact '{label}' -> {email}")
         return 0
@@ -2214,13 +2607,13 @@ def _dispatch(argv: list[str]) -> int:
         return 0
 
     if args["command"] in {"su", "u"}:
-        token = resolve_token(config)
+        token = resolve_token(account)
         auth_test(token)
         search_users_and_contacts(contacts, token, args["query"])
         return 0
 
     if args["command"] == "ls":
-        token = resolve_list_token(config)
+        token = resolve_list_token(account)
         auth_data = auth_test(token)
         self_user_id = auth_data.get("user_id")
         if not self_user_id:
@@ -2239,7 +2632,7 @@ def _dispatch(argv: list[str]) -> int:
         )
         return 0
 
-    token = resolve_token(config)
+    token = resolve_token(account)
     auth_data = auth_test(token)
 
     if args["command"] == "o":
@@ -2261,26 +2654,43 @@ def _dispatch(argv: list[str]) -> int:
         clear_stale_conversations(token)
         return 0
 
-    if args["command"] != "dm":
-        raise SystemExit(
-            "Use: slack ac <label> <email> | slack su <query> | slack conf | slack dm <contact_label|email> <message> [path...] | slack df <dm_id> <file_id> [output_path] | slack o <dm_id|message_id> | slack ls rc | slack ls [label] [-ur|-r] [-o] [-l <limit>] | slack sc | slack mra"
-        )
-
-    recipient_email = resolve_contact_email(args["recipient"], contacts)
-    user_id = lookup_user_id_by_email(recipient_email, token)
-    channel_id, ts = send_dm(token, user_id, args["message"])
-    uploaded = send_attachments(channel_id, ts, args["paths"], token)
-
-    if uploaded:
-        print(
-            f"DM sent. email={recipient_email} channel={channel_id} ts={ts} files={','.join(uploaded)}"
-        )
+    if args["command"] == "post":
+        target = resolve_post_target(args["recipient"], contacts, token)
+        channel_id = target["channel_id"]
+        ts = send_post(token, channel_id, args["message"])
+        uploaded = send_attachments(channel_id, ts, args["paths"], token)
+        details = [
+            "posted",
+            f"target={args['recipient']}",
+            f"kind={target['kind']}",
+            f"channel={channel_id}",
+        ]
+        if ts:
+            details.append(f"ts={ts}")
+        if uploaded:
+            details.append(f"files={','.join(uploaded)}")
+        print(" ".join(details))
         return 0
-    if ts:
-        print(f"DM sent. email={recipient_email} channel={channel_id} ts={ts}")
+
+    if args["command"] == "reply":
+        channel_id, message_ts = parse_message_id(args["recipient"])
+        thread_ts = resolve_reply_thread_ts(channel_id, message_ts, token)
+        ts = send_post(token, channel_id, args["message"], thread_ts=thread_ts)
+        uploaded = send_attachments(channel_id, thread_ts, args["paths"], token)
+        details = [
+            "replied",
+            f"message_id={args['recipient']}",
+            f"channel={channel_id}",
+            f"thread_ts={thread_ts}",
+        ]
+        if ts:
+            details.append(f"ts={ts}")
+        if uploaded:
+            details.append(f"files={','.join(uploaded)}")
+        print(" ".join(details))
         return 0
-    print(f"DM sent. email={recipient_email} channel={channel_id}")
-    return 0
+
+    raise SystemExit(_top_level_usage())
 
 
 APP_SPEC = AppSpec(
@@ -2290,7 +2700,7 @@ APP_SPEC = AppSpec(
     install_script_path=INSTALL_SCRIPT,
     no_args_mode="help",
     config_path_factory=_config_path,
-    config_bootstrap_text="{}\n",
+    config_bootstrap_text=CONFIG_BOOTSTRAP_TEXT,
 )
 
 

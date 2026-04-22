@@ -7,16 +7,18 @@
 ## Product Boundaries
 
 - `slack` is a minimal CLI for Slack direct-message and adjacent message-read workflows through the configured Slack app token.
-- Keep the scope narrow: direct message send, contact/user search, contact management, message listing with conversation-surface labels, DM read-state actions, stale conversation cleanup, optional file delivery, version, and upgrade.
+- Keep the scope narrow: posting to explicit Slack targets, thread replies, contact/user search, contact management, message listing with conversation-surface labels, DM read-state actions, stale conversation cleanup, optional file delivery, version, and upgrade.
 - Do not expand this app into a general Slack client, channel browser, or interactive TUI without explicit user direction.
-- Use OpenClaw-style local credential files for Slack token access by default, with `~/.openclaw/credentials/slack-bot-token` as the preferred bot token path.
+- Use `config.json` account presets as the primary Slack token store. Legacy OpenClaw-style local credential files may remain as fallback/import inputs, but new behavior should prefer `accounts.<preset>.bot_token` and `accounts.<preset>.user_token`.
+- Preset keys should be numeric strings such as `1`, `2`, and `3`, matching the Gmail CLI pattern.
 - `slack ls` scans accessible message history for the configured token by default; saved contacts remain useful as labels and targeted filters. It must label the surface (`dm`, `group_dm`, `channel`, or `private_channel`) rather than implying every result is a one-to-one DM.
-- Use Slack `search.messages` for `ls` with the OpenClaw user-token file by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
+- Use Slack `search.messages` for `ls` with the preset's user token by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
 - `ls` is message-level history, not a conversation summary view or channel browser.
 
 ## Interface Rules
 
-- Keep the top-level interface flat: `slack ac <label> <email>`, `slack su <query>`, `slack cfg`, `slack dm <contact_label|email> <message> [file_path] [dir_path]`, `slack df <dm_id> <file_id> [output_path]`, `slack o <dm_id|message_id>`, `slack ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]`, `slack ls rc`, `slack mra`, and `slack sc`.
+- Keep the top-level interface flat: `slack auth`, `slack auth <preset> -i`, `slack auth <preset> -bt <bot_token> [-ut <user_token>] [-n <name>]`, `slack [preset] ac <label> <email>`, `slack [preset] su <query>`, `slack cfg`, `slack [preset] post <contact_label|email|message_id|channel_id> <message> [file_path] [dir_path]`, `slack [preset] reply <message_id> <message> [file_path] [dir_path]`, `slack [preset] df <channel_id> <file_id> [output_path]`, `slack [preset] o <channel_id|message_id>`, `slack [preset] ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]`, `slack [preset] ls rc`, `slack [preset] mra`, and `slack [preset] sc`.
+- `post` is for a new message in the resolved conversation. `reply` is only for message ids and posts into that message's thread.
 - Treat short flags as canonical. `-h`, `-v`, and `-u` are reserved for help, version, and upgrade.
 - `slack` with no args must print the same help as `slack -h`.
 - Help output must stay human-written, compact, and printed with terminal-default styling.
