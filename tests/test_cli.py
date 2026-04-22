@@ -305,11 +305,14 @@ class CliContractTests(unittest.TestCase):
         with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
             with mock.patch.object(
                 module,
-                "get_dm_info",
+                "_conversation_summary",
                 return_value={
                     "email": "sender@example.com",
                     "info": {"last_read": "50.0"},
                     "channel_id": "D123",
+                    "surface": "dm",
+                    "conversation": "Sender <sender@example.com>",
+                    "members": "2",
                 },
             ):
                 with mock.patch.object(
@@ -338,7 +341,83 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["dm_id"], "D123")
+        self.assertEqual(entries[0]["channel_id"], "D123")
+        self.assertEqual(entries[0]["surface"], "dm")
+        self.assertEqual(entries[0]["conversation"], "Sender <sender@example.com>")
         self.assertEqual(entries[0]["sender"]["name"], "Sender")
+
+    def test_search_dms_labels_channel_surfaces(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(token, "xoxp-token")
+            if method == "search.messages":
+                return {
+                    "ok": True,
+                    "messages": {
+                        "matches": [
+                            {
+                                "channel": {"id": "C123", "name": "growth"},
+                                "ts": "100.000100",
+                                "user": "U222",
+                                "text": "hello team",
+                            }
+                        ]
+                    },
+                }
+            raise AssertionError(method)
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(
+                module,
+                "_conversation_summary",
+                side_effect=SystemExit("missing_scope"),
+            ):
+                with mock.patch.object(
+                    module,
+                    "_hydrate_message",
+                    return_value={"ts": "100.000100", "user": "U222", "text": "hello team"},
+                ):
+                    with mock.patch.object(
+                        module,
+                        "_sender_info",
+                        return_value={
+                            "id": "U222",
+                            "name": "Sender",
+                            "email": "sender@example.com",
+                            "label": "Sender <sender@example.com>",
+                        },
+                    ):
+                        entries = module.search_dms(
+                            {},
+                            "xoxp-token",
+                            10,
+                            "all",
+                            "U111",
+                            False,
+                        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["channel_id"], "C123")
+        self.assertEqual(entries[0]["surface"], "channel")
+        self.assertEqual(entries[0]["conversation"], "#growth")
+
+    def test_fallback_conversation_summary_formats_group_dm_names(self):
+        module = load_main_module()
+
+        summary = module._fallback_conversation_summary(
+            "C123",
+            {
+                "id": "C123",
+                "name": "mpdm-rohan.choudhary--ryan.wilson--maanas.dwivedi064-1",
+            },
+        )
+
+        self.assertEqual(summary["surface"], "group_dm")
+        self.assertEqual(
+            summary["conversation"],
+            "rohan.choudhary, ryan.wilson, maanas.dwivedi064",
+        )
 
     def test_lookup_user_id_by_name_resolves_unique_exact_match(self):
         module = load_main_module()
@@ -487,6 +566,41 @@ class CliContractTests(unittest.TestCase):
             self.assertIn("file    : F1", output)
             self.assertIn("file    : F2", output)
             self.assertIn("code    : F2 snippet.py", output)
+
+    def test_open_message_id_falls_back_without_conversation_info(self):
+        module = load_main_module()
+
+        message = {"ts": "100.000100", "user": "U2", "text": "group update"}
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            if method == "conversations.info":
+                raise SystemExit("missing_scope")
+            if method == "conversations.history":
+                return {"ok": True, "messages": [message]}
+            if method == "conversations.mark":
+                return {"ok": True}
+            raise AssertionError(method)
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(
+                module,
+                "get_user_info",
+                return_value={
+                    "id": "U2",
+                    "name": "rohan.choudhary",
+                    "profile": {
+                        "real_name": "Rohan Choudhary",
+                        "email": "rohan.choudhary@example.com",
+                    },
+                },
+            ):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    module.open_dm_messages("C123:100.000100", "token", "U1")
+
+        output = stdout.getvalue()
+        self.assertIn("message_id: C123:100.000100", output)
+        self.assertIn("surface     : channel", output)
+        self.assertIn("channel_id  : C123", output)
 
 
 if __name__ == "__main__":

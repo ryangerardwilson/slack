@@ -6,13 +6,13 @@
 
 ## Product Boundaries
 
-- `slack` is a minimal CLI for Slack direct-message workflows through the configured Slack app token.
-- Keep the scope narrow: direct message send, contact/user search, contact management, DM listing, DM read-state actions, stale conversation cleanup, optional file delivery, version, and upgrade.
+- `slack` is a minimal CLI for Slack direct-message and adjacent message-read workflows through the configured Slack app token.
+- Keep the scope narrow: direct message send, contact/user search, contact management, message listing with conversation-surface labels, DM read-state actions, stale conversation cleanup, optional file delivery, version, and upgrade.
 - Do not expand this app into a general Slack client, channel browser, or interactive TUI without explicit user direction.
 - Use OpenClaw-style local credential files for Slack token access by default, with `~/.openclaw/credentials/slack-bot-token` as the preferred bot token path.
-- `slack ls` scans accessible direct-message conversations for the configured token by default; saved contacts remain useful as labels and targeted filters.
+- `slack ls` scans accessible message history for the configured token by default; saved contacts remain useful as labels and targeted filters. It must label the surface (`dm`, `group_dm`, `channel`, or `private_channel`) rather than implying every result is a one-to-one DM.
 - Use Slack `search.messages` for `ls` with the OpenClaw user-token file by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
-- `ls` is message-level direct-message history, not a conversation summary view.
+- `ls` is message-level history, not a conversation summary view or channel browser.
 
 ## Interface Rules
 

@@ -91,7 +91,7 @@ features:
   slack o D0466D63H7B
   slack o D0466D63H7B:1712764800.000100
 
-  list direct message history with Gmail-style filters and attached file ids
+  list Slack message history with Gmail-style filters, surface labels, and attached file ids
   # slack ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
   slack ls
   slack ls 10
@@ -1031,31 +1031,125 @@ def _user_email(user, fallback="-"):
     return profile.get("email") or fallback
 
 
-def _dm_info_from_channel(channel, token, user_cache):
-    channel_id = channel.get("id")
+def _conversation_surface(info, channel_id):
+    if info.get("is_im") or info.get("user") or str(channel_id).startswith("D"):
+        return "dm"
+    if info.get("is_mpim"):
+        return "group_dm"
+    if str(info.get("name") or "").startswith("mpdm-"):
+        return "group_dm"
+    if info.get("is_channel"):
+        return "private_channel" if info.get("is_private") else "channel"
+    if str(channel_id).startswith("G"):
+        return "private_channel"
+    if str(channel_id).startswith("C"):
+        return "channel"
+    return "conversation"
+
+
+def _channel_name(channel, channel_id):
+    raw_name = (
+        channel.get("name")
+        or channel.get("name_normalized")
+        or channel.get("context_team_name")
+        or channel_id
+    )
+    name = str(raw_name)
+    surface = _conversation_surface(channel, channel_id)
+    if surface == "group_dm" and name.startswith("mpdm-"):
+        stem = re.sub(r"-\d+$", "", name.removeprefix("mpdm-"))
+        participants = [part for part in stem.split("--") if part]
+        if participants:
+            return ", ".join(participants)
+    if surface in {"channel", "private_channel"} and name != channel_id and not name.startswith("#"):
+        return f"#{name}"
+    return name
+
+
+def _person_conversation_label(user, fallback):
+    name = _display_user(user, fallback)
+    email = _user_email(user)
+    if email != "-" and name != "-":
+        return f"{name} <{email}>"
+    if email != "-":
+        return email
+    return name
+
+
+def _thread_label(message):
+    thread_ts = str(message.get("thread_ts") or "")
+    ts = str(message.get("ts") or "")
+    reply_count = message.get("reply_count")
+    if thread_ts and thread_ts != ts:
+        return f"reply_to {thread_ts}"
+    if thread_ts or reply_count:
+        if reply_count:
+            return f"root {reply_count} replies"
+        return "root"
+    return "-"
+
+
+def _conversation_summary(channel, token, user_cache=None):
+    channel_id = channel.get("id") if isinstance(channel, dict) else channel
     if not channel_id:
         return None
     info = slack_request(
         "conversations.info",
-        {"channel": channel_id, "include_num_members": "false"},
+        {"channel": channel_id, "include_num_members": "true"},
         token,
         http_method="GET",
     ).get("channel") or {}
-    user_id = info.get("user") or channel.get("user")
+    merged = {}
+    if isinstance(channel, dict):
+        merged.update(channel)
+    merged.update(info)
+    surface = _conversation_surface(merged, channel_id)
+    user_id = merged.get("user")
     user = {}
-    if user_id:
-        if user_id not in user_cache:
-            user_cache[user_id] = get_user_info(user_id, token)
-        user = user_cache[user_id]
+    if surface == "dm" and user_id:
+        if user_cache is not None:
+            if user_id not in user_cache:
+                user_cache[user_id] = get_user_info(user_id, token)
+            user = user_cache[user_id]
+        else:
+            user = get_user_info(user_id, token)
+    email = _user_email(user) if user else "-"
+    name = _display_user(user, user_id or "-") if user else _channel_name(merged, channel_id)
+    conversation = _person_conversation_label(user, user_id or channel_id) if user else name
     return {
         "label": "-",
-        "email": _user_email(user),
-        "name": _display_user(user, user_id or "-"),
+        "email": email,
+        "name": name,
+        "conversation": conversation,
+        "surface": surface,
+        "members": merged.get("num_members") or "-",
         "user_id": user_id or "-",
         "channel_id": channel_id,
         "info": info,
         "user": user,
     }
+
+
+def _fallback_conversation_summary(channel_id, channel=None):
+    channel = channel if isinstance(channel, dict) else {}
+    hint = dict(channel)
+    hint.setdefault("id", channel_id)
+    return {
+        "label": "-",
+        "email": "-",
+        "name": _channel_name(hint, channel_id),
+        "conversation": _channel_name(hint, channel_id),
+        "surface": _conversation_surface(hint, channel_id),
+        "members": hint.get("num_members") or "-",
+        "user_id": hint.get("user") or "-",
+        "channel_id": channel_id,
+        "info": {},
+        "user": {},
+    }
+
+
+def _dm_info_from_channel(channel, token, user_cache):
+    return _conversation_summary(channel, token, user_cache)
 
 
 def get_all_dm_infos(token):
@@ -1106,15 +1200,19 @@ def get_contact_dm_infos(contacts, token):
         email = _user_email(user, target)
         info = slack_request(
             "conversations.info",
-            {"channel": channel_id, "include_num_members": "false"},
+            {"channel": channel_id, "include_num_members": "true"},
             token,
             http_method="GET",
         ).get("channel") or {}
+        conversation = _person_conversation_label(user, user_id)
         infos.append(
             {
                 "label": label,
                 "email": email,
                 "name": _display_user(user, user_id),
+                "conversation": conversation,
+                "surface": "dm",
+                "members": info.get("num_members") or "-",
                 "user_id": user_id,
                 "channel_id": channel_id,
                 "info": info,
@@ -1125,25 +1223,10 @@ def get_contact_dm_infos(contacts, token):
 
 
 def get_dm_info(channel_id, token):
-    info = slack_request(
-        "conversations.info",
-        {"channel": channel_id, "include_num_members": "false"},
-        token,
-        http_method="GET",
-    ).get("channel") or {}
-    user_id = info.get("user")
-    if not user_id:
-        raise SystemExit(f"Unable to resolve DM user for {channel_id}.")
-    user = get_user_info(user_id, token)
-    return {
-        "label": "-",
-        "email": _user_email(user),
-        "name": _display_user(user, user_id),
-        "user_id": user_id,
-        "channel_id": channel_id,
-        "info": info,
-        "user": user,
-    }
+    summary = _conversation_summary({"id": channel_id}, token)
+    if not summary:
+        raise SystemExit(f"Unable to resolve Slack conversation for {channel_id}.")
+    return summary
 
 
 def _download_url_bytes(download_url, token):
@@ -1429,17 +1512,18 @@ def search_dms(
         except ValueError:
             continue
         if channel_id not in dm_cache:
+            channel_hint = dict(channel)
+            channel_hint.setdefault("id", channel_id)
             try:
-                dm_cache[channel_id] = get_dm_info(channel_id, token)
+                dm_cache[channel_id] = _conversation_summary(channel_hint, token)
             except SystemExit:
-                dm_cache[channel_id] = {
-                    "email": "-",
-                    "name": str(channel.get("name") or channel_id),
-                    "info": {},
-                    "channel_id": channel_id,
-                }
+                dm_cache[channel_id] = _fallback_conversation_summary(channel_id, channel_hint)
         dm_info = dm_cache[channel_id]
-        message = _hydrate_message(channel_id, ts, token) or {
+        try:
+            hydrated_message = _hydrate_message(channel_id, ts, token)
+        except SystemExit:
+            hydrated_message = None
+        message = hydrated_message or {
             "ts": ts,
             "user": match.get("user"),
             "text": match.get("text") or "",
@@ -1455,6 +1539,10 @@ def search_dms(
             "sort_ts": ts_value,
             "email": dm_info.get("email") or "-",
             "dm_id": channel_id,
+            "channel_id": channel_id,
+            "surface": dm_info.get("surface") or "conversation",
+            "conversation": dm_info.get("conversation") or dm_info.get("name") or channel_id,
+            "members": dm_info.get("members") or "-",
             "message": message,
             "sender": sender,
             "unread": bool(not is_self and ts_value > last_read_value),
@@ -1471,16 +1559,24 @@ def _print_open_entries(entries, token):
     for index, entry in enumerate(entries, start=1):
         prefix = f"[{index}]"
         sender = entry.get("sender") or _sender_info(entry["message"], token, user_cache)
+        channel_id = entry.get("channel_id") or entry.get("dm_id")
+        members = entry.get("members") or "-"
+        thread = _thread_label(entry["message"])
         print(prefix + ("-" * max(1, 79 - len(prefix))))
-        print(f"{'message_id':<10}: {message_id(entry['dm_id'], entry['message'].get('ts'))}")
-        print(f"{'email':<8}: {entry['email']}")
-        print(f"{'dm_id':<8}: {entry['dm_id']}")
+        print(f"{'message_id':<10}: {message_id(channel_id, entry['message'].get('ts'))}")
+        print(f"{'surface':<12}: {entry.get('surface') or 'conversation'}")
+        print(f"{'conversation':<12}: {entry.get('conversation') or entry.get('email') or channel_id}")
+        print(f"{'channel_id':<12}: {channel_id}")
+        if members != "-":
+            print(f"{'members':<12}: {members}")
+        if thread != "-":
+            print(f"{'thread':<12}: {thread}")
         print(f"{'date':<8}: {format_ts(entry['message'].get('ts'))}")
         print(f"{'from':<8}: {sender['label']}")
         text = message_text(entry["message"]).rstrip()
         print(style_help(f"{'text':<8}: {text if text else '-'}"))
 
-        downloads, code_blocks = _message_details(entry["message"], entry["dm_id"], token)
+        downloads, code_blocks = _message_details(entry["message"], channel_id, token)
         if downloads:
             for file_info in downloads:
                 print(style_help(f"{'file':<8}: {file_info['id']} {file_info['path']}"))
@@ -1573,6 +1669,12 @@ def _collect_messages(
                     "sort_ts": ts_value,
                     "email": contact_dm["email"],
                     "dm_id": contact_dm["channel_id"],
+                    "channel_id": contact_dm["channel_id"],
+                    "surface": contact_dm.get("surface") or "dm",
+                    "conversation": contact_dm.get("conversation")
+                    or contact_dm.get("name")
+                    or contact_dm["email"],
+                    "members": contact_dm.get("members") or "-",
                     "message": message,
                     "sender": sender,
                     "unread": is_unread,
@@ -1600,6 +1702,31 @@ def _empty_dm_message(filter_mode):
     if filter_mode == "read":
         return "No read DMs."
     return "No DMs."
+
+
+def _list_entry_fields(item):
+    channel_id = item.get("channel_id") or item.get("dm_id")
+    fields = [
+        ("message_id", message_id(channel_id, item["message"].get("ts"))),
+        ("surface", item.get("surface") or "conversation"),
+        ("conversation", item.get("conversation") or item.get("email") or channel_id),
+        ("channel_id", channel_id),
+    ]
+    members = item.get("members") or "-"
+    if members != "-":
+        fields.append(("members", members))
+    thread = _thread_label(item["message"])
+    if thread != "-":
+        fields.append(("thread", thread))
+    fields.extend(
+        [
+            ("date", format_ts(item["message"].get("ts"))),
+            ("from", item["sender"]["label"]),
+            ("text", compact_text(message_text(item["message"]))),
+            ("files", summarize_files(item["message"])),
+        ]
+    )
+    return fields
 
 
 def list_dms(
@@ -1666,9 +1793,10 @@ def list_dms(
             ts = item["message"].get("ts")
             if not ts:
                 continue
-            current = latest_by_channel.get(item["dm_id"])
+            channel_id = item.get("channel_id") or item.get("dm_id")
+            current = latest_by_channel.get(channel_id)
             if current is None or float(ts) > float(current):
-                latest_by_channel[item["dm_id"]] = ts
+                latest_by_channel[channel_id] = ts
         marked = 0
         for channel_id, ts in latest_by_channel.items():
             slack_request(
@@ -1681,27 +1809,17 @@ def list_dms(
         print(f"ls_opened messages={len(selected)} marked_conversations={marked}")
         return
 
-    print_sections(
-        [
-            [
-                ("message_id", message_id(item["dm_id"], item["message"].get("ts"))),
-                ("email", item["email"]),
-                ("dm_id", item["dm_id"]),
-                ("date", format_ts(item["message"].get("ts"))),
-                ("from", item["sender"]["label"]),
-                ("text", compact_text(message_text(item["message"]))),
-                ("files", summarize_files(item["message"])),
-            ]
-            for item in selected
-        ]
-    )
+    print_sections([_list_entry_fields(item) for item in selected])
 
 
 def open_dm_messages(dm_id, token, self_user_id):
     parsed_message_id = parse_message_id(dm_id)
     if parsed_message_id:
         channel_id, target_ts = parsed_message_id
-        contact_dm = get_dm_info(channel_id, token)
+        try:
+            contact_dm = get_dm_info(channel_id, token)
+        except SystemExit:
+            contact_dm = _fallback_conversation_summary(channel_id)
         history = slack_request(
             "conversations.history",
             {
@@ -1726,6 +1844,12 @@ def open_dm_messages(dm_id, token, self_user_id):
             "sort_ts": float(target_ts),
             "email": contact_dm["email"],
             "dm_id": channel_id,
+            "channel_id": channel_id,
+            "surface": contact_dm.get("surface") or "conversation",
+            "conversation": contact_dm.get("conversation")
+            or contact_dm.get("name")
+            or contact_dm["email"],
+            "members": contact_dm.get("members") or "-",
             "message": message,
             "sender": _sender_info(message, token, user_cache),
         }
@@ -1739,7 +1863,10 @@ def open_dm_messages(dm_id, token, self_user_id):
         print(f"opened_and_marked_read message_id={message_id(channel_id, target_ts)}")
         return
 
-    contact_dm = get_dm_info(dm_id, token)
+    try:
+        contact_dm = get_dm_info(dm_id, token)
+    except SystemExit:
+        contact_dm = _fallback_conversation_summary(dm_id)
     info = contact_dm["info"]
     last_read = info.get("last_read") or "0"
     try:
@@ -1768,6 +1895,12 @@ def open_dm_messages(dm_id, token, self_user_id):
                 "sort_ts": ts_value,
                 "email": contact_dm["email"],
                 "dm_id": dm_id,
+                "channel_id": dm_id,
+                "surface": contact_dm.get("surface") or "conversation",
+                "conversation": contact_dm.get("conversation")
+                or contact_dm.get("name")
+                or contact_dm["email"],
+                "members": contact_dm.get("members") or "-",
                 "message": message,
                 "sender": _sender_info(message, token, user_cache),
                 "unread": ts_value > last_read_value,

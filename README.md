@@ -117,8 +117,8 @@ Send a DM with files and directories zipped on the fly:
 slack dm design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
 ```
 
-List accessible DM history, including message ids, sender, text, and attached
-file ids:
+List accessible Slack message history, including message ids, conversation
+surface, sender, text, and attached file ids:
 
 ```bash
 slack ls
@@ -133,8 +133,8 @@ slack ls md -o 5
 slack ls rc
 ```
 
-Open a DM or exact message id, mark it read, download every attachment on the
-opened message, show text, and print snippet code blocks:
+Open a conversation or exact message id, mark it read, download every attachment
+on the opened message, show text, and print snippet code blocks:
 
 ```bash
 slack o D0466D63H7B
@@ -155,8 +155,10 @@ Mark all unread DMs as read:
 slack mra
 ```
 
-`slack ls` scans direct-message conversations visible to the configured token.
-Saved contacts are still used for friendly labels such as `slack ls md -l 10`.
+`slack ls` scans Slack conversations visible to the configured token. Each row
+prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
+and channels are distinguishable. Saved contacts are still used for friendly
+labels such as `slack ls md -l 10`.
 `mra` still operates on contacts you have saved with `ac`.
 
 ## Contacts
@@ -187,15 +189,15 @@ Example:
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
 - `dm`: Send a DM to a saved contact label or email from the configured Slack app token, with any number of file or directory attachments. Directories are zipped on the fly.
 - `df <dm_id> <file_id> [output_path]`: Download an attached file from a DM by its DM id and file id.
-- `o <dm_id|message_id>`: Open a DM or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
-- `ls`: List the latest 10 accessible DM messages.
-- `ls <number>`: List that many latest accessible DM messages.
+- `o <dm_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
+- `ls`: List the latest 10 accessible Slack messages.
+- `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.
 - `ls -l <limit>`: List a specific number of messages.
 - `ls -f <from>`: Filter by sender name, email, user id, or saved contact metadata.
 - `ls -c <contains>`: Filter by message text.
 - `ls -tl <time_limit>`: Filter by time, using shapes such as `2w`, `14d`, `2025-01`, `"jan 2025"`, `2025-01-10`, or `2025-01-10..2025-01-20`.
-- `ls -ur` / `ls -r`: Filter unread or read DM messages.
+- `ls -ur` / `ls -r`: Filter unread or read Slack messages.
 - `ls ... -o ...`: For the selected messages, also print full text, download non-snippet attachments, and print full snippet code blocks.
 - `ls rc`: List all registered contact labels and emails from local config.
 - `mra`: Mark all unread saved-contact direct messages as read.
