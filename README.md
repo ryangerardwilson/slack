@@ -54,7 +54,11 @@ slack auth 1 -i
 Legacy env vars and token files still work as fallback when no account preset is
 configured. Prefer config presets for normal use.
 
-`slack ls` prioritizes a preset's `user_token` so it can use Slack's
+When `accounts` exists in the config, account-scoped commands use an explicit
+numeric preset like `slack 1 ls` or `slack 2 post ...`. Contacts are stored
+inside each preset and are not shared across accounts.
+
+`slack <preset> ls` prioritizes that preset's `user_token` so it can use Slack's
 `search.messages` fast path across all user-visible conversations, matching
 Lobster's bridge approach. Bot tokens fall back to conversation listing and
 history reads for conversations visible to the bot only.
@@ -155,7 +159,7 @@ slack 1 o D0466D63H7B:1712764800.000100
 Clear stale conversations and bot-like conversations:
 
 ```bash
-slack sc
+slack 1 sc
 ```
 
 `sc` closes DMs whose counterpart has no email or whose latest activity is older than about 6 months. It also leaves joined public channels whose creator has no email or whose channel update time is older than about 6 months. Private channels and group DMs are skipped when the token lacks the required scopes.
@@ -163,10 +167,10 @@ slack sc
 Mark all unread DMs as read:
 
 ```bash
-slack mra
+slack 1 mra
 ```
 
-`slack ls` scans Slack conversations visible to the configured token. Each row
+`slack 1 ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
 and channels are distinguishable. Saved contacts are still used for friendly
 labels such as `slack 1 ls md -l 10`.
@@ -186,9 +190,6 @@ Example:
 
 ```json
 {
-  "defaults": {
-    "preset": "1"
-  },
   "accounts": {
     "1": {
       "name": "personal",
@@ -206,9 +207,6 @@ Example:
   }
 }
 ```
-
-Commands may omit the preset when `defaults.preset` is set; for example,
-`slack ls` uses the default account and `slack 2 ls` uses preset `2`.
 
 ## Options
 

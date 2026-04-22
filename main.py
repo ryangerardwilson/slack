@@ -73,7 +73,7 @@ _MONTH_NAMES = {
 }
 _TIME_LIMIT_SHAPE = '2w | 14d | 3m | 1y | 2025-01 | "jan 2025" | 2025-01-10 | 2025-01-10..2025-01-20'
 INSTALL_SCRIPT = resolve_install_script_path(__file__)
-CONFIG_BOOTSTRAP_TEXT = '{\n  "defaults": {\n    "preset": "1"\n  },\n  "accounts": {}\n}\n'
+CONFIG_BOOTSTRAP_TEXT = '{\n  "accounts": {}\n}\n'
 HELP_TEXT = """Slack CLI
 
 flags:
@@ -86,7 +86,7 @@ flags:
 
 features:
   save a contact label for a frequently used Slack recipient
-  # slack [preset] ac <label> <email>
+  # slack <preset> ac <label> <email>
   slack 1 ac mom mom@example.com
   slack 1 ac boss boss@company.com
 
@@ -103,27 +103,27 @@ features:
   slack auth 2 -bt xoxb-... -ut xoxp-... -n work
 
   post a message from a configured Slack account to a contact, channel, or conversation
-  # slack [preset] post <contact_label|email|message_id|channel_id> <message> [path...]
+  # slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...]
   slack 1 post mom "hello"
   slack 1 post boss@company.com "latest draft" ~/Downloads/draft.pdf
   slack 1 post C0AE059EU5T "group update"
   slack 1 post C0AE059EU5T:1712764800.000100 "same conversation, new top-level message"
 
   reply in the thread for an exact Slack message id
-  # slack [preset] reply <message_id> <message> [path...]
+  # slack <preset> reply <message_id> <message> [path...]
   slack 1 reply C0AE059EU5T:1712764800.000100 "reply in thread"
 
   download a file attachment from a conversation by channel_id and file_id
-  # slack [preset] df <channel_id> <file_id> [output_path]
+  # slack <preset> df <channel_id> <file_id> [output_path]
   slack 1 df D0466D63H7B F0AH0LD4133
 
   open a conversation or exact message id, mark it read, show text, download files, and print code blocks
-  # slack [preset] o <channel_id|message_id>
+  # slack <preset> o <channel_id|message_id>
   slack 1 o D0466D63H7B
   slack 1 o D0466D63H7B:1712764800.000100
 
   list Slack message history with Gmail-style filters, surface labels, and attached file ids
-  # slack [preset] ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
+  # slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
   slack 1 ls
   slack 1 ls 10
   slack 1 ls md 10
@@ -135,20 +135,20 @@ features:
   slack 1 ls md -o 5
 
   list all registered contact labels
-  # slack [preset] ls rc
+  # slack <preset> ls rc
   slack 1 ls rc
 
   search saved contacts and Slack workspace users
-  # slack [preset] su <query>
+  # slack <preset> su <query>
   slack 1 su rohan
   slack 1 su "rohan choudhary"
 
   clear stale conversations and bot-like conversations
-  # slack [preset] sc
+  # slack <preset> sc
   slack 1 sc
 
   mark all unread saved-contact direct messages as read
-  # slack [preset] mra
+  # slack <preset> mra
   slack 1 mra
 """
 
@@ -208,32 +208,12 @@ def _accounts(config):
     return accounts
 
 
-def _defaults(config):
-    defaults = config.get("defaults")
-    if defaults is None:
-        return {}
-    if not isinstance(defaults, dict):
-        raise SystemExit("defaults must be a JSON object.")
-    return defaults
-
-
 def _sorted_presets(accounts):
     def key(value):
         text = str(value)
         return (0, int(text)) if text.isdigit() else (1, text)
 
     return sorted((str(item) for item in accounts), key=key)
-
-
-def default_preset(config):
-    accounts = _accounts(config)
-    if not accounts:
-        return None
-    configured = config.get("default_preset") or _defaults(config).get("preset")
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip()
-    ordered = _sorted_presets(accounts)
-    return "1" if "1" in accounts else ordered[0]
 
 
 def select_account(config, preset=None):
@@ -243,9 +223,10 @@ def select_account(config, preset=None):
             raise SystemExit(f"Preset '{preset}' not found in config.")
         return None, config
 
-    selected = (preset or default_preset(config) or "").strip()
+    selected = (preset or "").strip()
     if not selected:
-        raise SystemExit("No Slack account presets configured. Use: slack auth <preset> -i")
+        available = ", ".join(_sorted_presets(accounts)) or "-"
+        raise SystemExit(f"Missing preset. Use: slack <preset> <command>. Available presets: {available}")
     account = accounts.get(selected)
     if not isinstance(account, dict):
         available = ", ".join(_sorted_presets(accounts)) or "-"
@@ -276,12 +257,7 @@ def normalize_contacts(payload):
 
 
 def contacts_for_account(config, account):
-    contacts = normalize_contacts(config)
-    if account is not config:
-        merged = dict(contacts)
-        merged.update(normalize_contacts(account))
-        return merged
-    return contacts
+    return normalize_contacts(account)
 
 
 def save_contact(config, preset, label, target):
@@ -308,7 +284,7 @@ def _requests():
 
 def _ls_usage():
     return (
-        "Use: slack ls rc | slack ls [label] [-ur|-r] [-o] "
+        "Use: slack <preset> ls rc | slack <preset> ls [label] [-ur|-r] [-o] "
         "[-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]"
     )
 
@@ -316,13 +292,13 @@ def _ls_usage():
 def _top_level_usage():
     return (
         "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>]] | "
-        "slack [preset] ac <label> <email> | slack [preset] su <query> | slack conf | "
-        "slack [preset] post <contact_label|email|message_id|channel_id> <message> [path...] | "
-        "slack [preset] reply <message_id> <message> [path...] | "
-        "slack [preset] df <channel_id> <file_id> [output_path] | "
-        "slack [preset] o <channel_id|message_id> | slack [preset] ls rc | "
-        "slack [preset] ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] "
-        "[-c <contains>] [-tl <time_limit>] | slack [preset] sc | slack [preset] mra"
+        "slack <preset> ac <label> <email> | slack <preset> su <query> | slack conf | "
+        "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
+        "slack <preset> reply <message_id> <message> [path...] | "
+        "slack <preset> df <channel_id> <file_id> [output_path] | "
+        "slack <preset> o <channel_id|message_id> | slack <preset> ls rc | "
+        "slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] "
+        "[-c <contains>] [-tl <time_limit>] | slack <preset> sc | slack <preset> mra"
     )
 
 
@@ -955,6 +931,14 @@ def configure_account(config_path, config, preset, bot_token, user_token, name, 
         root_contacts = normalize_contacts(config)
         if root_contacts:
             account["contacts"] = root_contacts
+    if "contacts" in config:
+        del config["contacts"]
+    if "user_labels" in config:
+        del config["user_labels"]
+    if "defaults" in config:
+        del config["defaults"]
+    if "default_preset" in config:
+        del config["default_preset"]
     for target_key, source_key in (
         ("team", "team"),
         ("team_id", "team_id"),
@@ -965,9 +949,6 @@ def configure_account(config_path, config, preset, bot_token, user_token, name, 
             account[target_key] = auth_data[source_key]
     accounts[preset] = account
 
-    defaults = config.setdefault("defaults", {})
-    if isinstance(defaults, dict) and not defaults.get("preset"):
-        defaults["preset"] = preset
     save_config(config_path, config)
     print(
         "authorized "

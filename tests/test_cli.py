@@ -111,7 +111,7 @@ class CliContractTests(unittest.TestCase):
             self.assertTrue(config_path.exists())
             self.assertEqual(
                 config_path.read_text(encoding="utf-8"),
-                '{\n  "defaults": {\n    "preset": "1"\n  },\n  "accounts": {}\n}\n',
+                '{\n  "accounts": {}\n}\n',
             )
             self.assertEqual(recorded["cmd"], ["nano", str(config_path)])
             self.assertFalse(recorded["check"])
@@ -176,23 +176,28 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(prefixed["auth_preset"], "2")
         self.assertTrue(prefixed["auth_import"])
 
-    def test_select_account_uses_default_preset(self):
+    def test_select_account_requires_preset_when_accounts_exist(self):
         module = load_main_module()
 
+        with self.assertRaises(SystemExit):
+            module.select_account(
+                {
+                    "accounts": {
+                        "1": {"bot_token": "xoxb-one"},
+                        "2": {"bot_token": "xoxb-two"},
+                    },
+                }
+            )
+
         preset, account = module.select_account(
-            {
-                "defaults": {"preset": "2"},
-                "accounts": {
-                    "1": {"bot_token": "xoxb-one"},
-                    "2": {"bot_token": "xoxb-two"},
-                },
-            }
+            {"accounts": {"2": {"bot_token": "xoxb-two"}}},
+            "2",
         )
 
         self.assertEqual(preset, "2")
         self.assertEqual(account["bot_token"], "xoxb-two")
 
-    def test_contacts_merge_root_and_account_contacts(self):
+    def test_contacts_are_unique_to_account_presets(self):
         module = load_main_module()
 
         contacts = module.contacts_for_account(
@@ -202,7 +207,7 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(
             contacts,
-            {"root": "override@example.com", "acct": "acct@example.com"},
+            {"acct": "acct@example.com", "root": "override@example.com"},
         )
 
     def test_resolve_token_reads_direct_config_tokens(self):
@@ -329,7 +334,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(account["bot_token"], "xoxb-token")
         self.assertEqual(account["user_token"], "xoxp-token")
         self.assertEqual(account["name"], "work")
-        self.assertEqual(config["defaults"]["preset"], "1")
+        self.assertNotIn("defaults", config)
         self.assertIn("authorized preset=1", stdout.getvalue())
         self.assertNotIn("xoxb-token", stdout.getvalue())
         self.assertNotIn("xoxp-token", stdout.getvalue())
