@@ -1,3 +1,4 @@
 charset-normalizer==3.4.3
 requests==2.32.5
 rgw-cli-contract==0.1.2
+websocket-client==1.9.0

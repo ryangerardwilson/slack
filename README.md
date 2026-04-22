@@ -40,8 +40,8 @@ Slack account tokens are stored in `~/.config/slack/config.json` as account
 presets, similar to the Gmail CLI:
 
 ```bash
-slack auth 1 -bt xoxb-... -ut xoxp-... -n personal
-slack auth 2 -bt xoxb-... -ut xoxp-... -n work
+slack auth 1 -bt xoxb-... -ut xoxp-... -at xapp-... -n personal
+slack auth 2 -bt xoxb-... -ut xoxp-... -at xapp-... -n work
 slack auth
 ```
 
@@ -68,6 +68,9 @@ Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
 Recommended for `df` and `ls -o`: `files:read`.
 For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 `users:read`, `users:read.email`, and `files:read` when attachment reads matter.
+For event-driven Codex replies, enable Slack Socket Mode, generate an app-level
+`xapp-` token with `connections:write`, and subscribe the app to `app_mention`
+and `message.im` events.
 
 ## Usage
 
@@ -133,7 +136,7 @@ slack 1 post design "assets attached" ~/Downloads/mock.png ~/Projects/site/expor
 ```
 
 List accessible Slack message history, including message ids, conversation
-surface, sender, text, and attached file ids:
+surface, sender, text, and attachment/embed names:
 
 ```bash
 slack 1 ls
@@ -170,10 +173,28 @@ Mark all unread DMs as read:
 slack 1 mra
 ```
 
+Run Slack-to-Codex as an event service:
+
+```bash
+slack 1 codex ti
+slack 1 codex status
+slack 1 codex logs 80
+```
+
+The service uses Slack Socket Mode, so it keeps a WebSocket open instead of
+polling once a minute. Direct messages to the app and channel mentions are
+acknowledged immediately, passed into `codex exec resume`, and answered back in
+Slack. Channel mentions are answered in-thread. Personal DMs or mentions of
+your Slack user are not delivered through Socket Mode unless they are sent to
+the app; the service also runs a short-interval user-token scan for unread
+personal DMs and user mentions, then replies from the same Slack CLI service.
+
 `slack 1 ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
-and channels are distinguishable. Saved contacts are still used for friendly
-labels such as `slack 1 ls md -l 10`.
+and channels are distinguishable. The `attachments` row shows file and embed
+names only, so `slack 1 o <message_id>` can be used when they need to be opened
+or downloaded. Saved contacts are still used for friendly labels such as
+`slack 1 ls md -l 10`.
 `mra` still operates on contacts you have saved with `ac`.
 
 ## Contacts
@@ -195,6 +216,10 @@ Example:
       "name": "personal",
       "bot_token": "xoxb-...",
       "user_token": "xoxp-...",
+      "app_token": "xapp-...",
+      "codex_session_id": "019...",
+      "codex_workspace": "/home/ryan",
+      "codex_args": ["--skip-git-repo-check", "--full-auto"],
       "contacts": {
         "mom": "mom@example.com"
       }
@@ -212,14 +237,20 @@ Example:
 
 - `ac`: Save a contact label for an email address.
 - `auth`: List configured account presets.
-- `auth <preset> -i`: Import legacy OpenClaw token files into a config preset.
-- `auth <preset> -bt <bot_token> [-ut <user_token>] [-n <name>]`: Create or update an account preset with tokens stored in config.
+- `auth <preset> -i`: Import legacy OpenClaw token files into a config preset, including `slack-app-token` when present.
+- `auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]`: Create or update an account preset with tokens stored in config.
+- `codex once`: Connect to Slack Socket Mode and process one eligible event.
+- `codex scan`: Process unread personal DMs once through the user-token watcher.
+- `codex service`: Run the long-lived Slack Socket Mode plus personal-DM watcher to Codex service.
+- `codex ti` / `codex td`: Install or disable the user systemd service for the preset.
+- `codex st` / `codex logs [lines]` / `codex status`: Inspect the event service.
+- `codex reset-state`: Clear the local event-service state file.
 - `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
 - `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. Files and directories are supported; directories are zipped on the fly.
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
-- `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file, and print snippet code blocks inline.
+- `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.
@@ -228,7 +259,7 @@ Example:
 - `ls -c <contains>`: Filter by message text.
 - `ls -tl <time_limit>`: Filter by time, using shapes such as `2w`, `14d`, `2025-01`, `"jan 2025"`, `2025-01-10`, or `2025-01-10..2025-01-20`.
 - `ls -ur` / `ls -r`: Filter unread or read Slack messages.
-- `ls ... -o ...`: For the selected messages, also print full text, download non-snippet attachments, and print full snippet code blocks.
+- `ls ... -o ...`: For the selected messages, also print full text, download attachments/embeds, and print full snippet code blocks.
 - `ls rc`: List all registered contact labels and emails from local config.
 - `mra`: Mark all unread saved-contact direct messages as read.
 - `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.

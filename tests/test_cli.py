@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -162,19 +163,35 @@ class CliContractTests(unittest.TestCase):
         module = load_main_module()
 
         parsed = module.parse_args(
-            ["auth", "2", "-bt", "xoxb-bot", "-ut", "xoxp-user", "-n", "work"]
+            ["auth", "2", "-bt", "xoxb-bot", "-ut", "xoxp-user", "-at", "xapp-app", "-n", "work"]
         )
 
         self.assertEqual(parsed["command"], "auth")
         self.assertEqual(parsed["auth_preset"], "2")
         self.assertEqual(parsed["auth_bot_token"], "xoxb-bot")
         self.assertEqual(parsed["auth_user_token"], "xoxp-user")
+        self.assertEqual(parsed["auth_app_token"], "xapp-app")
         self.assertEqual(parsed["auth_name"], "work")
 
         prefixed = module.parse_args(["2", "auth", "-i"])
         self.assertEqual(prefixed["command"], "auth")
         self.assertEqual(prefixed["auth_preset"], "2")
         self.assertTrue(prefixed["auth_import"])
+
+    def test_codex_command_parses_event_service_actions(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["1", "codex", "service"])
+
+        self.assertEqual(parsed["preset"], "1")
+        self.assertEqual(parsed["command"], "codex")
+        self.assertEqual(parsed["codex_action"], "service")
+
+        logs = module.parse_args(["1", "codex", "logs", "120"])
+        self.assertEqual(logs["codex_action"], "logs")
+        self.assertEqual(logs["codex_lines"], 120)
+        scan = module.parse_args(["1", "codex", "scan"])
+        self.assertEqual(scan["codex_action"], "scan")
 
     def test_select_account_requires_preset_when_accounts_exist(self):
         module = load_main_module()
@@ -215,6 +232,7 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(module.resolve_token({"bot_token": "xoxb-config"}), "xoxb-config")
         self.assertEqual(module.resolve_list_token({"user_token": "xoxp-config"}), "xoxp-config")
+        self.assertEqual(module.resolve_app_token({"app_token": "xapp-config"}), "xapp-config")
 
     def test_reply_requires_message_id_target(self):
         module = load_main_module()
@@ -323,6 +341,8 @@ class CliContractTests(unittest.TestCase):
                                 "xoxb-token",
                                 "-ut",
                                 "xoxp-token",
+                                "-at",
+                                "xapp-token",
                                 "-n",
                                 "work",
                             ]
@@ -333,11 +353,13 @@ class CliContractTests(unittest.TestCase):
         account = config["accounts"]["1"]
         self.assertEqual(account["bot_token"], "xoxb-token")
         self.assertEqual(account["user_token"], "xoxp-token")
+        self.assertEqual(account["app_token"], "xapp-token")
         self.assertEqual(account["name"], "work")
         self.assertNotIn("defaults", config)
         self.assertIn("authorized preset=1", stdout.getvalue())
         self.assertNotIn("xoxb-token", stdout.getvalue())
         self.assertNotIn("xoxp-token", stdout.getvalue())
+        self.assertNotIn("xapp-token", stdout.getvalue())
 
     def test_auth_import_reads_legacy_token_files(self):
         module = load_main_module()
@@ -348,16 +370,19 @@ class CliContractTests(unittest.TestCase):
             user_path = Path(temp_dir) / "user-token"
             bot_path.write_text("xoxb-token\n", encoding="utf-8")
             user_path.write_text("xoxp-token\n", encoding="utf-8")
+            app_path = Path(temp_dir) / "app-token"
+            app_path.write_text("xapp-token\n", encoding="utf-8")
 
             with mock.patch.dict(
                 module.os.environ,
                 {"XDG_CONFIG_HOME": str(config_home)},
                 clear=True,
             ):
-                with mock.patch.object(module, "DEFAULT_BOT_TOKEN_FILE", str(bot_path)):
-                    with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(user_path)):
-                        with mock.patch.object(module, "auth_test", return_value={"ok": True}):
-                            rc = module.main(["auth", "1", "-i"])
+                    with mock.patch.object(module, "DEFAULT_BOT_TOKEN_FILE", str(bot_path)):
+                        with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(user_path)):
+                            with mock.patch.object(module, "DEFAULT_APP_TOKEN_FILE", str(app_path)):
+                                with mock.patch.object(module, "auth_test", return_value={"ok": True}):
+                                    rc = module.main(["auth", "1", "-i"])
 
             config_path = config_home / "slack" / "config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -365,6 +390,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(config["accounts"]["1"]["bot_token"], "xoxb-token")
         self.assertEqual(config["accounts"]["1"]["user_token"], "xoxp-token")
+        self.assertEqual(config["accounts"]["1"]["app_token"], "xapp-token")
 
     def test_reply_dispatch_sends_thread_reply(self):
         module = load_main_module()
@@ -799,6 +825,13 @@ class CliContractTests(unittest.TestCase):
                     "url_private_download": "https://files.example/snippet",
                 },
             ],
+            "attachments": [
+                {
+                    "title": "Embedded plan",
+                    "title_link": "https://docs.example/plan",
+                    "text": "doc preview",
+                }
+            ],
         }
 
         def fake_slack_request(method, payload, token, **kwargs):
@@ -818,8 +851,8 @@ class CliContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
-            def fake_destination(dm_id, file_payload):
-                return str(temp_path / f"{dm_id}-{file_payload['id']}-{file_payload['name']}")
+            def fake_zip_destination(channel_id, ts):
+                return str(temp_path / f"{channel_id}-{ts}-attachments.zip")
 
             with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
                 with mock.patch.object(
@@ -835,17 +868,37 @@ class CliContractTests(unittest.TestCase):
                     },
                 ):
                     with mock.patch.object(module, "_download_url_bytes", side_effect=fake_download_bytes):
-                        with mock.patch.object(module, "_download_destination", side_effect=fake_destination):
+                        with mock.patch.object(module, "_message_zip_destination", side_effect=fake_zip_destination):
                             with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                                 module.open_dm_messages("D123:100.000100", "token", "U1")
 
-            self.assertEqual((temp_path / "D123-F1-note.txt").read_text(encoding="utf-8"), "hello\n")
-            self.assertEqual((temp_path / "D123-F2-snippet.py").read_text(encoding="utf-8"), "print('hi')\n")
+            zip_path = temp_path / "D123-100.000100-attachments.zip"
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertEqual(archive.read("note.txt"), b"hello\n")
+                self.assertEqual(archive.read("snippet.py"), b"print('hi')\n")
+                self.assertIn("url: https://docs.example/plan", archive.read("Embedded plan.url.txt").decode())
             output = stdout.getvalue()
             self.assertIn("message_id: D123:100.000100", output)
-            self.assertIn("file    : F1", output)
-            self.assertIn("file    : F2", output)
+            self.assertIn("zip     : ", output)
+            self.assertIn("file    : F1 note.txt note.txt", output)
+            self.assertIn("file    : F2 snippet.py snippet.py", output)
+            self.assertIn("embed   : - Embedded plan Embedded plan.url.txt", output)
             self.assertIn("code    : F2 snippet.py", output)
+
+    def test_summarize_attachments_shows_names_only(self):
+        module = load_main_module()
+
+        message = {
+            "files": [{"id": "F1", "name": "forecast.csv"}],
+            "attachments": [
+                {
+                    "title": "Embedded doc",
+                    "title_link": "https://docs.example/doc",
+                }
+            ],
+        }
+
+        self.assertEqual(module.summarize_attachments(message), "forecast.csv, Embedded doc")
 
     def test_open_message_id_falls_back_without_conversation_info(self):
         module = load_main_module()
@@ -881,6 +934,162 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("message_id: C123:100.000100", output)
         self.assertIn("surface     : channel", output)
         self.assertIn("channel_id  : C123", output)
+
+    def test_slack_event_filter_accepts_dm_and_mentions_only(self):
+        module = load_main_module()
+
+        dm = module._eligible_slack_event(
+            {
+                "type": "message",
+                "channel": "D123",
+                "channel_type": "im",
+                "user": "U222",
+                "text": "hello",
+                "ts": "100.000100",
+            },
+            "UAPP",
+        )
+        mention = module._eligible_slack_event(
+            {
+                "type": "app_mention",
+                "channel": "C123",
+                "user": "U222",
+                "text": "<@UAPP> hello",
+                "ts": "100.000100",
+            },
+            "UAPP",
+        )
+        channel_message = module._eligible_slack_event(
+            {
+                "type": "message",
+                "channel": "C123",
+                "channel_type": "channel",
+                "user": "U222",
+                "text": "hello channel",
+                "ts": "100.000100",
+            },
+            "UAPP",
+        )
+
+        self.assertEqual(dm["kind"], "direct_message")
+        self.assertEqual(mention["kind"], "app_mention")
+        self.assertEqual(mention["text"], "hello")
+        self.assertIsNone(channel_message)
+
+    def test_codex_resume_for_slack_calls_current_session(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            workspace.mkdir()
+            state_file = Path(temp_dir) / "state.json"
+            captured = {}
+
+            def fake_run(command, **kwargs):
+                captured["command"] = command
+                captured["cwd"] = kwargs["cwd"]
+                captured["input"] = kwargs["input"]
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text("slack reply\n", encoding="utf-8")
+
+                class Result:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+
+                return Result()
+
+            account = {
+                "codex_session_id": "session-1",
+                "codex_workspace": str(workspace),
+                "codex_state_file": str(state_file),
+                "codex_args": ["--skip-git-repo-check", "--full-auto"],
+                "codex_timeout_seconds": 1,
+            }
+            event = {
+                "kind": "direct_message",
+                "channel_id": "D123",
+                "user_id": "U222",
+                "text": "hello codex",
+                "ts": "100.000100",
+            }
+
+            with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
+                reply = module.codex_resume_for_slack(account, event)
+
+        self.assertEqual(reply, "slack reply")
+        self.assertEqual(captured["command"][:4], ["codex", "exec", "resume", "session-1"])
+        self.assertIn("--full-auto", captured["command"])
+        self.assertEqual(captured["cwd"], workspace)
+        self.assertIn("hello codex", captured["input"])
+
+    def test_user_dm_entries_use_user_token_for_reply(self):
+        module = load_main_module()
+
+        entry = {
+            "sort_ts": 100.000100,
+            "surface": "dm",
+            "channel_id": "D123",
+            "dm_id": "D123",
+            "sender": {"id": "U222"},
+            "message": {"ts": "100.000100", "user": "U222", "text": "hello"},
+        }
+        event_info = module._event_info_from_dm_entry(entry)
+
+        self.assertEqual(event_info["kind"], "user_direct_message")
+        self.assertEqual(event_info["channel_id"], "D123")
+        self.assertEqual(event_info["text"], "hello")
+
+        account = {"bot_token": "xoxb-bot", "user_token": "xoxp-user"}
+        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
+            module._send_codex_reply(account, event_info, "reply")
+
+        send_post.assert_called_once_with("xoxp-user", "D123", "reply", thread_ts=None)
+
+        mention = {"kind": "user_mention", "channel_id": "C123", "thread_ts": "100.000100"}
+        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
+            module._send_codex_reply(account, mention, "thread reply")
+
+        send_post.assert_called_once_with(
+            "xoxp-user",
+            "C123",
+            "thread reply",
+            thread_ts="100.000100",
+        )
+
+    def test_user_dm_entry_skips_group_dm(self):
+        module = load_main_module()
+
+        event_info = module._event_info_from_dm_entry(
+            {
+                "surface": "group_dm",
+                "channel_id": "G123",
+                "sender": {"id": "U222"},
+                "message": {"ts": "100.000100", "user": "U222", "text": "hello"},
+            }
+        )
+
+        self.assertIsNone(event_info)
+
+    def test_user_mention_match_replies_in_thread(self):
+        module = load_main_module()
+
+        match = {
+            "channel": {"id": "C123"},
+            "ts": "100.000100",
+            "user": "U222",
+            "text": "hi <@U111>",
+        }
+        with mock.patch.object(
+            module,
+            "_hydrate_message",
+            return_value={"ts": "100.000100", "user": "U222", "text": "hi <@U111>"},
+        ):
+            event_info = module._user_mention_event_from_match(match, "token", "U111")
+
+        self.assertEqual(event_info["kind"], "user_mention")
+        self.assertEqual(event_info["channel_id"], "C123")
+        self.assertEqual(event_info["thread_ts"], "100.000100")
 
 
 if __name__ == "__main__":

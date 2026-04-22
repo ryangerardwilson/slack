@@ -2,11 +2,15 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
+import fcntl
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -20,11 +24,13 @@ from rgw_cli_contract import (
 
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
+APP_TOKEN_PREFIX = "xapp-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 CONVERSATION_ID_RE = re.compile(r"^[CDG][A-Z0-9]+$")
 COMMANDS = {
     "ac",
     "auth",
+    "codex",
     "cfg",
     "conf",
     "df",
@@ -40,7 +46,9 @@ COMMANDS = {
 }
 DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
 DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
+DEFAULT_APP_TOKEN_FILE = "~/.openclaw/credentials/slack-app-token"
 DEFAULT_LIST_LIMIT = 10
+DEFAULT_CODEX_ARGS = ["--skip-git-repo-check", "--full-auto"]
 _RELATIVE_TIME_RE = re.compile(r"^(?P<amount>\d+)(?P<unit>[dwmy])$", re.IGNORECASE)
 _ISO_MONTH_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})$")
 _ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$")
@@ -97,10 +105,16 @@ features:
   configure Slack account presets with tokens stored in config.json
   # slack auth
   # slack auth <preset> -i
-  # slack auth <preset> -bt <bot_token> [-ut <user_token>] [-n <name>]
+  # slack auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]
   slack auth
   slack auth 1 -i
-  slack auth 2 -bt xoxb-... -ut xoxp-... -n work
+  slack auth 2 -bt xoxb-... -ut xoxp-... -at xapp-... -n work
+
+  run the event-based Slack to Codex bridge
+  # slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state
+  slack 1 codex ti
+  slack 1 codex status
+  slack 1 codex logs 80
 
   post a message from a configured Slack account to a contact, channel, or conversation
   # slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...]
@@ -122,7 +136,7 @@ features:
   slack 1 o D0466D63H7B
   slack 1 o D0466D63H7B:1712764800.000100
 
-  list Slack message history with Gmail-style filters, surface labels, and attached file ids
+  list Slack message history with Gmail-style filters, surface labels, and attachment names
   # slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
   slack 1 ls
   slack 1 ls 10
@@ -291,8 +305,9 @@ def _ls_usage():
 
 def _top_level_usage():
     return (
-        "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>]] | "
+        "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>] [-at <app_token>]] | "
         "slack <preset> ac <label> <email> | slack <preset> su <query> | slack conf | "
+        "slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state | "
         "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
         "slack <preset> reply <message_id> <message> [path...] | "
         "slack <preset> df <channel_id> <file_id> [output_path] | "
@@ -335,9 +350,12 @@ def parse_args(argv):
         "auth_preset": None,
         "auth_bot_token": None,
         "auth_user_token": None,
+        "auth_app_token": None,
         "auth_name": None,
         "auth_import": False,
         "auth_list": False,
+        "codex_action": None,
+        "codex_lines": 80,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -390,7 +408,9 @@ def parse_args(argv):
                 auth_preset = remaining[0]
                 i = 1
             if not auth_preset or auth_preset.startswith("-"):
-                raise SystemExit("Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-n <name>]")
+                raise SystemExit(
+                    "Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-at <app_token>] [-n <name>]"
+                )
             args["auth_preset"] = auth_preset
             while i < len(remaining):
                 item = remaining[i]
@@ -410,6 +430,12 @@ def parse_args(argv):
                     args["auth_user_token"] = remaining[i + 1]
                     i += 2
                     continue
+                if item == "-at":
+                    if i + 1 >= len(remaining):
+                        raise SystemExit("auth -at requires: <app_token>")
+                    args["auth_app_token"] = remaining[i + 1]
+                    i += 2
+                    continue
                 if item == "-n":
                     if i + 1 >= len(remaining):
                         raise SystemExit("auth -n requires: <name>")
@@ -418,6 +444,25 @@ def parse_args(argv):
                     continue
                 raise SystemExit(f"Unknown auth option: {item}")
             return args
+        if token == "codex":
+            if not remaining or remaining[0] in {"help", "-h"}:
+                args["codex_action"] = "help"
+                return args
+            action = remaining[0]
+            rest = remaining[1:]
+            if action in {"once", "scan", "service", "ti", "td", "st", "status", "reset-state"}:
+                if rest:
+                    raise SystemExit(f"Use: slack <preset> codex {action}")
+                args["codex_action"] = action
+                return args
+            if action == "logs":
+                if len(rest) > 1:
+                    raise SystemExit("Use: slack <preset> codex logs [lines]")
+                if rest:
+                    args["codex_lines"] = _parse_positive_int(rest[0], "codex logs lines")
+                args["codex_action"] = action
+                return args
+            raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
         if token in {"post", "dm"}:
             if len(remaining) < 2:
                 raise SystemExit(
@@ -685,6 +730,8 @@ def style_help(value):
 
 
 def _token_kind(token):
+    if token.startswith(APP_TOKEN_PREFIX):
+        return "app"
     if token.startswith(BOT_TOKEN_PREFIX):
         return "bot"
     if token.startswith(USER_TOKEN_PREFIXES):
@@ -767,6 +814,25 @@ def resolve_list_token(config=None):
         )
     if _token_kind(token) == "unknown":
         raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
+    return token
+
+
+def resolve_app_token(config=None):
+    config = config or {}
+    token = _direct_token(config, ("app_token", "socket_token"))
+    if not token:
+        token = get_env("SLACK_APP_TOKEN")
+    if not token:
+        token = _read_first_config_token(config, ("app_token_file", "socket_token_file"))
+    if not token:
+        token = _read_token_file(DEFAULT_APP_TOKEN_FILE)
+    if not token:
+        raise SystemExit(
+            "Missing Slack app token. Add accounts.<preset>.app_token with an xapp- token, "
+            "or import ~/.openclaw/credentials/slack-app-token with slack auth <preset> -i."
+        )
+    if _token_kind(token) != "app":
+        raise SystemExit("Slack app token must be an app-level token (xapp-).")
     return token
 
 
@@ -858,6 +924,8 @@ def list_account_presets(config):
                 ("team", account.get("team") or account.get("team_id") or "-"),
                 ("bot_token", _token_bool(account.get("bot_token"))),
                 ("user_token", _token_bool(account.get("user_token"))),
+                ("app_token", _token_bool(account.get("app_token"))),
+                ("codex", _token_bool(account.get("codex_session_id"))),
                 ("contacts", str(len(normalize_contacts(account)))),
             ]
         )
@@ -896,12 +964,26 @@ def _import_user_token(config):
     return None
 
 
-def configure_account(config_path, config, preset, bot_token, user_token, name, import_tokens):
+def _import_app_token(config):
+    for candidate in (
+        _direct_token(config, ("app_token", "socket_token")),
+        _read_first_config_token(config, ("app_token_file", "socket_token_file")),
+        _read_token_file(DEFAULT_APP_TOKEN_FILE),
+    ):
+        if candidate and _token_kind(candidate) == "app":
+            return candidate
+    return None
+
+
+def configure_account(config_path, config, preset, bot_token, user_token, app_token, name, import_tokens):
     if not preset:
-        raise SystemExit("Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-n <name>]")
+        raise SystemExit(
+            "Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-at <app_token>] [-n <name>]"
+        )
     if import_tokens:
         bot_token = bot_token or _import_bot_token(config)
         user_token = user_token or _import_user_token(config)
+        app_token = app_token or _import_app_token(config)
 
     accounts = config.setdefault("accounts", {})
     if not isinstance(accounts, dict):
@@ -914,11 +996,15 @@ def configure_account(config_path, config, preset, bot_token, user_token, name, 
 
     bot_token = _validate_token_kind(bot_token, "bot", "bot_token")
     user_token = _validate_token_kind(user_token, "user", "user_token")
+    app_token = _validate_token_kind(app_token, "app", "app_token")
 
     effective_bot = bot_token or account.get("bot_token")
     effective_user = user_token or account.get("user_token")
+    effective_app = app_token or account.get("app_token")
+    if not effective_bot and not effective_user and not effective_app:
+        raise SystemExit("Provide -bt, -ut, -at, or -i to store at least one Slack token.")
     if not effective_bot and not effective_user:
-        raise SystemExit("Provide -bt, -ut, or -i to store at least one Slack token.")
+        raise SystemExit("Provide -bt, -ut, or -i with a bot/user token so Slack auth can be verified.")
 
     auth_data = auth_test(user_token or bot_token or effective_user or effective_bot)
     if name:
@@ -927,6 +1013,8 @@ def configure_account(config_path, config, preset, bot_token, user_token, name, 
         account["bot_token"] = bot_token
     if user_token:
         account["user_token"] = user_token
+    if app_token:
+        account["app_token"] = app_token
     if "contacts" not in account:
         root_contacts = normalize_contacts(config)
         if root_contacts:
@@ -956,7 +1044,8 @@ def configure_account(config_path, config, preset, bot_token, user_token, name, 
         f"name={account.get('name') or '-'} "
         f"team={account.get('team') or account.get('team_id') or '-'} "
         f"bot_token={_token_bool(account.get('bot_token'))} "
-        f"user_token={_token_bool(account.get('user_token'))}"
+        f"user_token={_token_bool(account.get('user_token'))} "
+        f"app_token={_token_bool(account.get('app_token'))}"
     )
 
 
@@ -1198,40 +1287,108 @@ def message_text(message):
     return "\n\n".join(parts)
 
 
-def message_files(message):
+def _safe_filename(value, fallback="attachment"):
+    text = str(value or "").strip() or fallback
+    text = re.sub(r"[\\/:\0]+", "-", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:180] or fallback
+
+
+def _asset_name_from_url(url):
+    cleaned = str(url or "").rstrip("/")
+    if not cleaned:
+        return "embed"
+    return cleaned.rsplit("/", 1)[-1] or cleaned
+
+
+def _add_message_file_asset(collected, seen, file_payload):
+    if not isinstance(file_payload, dict):
+        return
+    file_id = file_payload.get("id")
+    download_url = file_payload.get("url_private_download")
+    asset_url = (
+        download_url
+        or file_payload.get("url_private")
+        or file_payload.get("permalink")
+        or file_payload.get("external_url")
+    )
+    key = file_id or asset_url or file_payload.get("name") or file_payload.get("title")
+    if key and key in seen:
+        return
+    if key:
+        seen.add(key)
+    name = file_payload.get("name") or file_payload.get("title") or file_id or "attachment"
+    collected.append(
+        {
+            "kind": "file",
+            "id": file_id or "-",
+            "name": str(name),
+            "download_url": download_url,
+            "url": asset_url,
+            "payload": file_payload,
+        }
+    )
+
+
+def _add_embed_asset(collected, seen, attachment):
+    if not isinstance(attachment, dict):
+        return
+    url = (
+        attachment.get("title_link")
+        or attachment.get("from_url")
+        or attachment.get("original_url")
+        or attachment.get("url")
+        or attachment.get("image_url")
+        or attachment.get("thumb_url")
+    )
+    title = (
+        attachment.get("title")
+        or attachment.get("service_name")
+        or attachment.get("fallback")
+        or _asset_name_from_url(url)
+    )
+    if not url and not attachment.get("title"):
+        return
+    key = url or title
+    if key and key in seen:
+        return
+    if key:
+        seen.add(key)
+    collected.append(
+        {
+            "kind": "embed",
+            "id": "-",
+            "name": str(title or "embed"),
+            "download_url": None,
+            "url": url,
+            "text": attachment.get("text") or attachment.get("fallback") or "",
+            "payload": attachment,
+        }
+    )
+
+
+def message_assets(message):
     collected = []
     seen = set()
 
     for file_payload in message.get("files") or []:
-        file_id = file_payload.get("id")
-        if file_id and file_id in seen:
-            continue
-        if file_id:
-            seen.add(file_id)
-        collected.append(file_payload)
+        _add_message_file_asset(collected, seen, file_payload)
 
     for attachment in message.get("attachments") or []:
         for file_payload in attachment.get("files") or []:
-            file_id = file_payload.get("id")
-            if file_id and file_id in seen:
-                continue
-            if file_id:
-                seen.add(file_id)
-            collected.append(file_payload)
+            _add_message_file_asset(collected, seen, file_payload)
+        _add_embed_asset(collected, seen, attachment)
 
     return collected
 
 
-def summarize_files(message):
-    files = message_files(message)
-    rendered = []
-    for file in files:
-        file_id = file.get("id")
-        if not file_id:
-            continue
-        name = file.get("name") or "unnamed"
-        rendered.append(f"{file_id}:{name}")
-    return ", ".join(rendered) if rendered else "-"
+def message_files(message):
+    return [asset["payload"] for asset in message_assets(message) if asset["kind"] == "file"]
+
+
+def summarize_attachments(message):
+    names = [asset.get("name") or "attachment" for asset in message_assets(message)]
+    return ", ".join(names) if names else "-"
 
 
 def format_ts(ts_value):
@@ -1620,27 +1777,98 @@ def _snippet_text(file_payload, token):
 
 
 def _download_destination(dm_id, file_payload):
-    name = file_payload.get("name") or file_payload.get("title") or file_payload.get("id") or "attachment"
+    name = _safe_filename(
+        file_payload.get("name") or file_payload.get("title") or file_payload.get("id") or "attachment"
+    )
     filename = f"{dm_id}-{file_payload.get('id')}-{name}"
     return os.path.abspath(os.path.expanduser(filename))
+
+
+def _message_zip_destination(channel_id, ts):
+    safe_channel = _safe_filename(channel_id, "conversation")
+    safe_ts = _safe_filename(str(ts or "message").replace(".", "-"), "message")
+    return os.path.abspath(os.path.expanduser(f"{safe_channel}-{safe_ts}-attachments.zip"))
+
+
+def _asset_metadata_bytes(asset):
+    lines = [
+        f"name: {asset.get('name') or '-'}",
+        f"kind: {asset.get('kind') or '-'}",
+    ]
+    if asset.get("url"):
+        lines.append(f"url: {asset['url']}")
+    if asset.get("text"):
+        lines.extend(["", str(asset["text"])])
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _asset_bytes(asset, token):
+    if asset.get("download_url"):
+        return _download_url_bytes(asset["download_url"], token)
+    return _asset_metadata_bytes(asset)
+
+
+def _asset_filename(asset):
+    name = _safe_filename(asset.get("name"), "attachment")
+    if asset.get("kind") == "embed":
+        return name if "." in Path(name).name else f"{name}.url.txt"
+    return name
+
+
+def _unique_arcname(used, filename):
+    candidate = filename
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    counter = 2
+    while candidate in used:
+        candidate = f"{stem}-{counter}{suffix}"
+        counter += 1
+    used.add(candidate)
+    return candidate
 
 
 def _message_details(message, dm_id, token):
     downloads = []
     code_blocks = []
-    for file_payload in message_files(message):
-        download_url = file_payload.get("url_private_download")
-        if download_url:
-            destination = _download_destination(dm_id, file_payload)
-            _download_file_to_path(download_url, destination, token)
+    assets = message_assets(message)
+    if len(assets) > 1:
+        destination = _message_zip_destination(dm_id, message.get("ts"))
+        used = set()
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for asset in assets:
+                arcname = _unique_arcname(used, _asset_filename(asset))
+                archive.writestr(arcname, _asset_bytes(asset, token))
+                downloads.append(
+                    {
+                        "id": asset.get("id") or "-",
+                        "name": asset.get("name") or "attachment",
+                        "kind": asset.get("kind") or "attachment",
+                        "path": destination,
+                        "zip_entry": arcname,
+                    }
+                )
+    else:
+        for asset in assets:
+            if asset.get("download_url"):
+                destination = _download_destination(dm_id, asset["payload"])
+                _download_file_to_path(asset["download_url"], destination, token)
+            else:
+                destination = os.path.abspath(os.path.expanduser(_asset_filename(asset)))
+                parent = os.path.dirname(destination)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(destination, "wb") as handle:
+                    handle.write(_asset_metadata_bytes(asset))
             downloads.append(
                 {
-                    "id": file_payload.get("id") or "-",
-                    "name": file_payload.get("name") or "attachment",
+                    "id": asset.get("id") or "-",
+                    "name": asset.get("name") or "attachment",
+                    "kind": asset.get("kind") or "attachment",
                     "path": destination,
                 }
             )
 
+    for file_payload in message_files(message):
         if file_payload.get("mode") == "snippet":
             code_blocks.append(
                 {
@@ -1935,10 +2163,18 @@ def _print_open_entries(entries, token):
 
         downloads, code_blocks = _message_details(entry["message"], channel_id, token)
         if downloads:
+            zip_paths = sorted({item["path"] for item in downloads if item.get("zip_entry")})
+            for zip_path in zip_paths:
+                print(style_help(f"{'zip':<8}: {zip_path}"))
             for file_info in downloads:
-                print(style_help(f"{'file':<8}: {file_info['id']} {file_info['path']}"))
+                detail = file_info.get("zip_entry") or file_info["path"]
+                print(
+                    style_help(
+                        f"{file_info.get('kind') or 'file':<8}: {file_info['id']} {file_info['name']} {detail}"
+                    )
+                )
         else:
-            print(style_help(f"{'file':<8}: -"))
+            print(style_help(f"{'asset':<8}: -"))
 
         if code_blocks:
             for block in code_blocks:
@@ -2080,7 +2316,7 @@ def _list_entry_fields(item):
             ("date", format_ts(item["message"].get("ts"))),
             ("from", item["sender"]["label"]),
             ("text", compact_text(message_text(item["message"]))),
-            ("files", summarize_files(item["message"])),
+            ("attachments", summarize_attachments(item["message"])),
         ]
     )
     return fields
@@ -2534,6 +2770,780 @@ def clear_stale_conversations(token):
     )
 
 
+def _state_base_dir():
+    base = os.getenv("XDG_STATE_HOME")
+    if base:
+        return Path(os.path.expandvars(base)).expanduser() / "slack"
+    return Path.home() / ".local" / "state" / "slack"
+
+
+def _safe_preset_slug(preset):
+    return re.sub(r"[^A-Za-z0-9_.@-]+", "_", str(preset or "default"))
+
+
+def _expand_path(value):
+    return Path(os.path.expandvars(str(value))).expanduser()
+
+
+def _account_string(account, key, default="", required=False):
+    value = account.get(key, default)
+    if value is None:
+        value = default
+    if not isinstance(value, str):
+        raise SystemExit(f"config key must be a string: {key}")
+    value = value.strip()
+    if required and not value:
+        raise SystemExit(f"missing required config key: {key}")
+    return value
+
+
+def _account_int(account, key, default):
+    value = account.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SystemExit(f"config key must be an integer: {key}")
+    return value
+
+
+def _account_string_list(account, key, default=None):
+    value = account.get(key, default if default is not None else [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"config key must be a list of strings: {key}")
+    return [item for item in value if item]
+
+
+def _codex_state_paths(account, preset):
+    slug = _safe_preset_slug(preset)
+    base = _state_base_dir()
+    return {
+        "state_file": _expand_path(account.get("codex_state_file") or str(base / f"codex-{slug}.json")),
+        "log_file": _expand_path(account.get("codex_log_file") or str(base / f"codex-{slug}.log")),
+        "lock_file": _expand_path(account.get("codex_lock_file") or str(base / f"codex-{slug}.lock")),
+    }
+
+
+def _read_state(state_file):
+    if not state_file.exists():
+        return {}
+    try:
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_state(state_file, payload):
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _state_recent_keys(state):
+    keys = state.get("recent_event_keys")
+    if not isinstance(keys, list):
+        return []
+    return [str(item) for item in keys[-100:]]
+
+
+def _event_key(event):
+    return ":".join(
+        str(item or "")
+        for item in (
+            event.get("type"),
+            event.get("channel"),
+            event.get("user"),
+            event.get("thread_ts") or event.get("ts") or event.get("event_ts"),
+        )
+    )
+
+
+def _claim_event(account, preset, event):
+    paths = _codex_state_paths(account, preset)
+    state = _read_state(paths["state_file"])
+    key = _event_key(event)
+    recent = _state_recent_keys(state)
+    if key and key in recent:
+        return False
+    if key:
+        recent.append(key)
+        state["recent_event_keys"] = recent[-100:]
+    state["last_event_key"] = key
+    state["last_event_at"] = datetime.now().astimezone().isoformat()
+    _write_state(paths["state_file"], state)
+    return True
+
+
+def _mark_codex_processed(account, preset, event, reply_ts=None):
+    paths = _codex_state_paths(account, preset)
+    state = _read_state(paths["state_file"])
+    state["processed"] = int(state.get("processed") or 0) + 1
+    state["last_processed_at"] = datetime.now().astimezone().isoformat()
+    state["last_channel"] = event.get("channel") or ""
+    state["last_message_ts"] = event.get("ts") or event.get("event_ts") or ""
+    if reply_ts:
+        state["last_reply_ts"] = reply_ts
+    state["last_error"] = ""
+    _write_state(paths["state_file"], state)
+
+
+def _mark_codex_error(account, preset, message):
+    paths = _codex_state_paths(account, preset)
+    state = _read_state(paths["state_file"])
+    state["last_error"] = str(message)
+    state["last_error_at"] = datetime.now().astimezone().isoformat()
+    _write_state(paths["state_file"], state)
+
+
+def _codex_log(account, preset, message):
+    paths = _codex_state_paths(account, preset)
+    paths["log_file"].parent.mkdir(parents=True, exist_ok=True)
+    with paths["log_file"].open("a", encoding="utf-8") as handle:
+        handle.write(f"{datetime.now().astimezone().isoformat()} {message}\n")
+
+
+@contextmanager
+def _codex_lock(account, preset):
+    paths = _codex_state_paths(account, preset)
+    paths["lock_file"].parent.mkdir(parents=True, exist_ok=True)
+    with paths["lock_file"].open("w", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def _websocket_module():
+    try:
+        import websocket
+    except ImportError as exc:
+        raise SystemExit("Missing dependency: websocket-client. Run: pip install -r requirements.txt") from exc
+    return websocket
+
+
+def _open_socket_mode_connection(app_token):
+    data = slack_request("apps.connections.open", {}, app_token, use_form=True)
+    url = data.get("url")
+    if not url:
+        raise SystemExit("Slack did not return a Socket Mode WebSocket URL.")
+    websocket = _websocket_module()
+    return websocket.create_connection(url, timeout=70)
+
+
+def _ack_socket_envelope(socket, envelope):
+    envelope_id = envelope.get("envelope_id")
+    if not envelope_id:
+        return
+    socket.send(json.dumps({"envelope_id": envelope_id}))
+
+
+def _strip_bot_mention(text, bot_user_id):
+    if not bot_user_id:
+        return text.strip()
+    return re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text or "").strip()
+
+
+def _eligible_slack_event(event, bot_user_id):
+    if not isinstance(event, dict):
+        return None
+    event_type = event.get("type")
+    user_id = event.get("user")
+    if not user_id or user_id == bot_user_id:
+        return None
+    if event.get("bot_id") or event.get("bot_profile"):
+        return None
+
+    channel_id = event.get("channel") or ""
+    text = (event.get("text") or "").strip()
+    if event_type == "app_mention":
+        return {
+            "kind": "app_mention",
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "text": _strip_bot_mention(text, bot_user_id),
+            "thread_ts": event.get("thread_ts") or event.get("ts"),
+            "ts": event.get("ts") or event.get("event_ts"),
+            "raw": event,
+        }
+    if event_type == "message":
+        if event.get("subtype"):
+            return None
+        channel_type = event.get("channel_type") or ""
+        if channel_type != "im" and not str(channel_id).startswith("D"):
+            return None
+        return {
+            "kind": "direct_message",
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "text": text,
+            "thread_ts": event.get("thread_ts"),
+            "ts": event.get("ts") or event.get("event_ts"),
+            "raw": event,
+        }
+    return None
+
+
+def _codex_prompt_for_slack(event_info):
+    thread = event_info.get("thread_ts") or "-"
+    return f"""Slack message for Ryan.
+
+You are replying through Ryan's local Slack event service. Produce only the Slack reply text.
+If you cannot complete the request safely from the available context, say what is missing.
+
+Slack event:
+- kind: {event_info.get("kind")}
+- channel_id: {event_info.get("channel_id")}
+- user_id: {event_info.get("user_id")}
+- message_ts: {event_info.get("ts")}
+- thread_ts: {thread}
+
+Message:
+{event_info.get("text") or ""}
+"""
+
+
+def codex_resume_for_slack(account, event_info):
+    session_id = _account_string(account, "codex_session_id", required=True)
+    workspace = _expand_path(_account_string(account, "codex_workspace", "~"))
+    if not workspace.exists():
+        raise SystemExit(f"codex_workspace does not exist: {workspace}")
+    paths = _codex_state_paths(account, account.get("_preset") or "default")
+    paths["state_file"].parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    home = str(Path.home())
+    env["PATH"] = f"{home}/.local/bin:{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"
+    codex_args = _account_string_list(account, "codex_args", DEFAULT_CODEX_ARGS)
+    prompt = _codex_prompt_for_slack(event_info)
+    completed = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="codex-", dir=str(paths["state_file"].parent)) as tmp_dir:
+            output_path = Path(tmp_dir) / "last-message.txt"
+            command = [
+                "codex",
+                "exec",
+                "resume",
+                session_id,
+                *codex_args,
+                "--output-last-message",
+                str(output_path),
+                "-",
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                env=env,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=_account_int(account, "codex_timeout_seconds", 900) + 60,
+                check=False,
+            )
+            reply = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit("codex exec resume failed") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise SystemExit(f"codex exec resume failed: {detail or completed.returncode}")
+    if not reply:
+        reply = (completed.stdout or "").strip()
+    if not reply:
+        raise SystemExit("codex exec resume returned empty reply")
+    return reply
+
+
+def _truncate_for_slack(text, account):
+    max_chars = _account_int(account, "slack_reply_max_chars", 39000)
+    if len(text) <= max_chars:
+        return text
+    suffix = "\n\n[truncated]"
+    return text[: max(1, max_chars - len(suffix))].rstrip() + suffix
+
+
+def _mark_event_read(account, event_info):
+    token = account.get("user_token") or account.get("bot_token")
+    if not isinstance(token, str) or not token.strip():
+        return
+    channel_id = event_info.get("channel_id")
+    ts = event_info.get("ts")
+    if not channel_id or not ts:
+        return
+    slack_request(
+        "conversations.mark",
+        {"channel": channel_id, "ts": ts},
+        token.strip(),
+        use_form=True,
+        allow_error=True,
+    )
+
+
+def _send_codex_reply(account, event_info, reply):
+    token = (
+        account.get("user_token")
+        if event_info.get("kind") in {"user_direct_message", "user_mention"}
+        else None
+    )
+    if not isinstance(token, str) or not token.strip():
+        token = resolve_token(account)
+    else:
+        token = token.strip()
+    thread_ts = event_info.get("thread_ts")
+    text = _truncate_for_slack(reply, account)
+    return send_post(token, event_info["channel_id"], text, thread_ts=thread_ts)
+
+
+def _handle_socket_event(account, preset, event_info):
+    raw_event = event_info.get("raw") or {}
+    with _codex_lock(account, preset) as acquired:
+        if not acquired:
+            send_post(
+                resolve_token(account),
+                event_info["channel_id"],
+                "Codex is still working on the previous Slack request.",
+                thread_ts=event_info.get("thread_ts"),
+            )
+            return False
+        if not _claim_event(account, preset, raw_event):
+            return False
+        try:
+            reply = codex_resume_for_slack(account, event_info)
+            reply_ts = _send_codex_reply(account, event_info, reply)
+            _mark_event_read(account, event_info)
+            _mark_codex_processed(account, preset, raw_event, reply_ts)
+            _codex_log(account, preset, f"processed channel={event_info['channel_id']} ts={event_info.get('ts')}")
+            return True
+        except SystemExit as exc:
+            message = f"Codex run failed: {exc}"
+            _mark_codex_error(account, preset, str(exc))
+            _codex_log(account, preset, message)
+            send_post(
+                resolve_token(account),
+                event_info["channel_id"],
+                message,
+                thread_ts=event_info.get("thread_ts"),
+            )
+            return False
+
+
+def _event_info_from_dm_entry(entry):
+    if entry.get("surface") != "dm":
+        return None
+    message = entry.get("message") or {}
+    sender = entry.get("sender") or {}
+    channel_id = entry.get("channel_id") or entry.get("dm_id")
+    ts = message.get("ts")
+    user_id = sender.get("id") or message.get("user")
+    if not channel_id or not ts or not user_id:
+        return None
+    return {
+        "kind": "user_direct_message",
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "text": message_text(message),
+        "thread_ts": message.get("thread_ts"),
+        "ts": ts,
+        "raw": {
+            "type": "message",
+            "channel": channel_id,
+            "user": user_id,
+            "text": message_text(message),
+            "ts": ts,
+            "event_ts": ts,
+        },
+    }
+
+
+def _process_user_dm_entries(account, preset, entries):
+    processed = 0
+    for entry in sorted(entries, key=lambda item: item.get("sort_ts") or 0):
+        event_info = _event_info_from_dm_entry(entry)
+        if not event_info:
+            continue
+        if _handle_socket_event(account, preset, event_info):
+            processed += 1
+    return processed
+
+
+def user_dm_scan_once(account, preset, *, unread_only=True):
+    token = resolve_list_token(account)
+    auth_data = auth_test(token)
+    self_user_id = auth_data.get("user_id")
+    if not self_user_id:
+        raise SystemExit("Unable to determine the current Slack user.")
+    limit = _account_int(account, "codex_user_dm_scan_limit", 10)
+    contacts = contacts_for_account({}, account)
+    entries = search_dms(
+        contacts,
+        token,
+        limit,
+        "unread" if unread_only else "all",
+        self_user_id,
+        False,
+    )
+    if entries is None:
+        entries = []
+        for dm_info in get_all_dm_infos(token):
+            entries.extend(
+                _collect_messages(
+                    dm_info,
+                    token,
+                    limit,
+                    "unread" if unread_only else "all",
+                    self_user_id,
+                )
+            )
+    return _process_user_dm_entries(account, preset, entries[:limit])
+
+
+def _state_float(state, key, default=0.0):
+    try:
+        return float(state.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _user_mention_event_from_match(match, token, self_user_id):
+    channel = match.get("channel") if isinstance(match.get("channel"), dict) else {}
+    channel_id = channel.get("id") or match.get("channel_id")
+    ts = str(match.get("ts") or "")
+    if not channel_id or not ts:
+        return None
+    try:
+        message = _hydrate_message(channel_id, ts, token)
+    except SystemExit:
+        message = None
+    message = message or {
+        "ts": ts,
+        "user": match.get("user"),
+        "text": match.get("text") or "",
+    }
+    user_id = message.get("user") or match.get("user")
+    if not user_id or user_id == self_user_id:
+        return None
+    if message.get("bot_id") or message.get("bot_profile") or message.get("subtype"):
+        return None
+    text = message_text(message)
+    if self_user_id and f"<@{self_user_id}>" not in text:
+        return None
+    return {
+        "kind": "user_mention",
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "text": text,
+        "thread_ts": message.get("thread_ts") or ts,
+        "ts": ts,
+        "raw": {
+            "type": "message",
+            "channel": channel_id,
+            "user": user_id,
+            "text": text,
+            "ts": ts,
+            "event_ts": ts,
+        },
+    }
+
+
+def user_mention_scan_once(account, preset):
+    token = resolve_list_token(account)
+    auth_data = auth_test(token)
+    self_user_id = auth_data.get("user_id")
+    if not self_user_id:
+        raise SystemExit("Unable to determine the current Slack user.")
+    paths = _codex_state_paths(account, preset)
+    state = _read_state(paths["state_file"])
+    since = _state_float(state, "user_mention_scan_after_ts", time.time())
+    limit = _account_int(account, "codex_user_mention_scan_limit", 20)
+    payload = slack_request(
+        "search.messages",
+        {
+            "query": f"<@{self_user_id}>",
+            "sort": "timestamp",
+            "sort_dir": "desc",
+            "count": str(max(20, min(100, limit))),
+        },
+        token,
+        http_method="GET",
+        allow_error=True,
+    )
+    if payload.get("ok") is not True:
+        error = payload.get("error") or "unknown_error"
+        raise SystemExit(f"Slack API error (search.messages): {error}")
+    matches = (payload.get("messages") or {}).get("matches", []) or []
+    events = []
+    max_seen = since
+    for match in matches:
+        try:
+            ts_value = float(match.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        max_seen = max(max_seen, ts_value)
+        if ts_value <= since:
+            continue
+        event_info = _user_mention_event_from_match(match, token, self_user_id)
+        if event_info:
+            events.append((ts_value, event_info))
+    processed = 0
+    for _, event_info in sorted(events, key=lambda item: item[0]):
+        if _handle_socket_event(account, preset, event_info):
+            processed += 1
+    state = _read_state(paths["state_file"])
+    state["user_mention_scan_after_ts"] = max(max_seen, time.time())
+    _write_state(paths["state_file"], state)
+    return processed
+
+
+def _user_dm_poll_loop(account, preset, stop_event):
+    if account.get("codex_user_dm_watch") is False:
+        _codex_log(account, preset, "user DM watcher disabled")
+        return
+    interval = max(5, _account_int(account, "codex_user_dm_poll_seconds", 10))
+    _codex_log(account, preset, f"user DM watcher started interval={interval}s")
+    while not stop_event.is_set():
+        try:
+            processed = user_dm_scan_once(account, preset, unread_only=True)
+            processed += user_mention_scan_once(account, preset)
+            if processed:
+                _codex_log(account, preset, f"user_scan_processed={processed}")
+        except SystemExit as exc:
+            _mark_codex_error(account, preset, str(exc))
+            _codex_log(account, preset, f"user DM watcher error: {exc}")
+        except Exception as exc:
+            _mark_codex_error(account, preset, str(exc))
+            _codex_log(account, preset, f"user DM watcher error: {exc}")
+        stop_event.wait(interval)
+
+
+def _socket_loop(account, preset, *, once=False):
+    app_token = resolve_app_token(account)
+    bot_token = resolve_token(account)
+    auth_data = auth_test(bot_token)
+    bot_user_id = auth_data.get("user_id") or ""
+    socket = _open_socket_mode_connection(app_token)
+    timeout_seconds = _account_int(account, "socket_timeout_seconds", 70)
+    socket.settimeout(timeout_seconds)
+    processed = 0
+    try:
+        while True:
+            try:
+                raw = socket.recv()
+            except Exception as exc:
+                if once:
+                    _codex_log(account, preset, f"once timeout/no event: {exc}")
+                    return processed
+                raise
+            if not raw:
+                continue
+            try:
+                envelope = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            envelope_type = envelope.get("type")
+            if envelope_type == "hello":
+                _codex_log(account, preset, "socket connected")
+                continue
+            if envelope_type == "disconnect":
+                _codex_log(account, preset, f"socket disconnect: {envelope.get('reason') or '-'}")
+                return processed
+            if "envelope_id" in envelope:
+                _ack_socket_envelope(socket, envelope)
+            if envelope_type != "events_api":
+                continue
+            payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+            event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+            event_info = _eligible_slack_event(event, bot_user_id)
+            if not event_info:
+                continue
+            if _handle_socket_event(account, preset, event_info):
+                processed += 1
+            if once and processed:
+                return processed
+    finally:
+        try:
+            socket.close()
+        except Exception:
+            pass
+
+
+def codex_once(account, preset):
+    account = dict(account)
+    account["_preset"] = preset
+    processed = _socket_loop(account, preset, once=True)
+    print(f"codex_once processed={processed}")
+    return 0
+
+
+def codex_scan(account, preset):
+    account = dict(account)
+    account["_preset"] = preset
+    processed = user_dm_scan_once(account, preset, unread_only=True)
+    print(f"codex_scan processed={processed}")
+    return 0
+
+
+def codex_service(account, preset):
+    account = dict(account)
+    account["_preset"] = preset
+    _codex_log(account, preset, "service started")
+    stop_event = threading.Event()
+    poller = threading.Thread(
+        target=_user_dm_poll_loop,
+        args=(account, preset, stop_event),
+        daemon=True,
+    )
+    poller.start()
+    while True:
+        try:
+            _socket_loop(account, preset, once=False)
+        except SystemExit as exc:
+            _mark_codex_error(account, preset, str(exc))
+            _codex_log(account, preset, f"service error: {exc}")
+            time.sleep(5)
+        except Exception as exc:
+            _mark_codex_error(account, preset, str(exc))
+            _codex_log(account, preset, f"service error: {exc}")
+            time.sleep(5)
+
+
+def codex_status(account, preset):
+    paths = _codex_state_paths(account, preset)
+    state = _read_state(paths["state_file"])
+    state.update(
+        {
+            "config": get_config_path(),
+            "log": str(paths["log_file"]),
+            "state": str(paths["state_file"]),
+            "workspace": _account_string(account, "codex_workspace", "~"),
+            "session_id": _account_string(account, "codex_session_id"),
+            "has_app_token": bool(str(account.get("app_token") or "").strip() or _read_token_file(DEFAULT_APP_TOKEN_FILE)),
+            "has_bot_token": bool(str(account.get("bot_token") or "").strip()),
+        }
+    )
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
+def codex_reset_state(account, preset):
+    paths = _codex_state_paths(account, preset)
+    _write_state(paths["state_file"], {})
+    _codex_log(account, preset, "state reset")
+    print("state reset")
+    return 0
+
+
+def _codex_unit_name(preset):
+    return f"slack-codex-{_safe_preset_slug(preset)}"
+
+
+def _systemd_unit_dir():
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def _codex_unit_path(preset):
+    return _systemd_unit_dir() / f"{_codex_unit_name(preset)}.service"
+
+
+def _systemctl_user(*args, check=True):
+    result = subprocess.run(
+        ["systemctl", "--user", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise SystemExit(f"systemctl --user {' '.join(args)} failed: {detail}")
+    return result
+
+
+def write_codex_unit(preset):
+    unit_path = _codex_unit_path(preset)
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                f"Description=Slack preset {preset} to Codex event bridge",
+                "After=network-online.target",
+                "",
+                "[Service]",
+                "Type=simple",
+                "Environment=PYTHONUNBUFFERED=1",
+                f"ExecStart=%h/.local/bin/slack {preset} codex service",
+                "Restart=always",
+                "RestartSec=5",
+                "Nice=5",
+                "",
+                "[Install]",
+                "WantedBy=default.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    if shutil.which("systemd-analyze") is not None:
+        result = subprocess.run(
+            ["systemd-analyze", "--user", "verify", str(unit_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise SystemExit(f"systemd unit validation failed: {detail}")
+    return unit_path
+
+
+def codex_install_service(preset):
+    write_codex_unit(preset)
+    unit = f"{_codex_unit_name(preset)}.service"
+    _systemctl_user("daemon-reload")
+    _systemctl_user("enable", "--now", unit)
+    _systemctl_user("restart", unit)
+    print(f"service enabled: {unit}")
+    return 0
+
+
+def codex_disable_service(preset):
+    write_codex_unit(preset)
+    unit = f"{_codex_unit_name(preset)}.service"
+    _systemctl_user("disable", "--now", unit, check=False)
+    _systemctl_user("daemon-reload")
+    print(f"service disabled: {unit}")
+    return 0
+
+
+def codex_service_status(preset):
+    result = subprocess.run(
+        ["systemctl", "--user", "status", f"{_codex_unit_name(preset)}.service", "--no-pager"],
+        check=False,
+        text=True,
+    )
+    return result.returncode
+
+
+def codex_service_logs(preset, lines=80):
+    result = subprocess.run(
+        ["journalctl", "--user", "-u", f"{_codex_unit_name(preset)}.service", "-n", str(lines), "--no-pager"],
+        check=False,
+        text=True,
+    )
+    return result.returncode
+
+
+def print_codex_help():
+    print(
+        """Usage:
+  slack <preset> codex once
+  slack <preset> codex scan
+  slack <preset> codex service
+  slack <preset> codex ti
+  slack <preset> codex td
+  slack <preset> codex st
+  slack <preset> codex logs [lines]
+  slack <preset> codex status
+  slack <preset> codex reset-state"""
+    )
+    return 0
+
+
 def _config_path() -> Path:
     return Path(get_config_path())
 
@@ -2560,6 +3570,7 @@ def _dispatch(argv: list[str]) -> int:
             args["auth_preset"],
             args["auth_bot_token"],
             args["auth_user_token"],
+            args["auth_app_token"],
             args["auth_name"],
             args["auth_import"],
         )
@@ -2582,6 +3593,30 @@ def _dispatch(argv: list[str]) -> int:
 
     if not args["command"]:
         return 0
+
+    if args["command"] == "codex":
+        action = args["codex_action"]
+        if action == "help":
+            return print_codex_help()
+        if action == "once":
+            return codex_once(account, preset)
+        if action == "scan":
+            return codex_scan(account, preset)
+        if action == "service":
+            return codex_service(account, preset)
+        if action == "ti":
+            return codex_install_service(preset)
+        if action == "td":
+            return codex_disable_service(preset)
+        if action == "st":
+            return codex_service_status(preset)
+        if action == "logs":
+            return codex_service_logs(preset, args["codex_lines"])
+        if action == "status":
+            return codex_status(account, preset)
+        if action == "reset-state":
+            return codex_reset_state(account, preset)
+        raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
 
     if args["command"] == "ls" and args["ls_registry"]:
         list_registered_contacts(contacts)
