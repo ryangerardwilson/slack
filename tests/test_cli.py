@@ -1132,6 +1132,55 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(path, "/tmp/D1-100.zip")
 
+    def test_tui_file_modal_lists_assets_and_moves(self):
+        module = load_main_module()
+
+        entry = {
+            "channel_id": "D1",
+            "message": {
+                "ts": "100.000100",
+                "files": [{"id": "F1", "name": "note.txt"}],
+                "attachments": [{"title": "spec", "title_link": "https://example.com/spec"}],
+            },
+        }
+        state = {}
+
+        opened = module._tui_open_file_modal_for_entry(state, entry)
+
+        self.assertTrue(opened)
+        self.assertEqual([asset["name"] for asset in state["modal"]["assets"]], ["note.txt", "spec"])
+        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "note.txt")
+        module._tui_move_file_modal(state, 1)
+        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "spec")
+        module._tui_move_file_modal(state, 1)
+        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "spec")
+        module._tui_move_file_modal(state, -1)
+        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "note.txt")
+
+    def test_tui_download_asset_open_path_writes_selected_embed(self):
+        module = load_main_module()
+
+        entry = {"channel_id": "D1", "message": {"ts": "100.000100"}}
+        asset = {
+            "kind": "embed",
+            "id": "-",
+            "name": "spec",
+            "url": "https://example.com/spec",
+            "text": "metadata",
+        }
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                path = module._tui_download_asset_open_path(entry, asset, "xoxp-token")
+                content = Path(path).read_text(encoding="utf-8")
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertTrue(path.endswith("D1-100-000100-spec.url.txt"))
+        self.assertIn("https://example.com/spec", content)
+
     def test_tui_transcript_status_shows_loaded_message_and_line_window(self):
         module = load_main_module()
 
@@ -1180,12 +1229,14 @@ class CliContractTests(unittest.TestCase):
             "stick_bottom": True,
             "composer": "",
         }
+        state["messages"][-1]["message"]["files"] = [{"id": "F1", "name": "note.txt"}]
 
         module._tui_draw(FakeWindow(), state)
 
         self.assertIn("100 messages", added[0][2])
         self.assertIn("/", added[0][2])
-        self.assertEqual(state["rendered_line_count"], 299)
+        self.assertEqual(state["rendered_line_count"], 300)
+        self.assertEqual(state["visible_file_entries"][-1]["message"]["files"][0]["name"], "note.txt")
 
     def test_tui_curses_setup_uses_transparent_default_background(self):
         module = load_main_module()

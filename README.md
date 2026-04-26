@@ -174,8 +174,10 @@ DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation,
 and `h` from an empty composer to return. The conversation screen hydrates the
 latest 100 messages for that DM/GDM, shows attachment/embed names inline, and
 lets you type a new message at the bottom. Enter sends, `r` refreshes, and
-PageUp/PageDown scroll through the loaded transcript. Ctrl-O opens the latest
-visible file/embed in `$VISUAL`, `$EDITOR`, then `vim`.
+Ctrl-K/Ctrl-J page through the loaded transcript. With an empty composer,
+`l` on a visible message with files opens a file list modal; use `j`/`k` inside
+the modal and `l` again to open the selected file/embed in `$VISUAL`,
+`$EDITOR`, then `vim`.
 
 Clear stale conversations and bot-like conversations:
 
@@ -278,7 +280,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, type at the bottom to send, PageUp/PageDown to scroll the loaded transcript, `h` from an empty composer to return, and Ctrl-O to open visible files/embeds.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, type at the bottom to send, Ctrl-K/Ctrl-J to page the transcript, `h` from an empty composer to return, and `l` on a visible file-bearing message to choose a file/embed to open.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

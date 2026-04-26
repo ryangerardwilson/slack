@@ -2536,7 +2536,11 @@ def list_dms(
 TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
 TUI_CONVERSATIONS_HELP = "j/k move  l/enter open  r refresh  q quit"
-TUI_CONVERSATION_HELP = "type message  enter send  pgup/pgdn scroll  empty h back  ctrl-o files  r refresh  q quit"
+TUI_CONVERSATION_HELP = "type message  enter send  ctrl-k/j page  empty h back  l files  r refresh  q quit"
+TUI_FILE_MODAL_HELP = "j/k move  l open  h/esc close"
+CTRL_J = 10
+CTRL_K = 11
+CTRL_O = 15
 
 
 def _clip(value, width):
@@ -2964,6 +2968,80 @@ def _tui_latest_message_with_assets(state):
     return _tui_selected_message(state)
 
 
+def _tui_entry_key(entry):
+    if not entry:
+        return None
+    message = entry.get("message") or {}
+    return (entry.get("channel_id") or entry.get("dm_id"), str(message.get("ts") or ""))
+
+
+def _tui_visible_file_entry(state):
+    entries = state.get("visible_file_entries") or []
+    if entries:
+        return entries[-1]
+    return None
+
+
+def _tui_open_file_modal_for_entry(state, entry):
+    if not entry:
+        state["status"] = "no files in visible messages"
+        return False
+    assets = message_assets(entry.get("message") or {})
+    if not assets:
+        state["status"] = "no files in visible messages"
+        return False
+    state["modal"] = {
+        "kind": "files",
+        "entry": entry,
+        "assets": assets,
+        "index": 0,
+        "scroll": 0,
+    }
+    state["status"] = f"{len(assets)} files"
+    return True
+
+
+def _tui_selected_modal_asset(state):
+    modal = state.get("modal") or {}
+    assets = modal.get("assets") or []
+    if not assets:
+        return None
+    index = max(0, min(int(modal.get("index") or 0), len(assets) - 1))
+    modal["index"] = index
+    return assets[index]
+
+
+def _tui_move_file_modal(state, delta):
+    modal = state.get("modal") or {}
+    assets = modal.get("assets") or []
+    if not assets:
+        return
+    modal["index"] = max(0, min(len(assets) - 1, int(modal.get("index") or 0) + delta))
+
+
+def _tui_download_asset_open_path(entry, asset, token):
+    if not entry or not asset:
+        return None
+    channel_id = entry.get("channel_id") or entry.get("dm_id") or "conversation"
+    message = entry.get("message") or {}
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    if asset.get("kind") == "file" and payload:
+        destination = _download_destination(channel_id, payload)
+    else:
+        safe_channel = _safe_filename(channel_id, "conversation")
+        safe_ts = _safe_filename(str(message.get("ts") or "message").replace(".", "-"), "message")
+        destination = os.path.abspath(
+            os.path.expanduser(f"{safe_channel}-{safe_ts}-{_asset_filename(asset)}")
+        )
+    data = _asset_bytes(asset, token)
+    parent = os.path.dirname(destination)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(destination, "wb") as handle:
+        handle.write(data)
+    return destination
+
+
 def _tui_download_open_path(entry, token):
     if not entry:
         return None
@@ -3025,23 +3103,27 @@ def _tui_conversation_label(row):
     return info.get("conversation") or info.get("name") or info.get("channel_id") or "-"
 
 
-def _tui_render_message_lines(messages, width):
-    lines = []
+def _tui_render_message_rows(messages, width):
+    rows = []
     text_width = max(10, width - 4)
     for entry in messages:
         message = entry.get("message") or {}
         sender = (entry.get("sender") or {}).get("label") or "-"
         stamp = format_ts(message.get("ts"))
-        lines.append(f"{sender}  {stamp}")
+        rows.append({"text": f"{sender}  {stamp}", "entry": entry})
         text = message_text(message) or "-"
         for paragraph in str(text).splitlines() or [""]:
             wrapped = textwrap.wrap(paragraph, text_width) or [""]
-            lines.extend(f"  {line}" for line in wrapped)
+            rows.extend({"text": f"  {line}", "entry": entry} for line in wrapped)
         attachments = summarize_attachments(message)
         if attachments != "-":
-            lines.append(f"  files: {attachments}")
-        lines.append("")
-    return lines[:-1] if lines else ["No messages."]
+            rows.append({"text": f"  files: {attachments}", "entry": entry})
+        rows.append({"text": "", "entry": None})
+    return rows[:-1] if rows else [{"text": "No messages.", "entry": None}]
+
+
+def _tui_render_message_lines(messages, width):
+    return [row["text"] for row in _tui_render_message_rows(messages, width)]
 
 
 def _tui_transcript_status(messages, rendered_line_count, view_height, scroll):
@@ -3105,12 +3187,54 @@ def _tui_draw_conversations(stdscr, state, height, width):
         )
 
 
+def _tui_draw_file_modal(stdscr, state, height, width):
+    modal = state.get("modal") or {}
+    if modal.get("kind") != "files":
+        return
+    assets = modal.get("assets") or []
+    modal_width = min(max(42, width - 8), 88)
+    modal_height = min(max(8, len(assets) + 4), max(8, height - 4))
+    y = max(1, (height - modal_height) // 2)
+    x = max(0, (width - modal_width) // 2)
+    list_height = max(1, modal_height - 4)
+    index = max(0, min(int(modal.get("index") or 0), max(0, len(assets) - 1)))
+    modal["index"] = index
+    modal["scroll"] = _tui_adjust_scroll(
+        index,
+        int(modal.get("scroll") or 0),
+        list_height,
+        len(assets),
+    )
+
+    horizontal = "-" * max(0, modal_width - 2)
+    _safe_addstr(stdscr, y, x, f"+{horizontal}+")
+    for row in range(1, modal_height - 1):
+        _safe_addstr(stdscr, y + row, x, "|")
+        _safe_addstr(stdscr, y + row, x + modal_width - 1, "|")
+    _safe_addstr(stdscr, y + modal_height - 1, x, f"+{horizontal}+")
+    _safe_addstr(stdscr, y + 1, x + 2, _clip(f"files ({len(assets)})", modal_width - 4))
+    _safe_addstr(stdscr, y + 2, x + 2, _clip(TUI_FILE_MODAL_HELP, modal_width - 4))
+
+    for row_offset in range(list_height):
+        asset_index = int(modal["scroll"]) + row_offset
+        if asset_index >= len(assets):
+            break
+        asset = assets[asset_index]
+        label = f"{asset.get('kind') or 'file'}  {asset.get('name') or 'attachment'}"
+        attr = 0
+        try:
+            attr = curses.A_REVERSE if asset_index == index else 0
+        except NameError:
+            attr = 0
+        _safe_addstr(stdscr, y + 3 + row_offset, x + 2, _clip(label, modal_width - 4), attr)
+
+
 def _tui_draw_conversation(stdscr, state, height, width):
     selected_conv = _tui_selected_conversation(state)
     label = _tui_conversation_label(selected_conv)
     status = state.get("status") or ""
     messages = state.get("messages") or []
-    rendered = _tui_render_message_lines(messages, width - 1)
+    rendered = _tui_render_message_rows(messages, width - 1)
     message_height = max(1, height - 5)
     state["message_view_height"] = message_height
     max_scroll = max(0, len(rendered) - message_height)
@@ -3126,11 +3250,21 @@ def _tui_draw_conversation(stdscr, state, height, width):
     _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
     _safe_addstr(stdscr, height - 3, 0, "-" * max(0, width - 1))
     _safe_addstr(stdscr, height - 1, 0, _clip(TUI_CONVERSATION_HELP, width - 1))
+    visible_file_entries = []
+    visible_file_keys = set()
     for row_offset in range(message_height):
         idx = int(state["message_scroll"]) + row_offset
         if idx >= len(rendered):
             break
-        _safe_addstr(stdscr, 2 + row_offset, 0, _clip(rendered[idx], width - 1))
+        row = rendered[idx]
+        entry = row.get("entry")
+        if entry and summarize_attachments(entry.get("message") or {}) != "-":
+            key = _tui_entry_key(entry)
+            if key not in visible_file_keys:
+                visible_file_keys.add(key)
+                visible_file_entries.append(entry)
+        _safe_addstr(stdscr, 2 + row_offset, 0, _clip(row["text"], width - 1))
+    state["visible_file_entries"] = visible_file_entries
 
     composer = state.get("composer") or ""
     prompt = f"> {composer}"
@@ -3138,6 +3272,8 @@ def _tui_draw_conversation(stdscr, state, height, width):
     visible_prompt = prompt[-prompt_width:]
     _safe_addstr(stdscr, height - 2, 0, _clip(visible_prompt, prompt_width))
     _safe_move(stdscr, height - 2, min(len(visible_prompt), prompt_width - 1))
+    if state.get("modal"):
+        _tui_draw_file_modal(stdscr, state, height, width)
 
 
 def _tui_draw(stdscr, state):
@@ -3272,6 +3408,28 @@ def _tui_open_entry_in_editor(stdscr, curses_module, state, token, entry):
     state["status"] = f"opened {path}"
 
 
+def _tui_open_modal_asset_in_editor(stdscr, curses_module, state, token):
+    modal = state.get("modal") or {}
+    entry = modal.get("entry")
+    asset = _tui_selected_modal_asset(state)
+    path = _tui_download_asset_open_path(entry, asset, token)
+    if not path:
+        state["status"] = "no selected file"
+        return
+    curses_module.def_prog_mode()
+    curses_module.endwin()
+    try:
+        _open_path_in_editor(path)
+    finally:
+        curses_module.reset_prog_mode()
+        stdscr.keypad(True)
+        try:
+            curses_module.curs_set(0)
+        except curses_module.error:
+            pass
+    state["status"] = f"opened {path}"
+
+
 def _setup_tui_curses(stdscr, curses_module):
     try:
         curses_module.curs_set(0)
@@ -3350,6 +3508,20 @@ def _run_tui(stdscr, token, self_user_id):
             continue
 
         composer = state.get("composer") or ""
+        if state.get("modal"):
+            if key in (27, ord("h"), ord("q")):
+                state["modal"] = None
+                continue
+            if key in (ord("j"), curses.KEY_DOWN):
+                _tui_move_file_modal(state, 1)
+                continue
+            if key in (ord("k"), curses.KEY_UP):
+                _tui_move_file_modal(state, -1)
+                continue
+            if key in (ord("l"), curses.KEY_ENTER, 13):
+                _tui_open_modal_asset_in_editor(stdscr, curses, state, token)
+                continue
+            continue
         if key in (27,):
             if composer:
                 state["composer"] = ""
@@ -3367,18 +3539,18 @@ def _run_tui(stdscr, token, self_user_id):
             _tui_refresh_messages(state, token, self_user_id, force=True)
             state["status"] = f"{len(state.get('messages') or [])} messages"
             continue
-        if key in (15,):  # ctrl-o
+        if key in (ord("l"),) and not composer:
+            _tui_open_file_modal_for_entry(state, _tui_visible_file_entry(state))
+            continue
+        if key in (CTRL_O,):
             _tui_open_entry_in_editor(stdscr, curses, state, token, _tui_latest_message_with_assets(state))
             continue
-        if key in (ord("o"),) and not composer:
-            _tui_open_entry_in_editor(stdscr, curses, state, token, _tui_latest_message_with_assets(state))
-            continue
-        if key in (curses.KEY_PPAGE,):
+        if key in (CTRL_K,):
             page = max(1, int(state.get("message_view_height") or 1) - 1)
             state["message_scroll"] = max(0, int(state.get("message_scroll") or 0) - page)
             state["stick_bottom"] = False
             continue
-        if key in (curses.KEY_NPAGE,):
+        if key in (CTRL_J,):
             page = max(1, int(state.get("message_view_height") or 1) - 1)
             state["message_scroll"] = int(state.get("message_scroll") or 0) + page
             state["stick_bottom"] = False
@@ -3394,7 +3566,7 @@ def _run_tui(stdscr, token, self_user_id):
         if key in (curses.KEY_END,):
             state["stick_bottom"] = True
             continue
-        if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+        if key in (curses.KEY_ENTER, 13):
             if composer.strip():
                 state["status"] = "sending..."
                 _tui_draw(stdscr, state)
