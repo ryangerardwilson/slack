@@ -160,6 +160,16 @@ slack 1 o D0466D63H7B
 slack 1 o D0466D63H7B:1712764800.000100
 ```
 
+Open the DM/group-DM TUI:
+
+```bash
+slack 1 tui
+```
+
+The TUI uses `h`/`l` to switch between the conversation and message panes,
+`j`/`k` to move, `r` to refresh, and `o` or Enter to download the selected
+message's files and open the file or zip in `$VISUAL`, `$EDITOR`, then `vim`.
+
 Clear stale conversations and bot-like conversations:
 
 ```bash
@@ -261,6 +271,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
+- `tui`: Open a curses TUI for Slack DMs and group DMs only. Use `h`/`l` between panes, `j`/`k` to move, and `o` or Enter to open selected-message files in the editor.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

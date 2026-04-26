@@ -193,6 +193,16 @@ class CliContractTests(unittest.TestCase):
         scan = module.parse_args(["1", "codex", "scan"])
         self.assertEqual(scan["codex_action"], "scan")
 
+    def test_tui_command_parses_with_preset(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["1", "tui"])
+
+        self.assertEqual(parsed["preset"], "1")
+        self.assertEqual(parsed["command"], "tui")
+        with self.assertRaises(SystemExit):
+            module.parse_args(["1", "tui", "extra"])
+
     def test_select_account_requires_preset_when_accounts_exist(self):
         module = load_main_module()
 
@@ -425,6 +435,39 @@ class CliContractTests(unittest.TestCase):
         send_post.assert_called_once_with("xoxp-token", "D123", "hello")
         send_attachments.assert_called_once_with("D123", "200.000100", [], "xoxp-token")
         self.assertIn("posted target=md kind=email channel=D123", stdout.getvalue())
+
+    def test_tui_dispatch_uses_user_token(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "accounts": {
+                            "1": {
+                                "token": {"bot": "xoxb-token", "user": "xoxp-token"},
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "auth_test", return_value={"ok": True, "user_id": "U1"}):
+                    with mock.patch.object(module, "run_slack_tui", return_value=None) as tui:
+                        rc = module.main(["1", "tui"])
+
+        self.assertEqual(rc, 0)
+        tui.assert_called_once_with("xoxp-token", "U1")
 
     def test_auth_stores_tokens_inside_config_accounts(self):
         module = load_main_module()
@@ -844,6 +887,47 @@ class CliContractTests(unittest.TestCase):
             summary["conversation"],
             "rohan.choudhary, ryan.wilson, maanas.dwivedi064",
         )
+
+    def test_tui_conversations_are_limited_to_dms_and_group_dms(self):
+        module = load_main_module()
+
+        channels = [{"id": "D1"}, {"id": "G1"}, {"id": "C1"}]
+        summaries = {
+            "D1": {"channel_id": "D1", "surface": "dm"},
+            "G1": {"channel_id": "G1", "surface": "group_dm"},
+            "C1": {"channel_id": "C1", "surface": "channel"},
+        }
+
+        def fake_summary(channel, token, user_cache=None):
+            return summaries[channel["id"]]
+
+        with mock.patch.object(module, "list_api", return_value=channels) as list_api:
+            with mock.patch.object(module, "_conversation_summary", side_effect=fake_summary):
+                infos = module.get_tui_conversation_infos("xoxp-token")
+
+        list_api.assert_called_once_with(
+            "users.conversations",
+            {"types": "im,mpim", "exclude_archived": "true", "limit": "200"},
+            "xoxp-token",
+        )
+        self.assertEqual([info["channel_id"] for info in infos], ["D1", "G1"])
+
+    def test_tui_open_path_prefers_zip_for_multiple_assets(self):
+        module = load_main_module()
+
+        entry = {
+            "channel_id": "D1",
+            "message": {"ts": "100.000100", "text": "files"},
+        }
+        downloads = [
+            {"path": "/tmp/D1-100.zip", "zip_entry": "one.txt"},
+            {"path": "/tmp/D1-100.zip", "zip_entry": "two.txt"},
+        ]
+
+        with mock.patch.object(module, "_message_details", return_value=(downloads, [])):
+            path = module._tui_download_open_path(entry, "xoxp-token")
+
+        self.assertEqual(path, "/tmp/D1-100.zip")
 
     def test_lookup_user_id_by_name_resolves_unique_exact_match(self):
         module = load_main_module()

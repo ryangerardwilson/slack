@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import zipfile
@@ -42,6 +43,7 @@ COMMANDS = {
     "reply",
     "sc",
     "su",
+    "tui",
     "u",
 }
 DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
@@ -135,6 +137,10 @@ features:
   # slack <preset> o <channel_id|message_id>
   slack 1 o D0466D63H7B
   slack 1 o D0466D63H7B:1712764800.000100
+
+  open a keyboard-first DM and group-DM terminal view
+  # slack <preset> tui
+  slack 1 tui
 
   list Slack message history with Gmail-style filters, surface labels, and attachment names
   # slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
@@ -311,7 +317,7 @@ def _top_level_usage():
         "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
         "slack <preset> reply <message_id> <message> [path...] | "
         "slack <preset> df <channel_id> <file_id> [output_path] | "
-        "slack <preset> o <channel_id|message_id> | slack <preset> ls rc | "
+        "slack <preset> o <channel_id|message_id> | slack <preset> tui | slack <preset> ls rc | "
         "slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] "
         "[-c <contains>] [-tl <time_limit>] | slack <preset> sc | slack <preset> mra"
     )
@@ -495,6 +501,10 @@ def parse_args(argv):
                 raise SystemExit("Use: slack o <channel_id|message_id>")
             args["recipient"] = remaining[0]
             args["open_mode"] = True
+            return args
+        if token == "tui":
+            if remaining:
+                raise SystemExit("Use: slack <preset> tui")
             return args
         if token == "ls":
             if remaining == ["rc"]:
@@ -1777,6 +1787,27 @@ def get_all_dm_infos(token):
     return infos
 
 
+def get_tui_conversation_infos(token):
+    channels = list_api(
+        "users.conversations",
+        {"types": "im,mpim", "exclude_archived": "true", "limit": "200"},
+        token,
+    )
+    infos = []
+    user_cache = {}
+    for channel in channels:
+        channel_id = channel.get("id") if isinstance(channel, dict) else None
+        if not channel_id:
+            continue
+        try:
+            info = _conversation_summary(channel, token, user_cache)
+        except SystemExit:
+            info = _fallback_conversation_summary(channel_id, channel)
+        if info and info.get("surface") in {"dm", "group_dm"}:
+            infos.append(info)
+    return infos
+
+
 def get_contact_dm_infos(contacts, token):
     im_channels = list_api(
         "users.conversations",
@@ -2499,6 +2530,350 @@ def list_dms(
         return
 
     print_sections([_list_entry_fields(item) for item in selected])
+
+
+TUI_CONVERSATION_LIMIT = 80
+TUI_MESSAGE_LIMIT = 80
+TUI_HELP = "h/l focus  j/k move  o open files in vim  r refresh  q quit"
+
+
+def _clip(value, width):
+    text = str(value or "").replace("\n", " ").replace("\r", " ")
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
+
+
+def _safe_addstr(window, y, x, text, attr=0):
+    try:
+        height, width = window.getmaxyx()
+        if y < 0 or y >= height or x >= width:
+            return
+        window.addnstr(y, x, str(text), max(0, width - x - 1), attr)
+    except Exception:
+        return
+
+
+def _tui_load_conversations(token, self_user_id, limit=TUI_CONVERSATION_LIMIT):
+    rows = []
+    for info in get_tui_conversation_infos(token):
+        try:
+            messages = _collect_messages(info, token, 1, "all", self_user_id)
+        except SystemExit:
+            messages = []
+        latest = messages[0] if messages else None
+        rows.append(
+            {
+                "info": info,
+                "latest": latest,
+                "sort_ts": latest["sort_ts"] if latest else 0.0,
+            }
+        )
+    rows.sort(key=lambda item: item["sort_ts"], reverse=True)
+    return rows[:limit]
+
+
+def _tui_load_messages(conversation_row, token, self_user_id, limit=TUI_MESSAGE_LIMIT):
+    if not conversation_row:
+        return []
+    try:
+        entries = _collect_messages(conversation_row["info"], token, limit, "all", self_user_id)
+    except SystemExit:
+        entries = []
+    entries.sort(key=lambda item: item["sort_ts"])
+    return entries
+
+
+def _tui_selected_message(state):
+    messages = state.get("messages") or []
+    if not messages:
+        return None
+    index = max(0, min(int(state.get("message_index") or 0), len(messages) - 1))
+    state["message_index"] = index
+    return messages[index]
+
+
+def _tui_download_open_path(entry, token):
+    if not entry:
+        return None
+    channel_id = entry.get("channel_id") or entry.get("dm_id")
+    downloads, _code_blocks = _message_details(entry["message"], channel_id, token)
+    if not downloads:
+        return None
+    zip_paths = sorted({item["path"] for item in downloads if item.get("zip_entry")})
+    return zip_paths[0] if zip_paths else downloads[0]["path"]
+
+
+def _open_path_in_editor(path):
+    editor_cmd = resolve_editor_cmd()
+    try:
+        return subprocess.run(editor_cmd + [path], check=False).returncode
+    except FileNotFoundError:
+        raise SystemExit(f"Editor not found: {editor_cmd[0]}")
+
+
+def _tui_status_for_entry(entry):
+    if not entry:
+        return "No messages."
+    channel_id = entry.get("channel_id") or entry.get("dm_id")
+    return f"{message_id(channel_id, entry['message'].get('ts'))}  {format_ts(entry['message'].get('ts'))}"
+
+
+def _tui_conversation_line(row, width):
+    info = row.get("info") or {}
+    latest = row.get("latest") or {}
+    entry = latest if isinstance(latest, dict) else {}
+    surface = "gdm" if info.get("surface") == "group_dm" else "dm"
+    unread = "*" if entry.get("unread") else " "
+    date = format_ts((entry.get("message") or {}).get("ts")) if entry else "-"
+    text = compact_text(message_text(entry.get("message") or {})) if entry else ""
+    label = info.get("conversation") or info.get("name") or info.get("channel_id") or "-"
+    return _clip(f"{unread} {surface:<3} {label}  {date}  {text}", width)
+
+
+def _tui_message_line(entry, width):
+    sender = (entry.get("sender") or {}).get("label") or "-"
+    marker = "*" if entry.get("unread") else " "
+    attachments = summarize_attachments(entry.get("message") or {})
+    attach_label = f" [{attachments}]" if attachments != "-" else ""
+    text = compact_text(message_text(entry.get("message") or {}))
+    return _clip(f"{marker} {format_ts(entry['message'].get('ts'))}  {sender}: {text}{attach_label}", width)
+
+
+def _tui_adjust_scroll(index, scroll, height, length):
+    if height <= 0:
+        return 0
+    index = max(0, min(index, max(0, length - 1)))
+    if index < scroll:
+        return index
+    if index >= scroll + height:
+        return index - height + 1
+    return max(0, min(scroll, max(0, length - height)))
+
+
+def _tui_draw_box(window, y, x, height, width, title, active=False):
+    attr = 0
+    try:
+        attr = curses.A_BOLD if active else 0
+    except NameError:
+        attr = 0
+    _safe_addstr(window, y, x, _clip(title, width), attr)
+    if y + 1 < y + height:
+        _safe_addstr(window, y + 1, x, "-" * max(0, width - 1))
+
+
+def _tui_draw(stdscr, state):
+    stdscr.erase()
+    height, width = stdscr.getmaxyx()
+    if height < 10 or width < 50:
+        _safe_addstr(stdscr, 0, 0, "Terminal too small for slack tui.")
+        stdscr.refresh()
+        return
+
+    left_width = min(max(28, width // 3), 46)
+    right_x = left_width + 1
+    right_width = width - right_x
+    body_y = 1
+    body_height = height - 3
+    detail_height = max(5, min(12, body_height // 3))
+    message_height = max(1, body_height - detail_height - 2)
+
+    title = f"slack tui  {state.get('status') or TUI_HELP}"
+    _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
+    _safe_addstr(stdscr, height - 1, 0, _clip(TUI_HELP, width - 1))
+    for y in range(1, height - 1):
+        _safe_addstr(stdscr, y, left_width, "|")
+
+    conversations = state.get("conversations") or []
+    conv_index = int(state.get("conversation_index") or 0)
+    conv_rows = max(1, body_height - 2)
+    state["conversation_scroll"] = _tui_adjust_scroll(
+        conv_index,
+        int(state.get("conversation_scroll") or 0),
+        conv_rows,
+        len(conversations),
+    )
+    _tui_draw_box(stdscr, body_y, 0, body_height, left_width, "DMs and group DMs", state.get("focus") == "conversations")
+    for row_offset in range(conv_rows):
+        idx = int(state["conversation_scroll"]) + row_offset
+        if idx >= len(conversations):
+            break
+        attr = curses.A_REVERSE if idx == conv_index else 0
+        _safe_addstr(stdscr, body_y + 2 + row_offset, 0, _tui_conversation_line(conversations[idx], left_width - 1), attr)
+
+    selected_conv = conversations[conv_index] if conversations else None
+    conv_label = "-"
+    if selected_conv:
+        info = selected_conv.get("info") or {}
+        conv_label = info.get("conversation") or info.get("name") or info.get("channel_id") or "-"
+    _tui_draw_box(stdscr, body_y, right_x, message_height + 2, right_width, conv_label, state.get("focus") == "messages")
+
+    messages = state.get("messages") or []
+    msg_index = int(state.get("message_index") or 0)
+    state["message_scroll"] = _tui_adjust_scroll(
+        msg_index,
+        int(state.get("message_scroll") or 0),
+        message_height,
+        len(messages),
+    )
+    for row_offset in range(message_height):
+        idx = int(state["message_scroll"]) + row_offset
+        if idx >= len(messages):
+            break
+        attr = curses.A_REVERSE if idx == msg_index else 0
+        _safe_addstr(stdscr, body_y + 2 + row_offset, right_x, _tui_message_line(messages[idx], right_width - 1), attr)
+
+    detail_y = body_y + message_height + 3
+    detail_entry = _tui_selected_message(state)
+    _tui_draw_box(stdscr, detail_y - 1, right_x, detail_height, right_width, "message", False)
+    if detail_entry:
+        _safe_addstr(stdscr, detail_y + 1, right_x, _clip(_tui_status_for_entry(detail_entry), right_width - 1))
+        attachments = summarize_attachments(detail_entry.get("message") or {})
+        _safe_addstr(stdscr, detail_y + 2, right_x, _clip(f"attachments: {attachments}", right_width - 1))
+        text = message_text(detail_entry.get("message") or {}) or "-"
+        wrapped = textwrap.wrap(text, max(10, right_width - 2)) or [""]
+        for offset, line in enumerate(wrapped[: max(0, detail_height - 4)]):
+            _safe_addstr(stdscr, detail_y + 3 + offset, right_x, _clip(line, right_width - 1))
+    else:
+        _safe_addstr(stdscr, detail_y + 1, right_x, "No messages.")
+
+    stdscr.refresh()
+
+
+def _tui_refresh_messages(state, token, self_user_id, keep_latest=True):
+    conversations = state.get("conversations") or []
+    if not conversations:
+        state["messages"] = []
+        state["message_index"] = 0
+        state["message_scroll"] = 0
+        return
+    conv_index = max(0, min(int(state.get("conversation_index") or 0), len(conversations) - 1))
+    state["conversation_index"] = conv_index
+    messages = _tui_load_messages(conversations[conv_index], token, self_user_id)
+    state["messages"] = messages
+    state["message_index"] = max(0, len(messages) - 1) if keep_latest else 0
+    state["message_scroll"] = 0
+
+
+def _tui_refresh(state, token, self_user_id):
+    previous_channel = None
+    conversations = state.get("conversations") or []
+    if conversations:
+        selected = conversations[max(0, min(int(state.get("conversation_index") or 0), len(conversations) - 1))]
+        previous_channel = (selected.get("info") or {}).get("channel_id")
+    state["status"] = "loading..."
+    conversations = _tui_load_conversations(token, self_user_id)
+    state["conversations"] = conversations
+    state["conversation_index"] = 0
+    if previous_channel:
+        for index, row in enumerate(conversations):
+            if (row.get("info") or {}).get("channel_id") == previous_channel:
+                state["conversation_index"] = index
+                break
+    state["conversation_scroll"] = 0
+    _tui_refresh_messages(state, token, self_user_id)
+    state["status"] = f"{len(conversations)} conversations"
+
+
+def _run_tui(stdscr, token, self_user_id):
+    global curses
+    import curses
+
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    stdscr.keypad(True)
+    state = {
+        "focus": "conversations",
+        "conversations": [],
+        "conversation_index": 0,
+        "conversation_scroll": 0,
+        "messages": [],
+        "message_index": 0,
+        "message_scroll": 0,
+        "status": "loading...",
+    }
+    _tui_refresh(state, token, self_user_id)
+    while True:
+        _tui_draw(stdscr, state)
+        key = stdscr.getch()
+        if key in (ord("q"), 27):
+            return
+        if key in (ord("h"),):
+            state["focus"] = "conversations"
+            continue
+        if key in (ord("l"), ord("\t")):
+            state["focus"] = "messages"
+            continue
+        if key in (ord("r"),):
+            _tui_refresh(state, token, self_user_id)
+            continue
+        if key in (ord("g"),):
+            active_key = "conversation_index" if state.get("focus") == "conversations" else "message_index"
+            state[active_key] = 0
+            if active_key == "conversation_index":
+                _tui_refresh_messages(state, token, self_user_id)
+            continue
+        if key in (ord("G"),):
+            if state.get("focus") == "conversations":
+                state["conversation_index"] = max(0, len(state.get("conversations") or []) - 1)
+                _tui_refresh_messages(state, token, self_user_id)
+            else:
+                state["message_index"] = max(0, len(state.get("messages") or []) - 1)
+            continue
+        if key in (ord("j"), curses.KEY_DOWN):
+            if state.get("focus") == "conversations":
+                max_index = max(0, len(state.get("conversations") or []) - 1)
+                new_index = min(max_index, int(state.get("conversation_index") or 0) + 1)
+                if new_index != state.get("conversation_index"):
+                    state["conversation_index"] = new_index
+                    _tui_refresh_messages(state, token, self_user_id)
+            else:
+                max_index = max(0, len(state.get("messages") or []) - 1)
+                state["message_index"] = min(max_index, int(state.get("message_index") or 0) + 1)
+            continue
+        if key in (ord("k"), curses.KEY_UP):
+            if state.get("focus") == "conversations":
+                new_index = max(0, int(state.get("conversation_index") or 0) - 1)
+                if new_index != state.get("conversation_index"):
+                    state["conversation_index"] = new_index
+                    _tui_refresh_messages(state, token, self_user_id)
+            else:
+                state["message_index"] = max(0, int(state.get("message_index") or 0) - 1)
+            continue
+        if key in (ord("o"), ord("\n"), curses.KEY_ENTER, 10, 13):
+            entry = _tui_selected_message(state)
+            path = _tui_download_open_path(entry, token)
+            if not path:
+                state["status"] = "selected message has no files"
+                continue
+            curses.def_prog_mode()
+            curses.endwin()
+            try:
+                _open_path_in_editor(path)
+            finally:
+                curses.reset_prog_mode()
+                stdscr.keypad(True)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            state["status"] = f"opened {path}"
+
+
+def run_slack_tui(token, self_user_id):
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise SystemExit("slack tui requires an interactive terminal.")
+    import curses
+
+    curses.wrapper(_run_tui, token, self_user_id)
 
 
 def open_dm_messages(dm_id, token, self_user_id):
@@ -3797,6 +4172,15 @@ def _dispatch(argv: list[str]) -> int:
             contains_filter=args["ls_contains"],
             time_limit=args["ls_time_limit"],
         )
+        return 0
+
+    if args["command"] == "tui":
+        token = resolve_list_token(account)
+        auth_data = auth_test(token)
+        self_user_id = auth_data.get("user_id")
+        if not self_user_id:
+            raise SystemExit("Unable to determine the current Slack user.")
+        run_slack_tui(token, self_user_id)
         return 0
 
     token = resolve_token(account)
