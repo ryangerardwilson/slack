@@ -1132,6 +1132,61 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(path, "/tmp/D1-100.zip")
 
+    def test_tui_transcript_status_shows_loaded_message_and_line_window(self):
+        module = load_main_module()
+
+        messages = [{"message": {"ts": str(index)}} for index in range(100)]
+
+        self.assertEqual(
+            module._tui_transcript_status(messages, 885, 35, 850),
+            "100 messages  lines 851-885/885",
+        )
+
+    def test_tui_draw_conversation_exposes_loaded_transcript_count(self):
+        module = load_main_module()
+        added = []
+
+        class FakeWindow:
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getmaxyx(self):
+                return (12, 80)
+
+            def addnstr(self, y, x, text, limit, attr=0):
+                added.append((y, x, text[:limit]))
+
+            def move(self, y, x):
+                pass
+
+        state = {
+            "mode": "conversation",
+            "conversations": [
+                {
+                    "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+                }
+            ],
+            "conversation_index": 0,
+            "messages": [
+                {
+                    "message": {"ts": str(index + 1), "text": f"message {index + 1}"},
+                    "sender": {"label": "sender"},
+                }
+                for index in range(100)
+            ],
+            "stick_bottom": True,
+            "composer": "",
+        }
+
+        module._tui_draw(FakeWindow(), state)
+
+        self.assertIn("100 messages", added[0][2])
+        self.assertIn("/", added[0][2])
+        self.assertEqual(state["rendered_line_count"], 299)
+
     def test_tui_curses_setup_uses_transparent_default_background(self):
         module = load_main_module()
         calls = []

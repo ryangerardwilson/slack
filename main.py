@@ -2536,7 +2536,7 @@ def list_dms(
 TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
 TUI_CONVERSATIONS_HELP = "j/k move  l/enter open  r refresh  q quit"
-TUI_CONVERSATION_HELP = "type message  enter send  empty h back  ctrl-o files  r refresh  q quit"
+TUI_CONVERSATION_HELP = "type message  enter send  pgup/pgdn scroll  empty h back  ctrl-o files  r refresh  q quit"
 
 
 def _clip(value, width):
@@ -3044,6 +3044,17 @@ def _tui_render_message_lines(messages, width):
     return lines[:-1] if lines else ["No messages."]
 
 
+def _tui_transcript_status(messages, rendered_line_count, view_height, scroll):
+    message_count = len(messages or [])
+    if not message_count:
+        return "0 messages"
+    rendered_line_count = max(1, int(rendered_line_count or 1))
+    view_height = max(1, int(view_height or 1))
+    scroll = max(0, min(int(scroll or 0), max(0, rendered_line_count - view_height)))
+    visible_end = min(rendered_line_count, scroll + view_height)
+    return f"{message_count} messages  lines {scroll + 1}-{visible_end}/{rendered_line_count}"
+
+
 def _tui_adjust_scroll(index, scroll, height, length):
     if height <= 0:
         return 0
@@ -3098,11 +3109,6 @@ def _tui_draw_conversation(stdscr, state, height, width):
     selected_conv = _tui_selected_conversation(state)
     label = _tui_conversation_label(selected_conv)
     status = state.get("status") or ""
-    title = f"slack tui  {label}  {status}".strip()
-    _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
-    _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
-    _safe_addstr(stdscr, height - 3, 0, "-" * max(0, width - 1))
-    _safe_addstr(stdscr, height - 1, 0, _clip(TUI_CONVERSATION_HELP, width - 1))
     messages = state.get("messages") or []
     rendered = _tui_render_message_lines(messages, width - 1)
     message_height = max(1, height - 5)
@@ -3114,6 +3120,12 @@ def _tui_draw_conversation(stdscr, state, height, width):
         scroll = max(0, min(int(state.get("message_scroll") or 0), max_scroll))
     state["message_scroll"] = scroll
     state["rendered_line_count"] = len(rendered)
+    transcript_status = _tui_transcript_status(messages, len(rendered), message_height, scroll)
+    title = f"slack tui  {label}  {transcript_status}  {status}".strip()
+    _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
+    _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
+    _safe_addstr(stdscr, height - 3, 0, "-" * max(0, width - 1))
+    _safe_addstr(stdscr, height - 1, 0, _clip(TUI_CONVERSATION_HELP, width - 1))
     for row_offset in range(message_height):
         idx = int(state["message_scroll"]) + row_offset
         if idx >= len(rendered):
