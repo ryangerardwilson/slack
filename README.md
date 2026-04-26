@@ -69,6 +69,8 @@ token only if it must resolve email contacts without a configured user token.
 Recommended for `df` and `ls -o`: `files:read`.
 For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 `users:read`, `users:read.email`, and `files:read` when attachment reads matter.
+For `tui`, add `search:read`, `users:read`, `im:read`, `im:history`,
+`mpim:read`, and `mpim:history` to the user token scopes.
 For event-driven Codex replies, enable Slack Socket Mode, generate an app-level
 `xapp-` token with `connections:write`, and subscribe the app to `app_mention`
 and `message.im` events.

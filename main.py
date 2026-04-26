@@ -2560,19 +2560,117 @@ def _safe_addstr(window, y, x, text, attr=0):
         return
 
 
+def _tui_summary_from_search_match(channel_id, channel, sender, self_user_id):
+    info = _fallback_conversation_summary(channel_id, channel)
+    surface = info.get("surface")
+    if surface not in {"dm", "group_dm"}:
+        surface = "dm" if str(channel_id).startswith("D") else "group_dm"
+        info["surface"] = surface
+    info.setdefault("info", {})
+    info["info"].setdefault("last_read", str(time.time()))
+    if surface == "dm" and sender.get("id") != self_user_id:
+        if sender.get("label") and sender["label"] != "-":
+            info["conversation"] = sender["label"]
+        if sender.get("name") and sender["name"] != "-":
+            info["name"] = sender["name"]
+        if sender.get("email") and sender["email"] != "-":
+            info["email"] = sender["email"]
+        if sender.get("id") and sender["id"] != "-":
+            info["user_id"] = sender["id"]
+    if surface == "group_dm" and info.get("conversation") == channel_id:
+        name = channel.get("name") or channel.get("name_normalized")
+        info["conversation"] = _channel_name({"id": channel_id, "name": name or channel_id}, channel_id)
+    return info
+
+
+def _tui_entry_from_search_match(match, info, sender, self_user_id):
+    ts = str(match.get("ts") or "")
+    try:
+        ts_value = float(ts)
+    except ValueError:
+        ts_value = 0.0
+    message = {
+        "ts": ts,
+        "user": match.get("user"),
+        "text": match.get("text") or "",
+    }
+    return {
+        "sort_ts": ts_value,
+        "email": info.get("email") or "-",
+        "dm_id": info["channel_id"],
+        "channel_id": info["channel_id"],
+        "surface": info.get("surface") or "dm",
+        "conversation": info.get("conversation") or info.get("name") or info["channel_id"],
+        "members": info.get("members") or "-",
+        "message": message,
+        "sender": sender,
+        "unread": False,
+    }
+
+
+def _tui_load_conversations_from_search(token, self_user_id, limit):
+    if _token_kind(token) != "user":
+        return None
+    payload = slack_request(
+        "search.messages",
+        {
+            "query": "is:dm",
+            "sort": "timestamp",
+            "sort_dir": "desc",
+            "count": str(max(20, min(100, limit * 3))),
+        },
+        token,
+        http_method="GET",
+        allow_error=True,
+    )
+    if payload.get("ok") is not True:
+        if payload.get("error") in {"not_allowed_token_type", "missing_scope", "no_permission"}:
+            return None
+        error = payload.get("error") or "unknown_error"
+        raise SystemExit(f"Slack API error (search.messages): {error}")
+
+    rows = []
+    seen = set()
+    user_cache = {}
+    for match in (payload.get("messages") or {}).get("matches", []) or []:
+        if not isinstance(match, dict):
+            continue
+        channel = match.get("channel") if isinstance(match.get("channel"), dict) else {}
+        channel_id = channel.get("id") or match.get("channel_id")
+        ts = str(match.get("ts") or "")
+        if not channel_id or not ts or channel_id in seen:
+            continue
+        channel_hint = dict(channel)
+        channel_hint.setdefault("id", channel_id)
+        sender = _sender_info({"user": match.get("user")}, token, user_cache) if match.get("user") else {
+            "id": "-",
+            "name": "-",
+            "email": "-",
+            "label": "-",
+        }
+        info = _tui_summary_from_search_match(channel_id, channel_hint, sender, self_user_id)
+        if info.get("surface") not in {"dm", "group_dm"}:
+            continue
+        entry = _tui_entry_from_search_match(match, info, sender, self_user_id)
+        rows.append({"info": info, "latest": entry, "sort_ts": entry["sort_ts"]})
+        seen.add(channel_id)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def _tui_load_conversations(token, self_user_id, limit=TUI_CONVERSATION_LIMIT):
+    search_rows = _tui_load_conversations_from_search(token, self_user_id, limit)
+    if search_rows is not None:
+        return search_rows
+
     rows = []
     for info in get_tui_conversation_infos(token):
-        try:
-            messages = _collect_messages(info, token, 1, "all", self_user_id)
-        except SystemExit:
-            messages = []
-        latest = messages[0] if messages else None
         rows.append(
             {
                 "info": info,
-                "latest": latest,
-                "sort_ts": latest["sort_ts"] if latest else 0.0,
+                "latest": None,
+                "sort_ts": 0.0,
             }
         )
     rows.sort(key=lambda item: item["sort_ts"], reverse=True)
@@ -2800,6 +2898,7 @@ def _run_tui(stdscr, token, self_user_id):
         "message_scroll": 0,
         "status": "loading...",
     }
+    _tui_draw(stdscr, state)
     _tui_refresh(state, token, self_user_id)
     while True:
         _tui_draw(stdscr, state)
@@ -2813,6 +2912,8 @@ def _run_tui(stdscr, token, self_user_id):
             state["focus"] = "messages"
             continue
         if key in (ord("r"),):
+            state["status"] = "loading..."
+            _tui_draw(stdscr, state)
             _tui_refresh(state, token, self_user_id)
             continue
         if key in (ord("g"),):

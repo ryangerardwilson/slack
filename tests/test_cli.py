@@ -912,6 +912,70 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual([info["channel_id"] for info in infos], ["D1", "G1"])
 
+    def test_tui_conversations_use_search_fast_path(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(method, "search.messages")
+            self.assertEqual(payload["query"], "is:dm")
+            self.assertTrue(kwargs.get("allow_error"))
+            return {
+                "ok": True,
+                "messages": {
+                    "matches": [
+                        {
+                            "channel": {"id": "D1"},
+                            "ts": "100.000100",
+                            "user": "U2",
+                            "text": "latest dm",
+                        },
+                        {
+                            "channel": {"id": "C1", "name": "mpdm-rohan--ryan-1"},
+                            "ts": "99.000100",
+                            "user": "U3",
+                            "text": "latest group dm",
+                        },
+                    ]
+                },
+            }
+
+        def fake_sender(message, token, user_cache):
+            user_id = message.get("user") or "-"
+            return {
+                "id": user_id,
+                "name": f"name-{user_id}",
+                "email": "-",
+                "label": f"name-{user_id}",
+            }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(module, "_sender_info", side_effect=fake_sender):
+                with mock.patch.object(module, "get_tui_conversation_infos") as fallback:
+                    rows = module._tui_load_conversations("xoxp-token", "U1", limit=10)
+
+        fallback.assert_not_called()
+        self.assertEqual([row["info"]["channel_id"] for row in rows], ["D1", "C1"])
+        self.assertEqual(rows[0]["info"]["surface"], "dm")
+        self.assertEqual(rows[0]["info"]["conversation"], "name-U2")
+        self.assertEqual(rows[1]["info"]["surface"], "group_dm")
+
+    def test_tui_conversations_fall_back_when_search_scope_missing(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            return {"ok": False, "error": "missing_scope"}
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(
+                module,
+                "get_tui_conversation_infos",
+                return_value=[{"channel_id": "D1", "surface": "dm", "conversation": "D1", "info": {}}],
+            ):
+                rows = module._tui_load_conversations("xoxp-token", "U1", limit=10)
+
+        self.assertEqual(rows[0]["info"]["channel_id"], "D1")
+        self.assertIsNone(rows[0]["latest"])
+
     def test_tui_open_path_prefers_zip_for_multiple_assets(self):
         module = load_main_module()
 
