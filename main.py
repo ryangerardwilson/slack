@@ -817,6 +817,21 @@ def resolve_list_token(config=None):
     return token
 
 
+def resolve_lookup_token(config=None, fallback_token=None):
+    config = config or {}
+    token = _direct_token(config, ("user_token", "token"))
+    if not token:
+        token = get_env("SLACK_TOKEN")
+    if not token:
+        token = _read_first_config_token(config, ("user_token_file", "token_file"))
+    if not token:
+        token = _read_token_file(DEFAULT_USER_TOKEN_FILE)
+    token = token or fallback_token
+    if token and _token_kind(token) == "unknown":
+        raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
+    return token
+
+
 def resolve_app_token(config=None):
     config = config or {}
     token = _direct_token(config, ("app_token", "socket_token"))
@@ -1049,7 +1064,8 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
     )
 
 
-def _resolve_post_target_value(value, token):
+def _resolve_post_target_value(value, token, lookup_token=None):
+    lookup_token = lookup_token or token
     parsed_message_id = parse_message_id(value)
     if parsed_message_id:
         channel_id, message_ts = parsed_message_id
@@ -1077,7 +1093,7 @@ def _resolve_post_target_value(value, token):
         }
     if "@" in value:
         email = value.strip()
-        user_id = lookup_user_id_by_email(email, token)
+        user_id = lookup_user_id_by_email(email, lookup_token)
         channel_id = open_dm(user_id, token)
         return {
             "kind": "email",
@@ -1090,21 +1106,27 @@ def _resolve_post_target_value(value, token):
     return None
 
 
-def resolve_post_target(recipient, contacts, token):
+def resolve_post_target(recipient, contacts, token, lookup_token=None):
+    lookup_token = lookup_token or token
     raw = (recipient or "").strip()
     if not raw:
         raise SystemExit("Post target cannot be empty.")
     if raw in contacts:
-        resolved = _resolve_post_target_value(contacts[raw].strip(), token)
+        resolved = _resolve_post_target_value(contacts[raw].strip(), token, lookup_token)
         if resolved:
             resolved["label"] = raw
             resolved["target"] = raw
             return resolved
         raise SystemExit(f"Saved contact '{raw}' is not an email, user id, channel id, or message id.")
-    resolved = _resolve_post_target_value(raw, token)
+    resolved = _resolve_post_target_value(raw, token, lookup_token)
     if resolved:
         return resolved
     raise SystemExit("Post target must be a contact label, email, Slack user id, channel id, or message id.")
+
+
+def _email_name_query(email):
+    local = str(email or "").split("@", 1)[0].split("+", 1)[0]
+    return " ".join(re.sub(r"[._-]+", " ", local).split())
 
 
 def lookup_user_id_by_email(email, token):
@@ -1113,7 +1135,21 @@ def lookup_user_id_by_email(email, token):
         {"email": email},
         token,
         http_method="GET",
+        allow_error=True,
     )
+    if data.get("ok") is not True:
+        error = data.get("error") or "unknown_error"
+        fallback_query = _email_name_query(email)
+        if fallback_query:
+            user_id = lookup_user_id_by_name(fallback_query, token)
+            if user_id:
+                return user_id
+        if error == "missing_scope":
+            raise SystemExit(
+                "Slack token is missing users:read.email, and no unique Slack user "
+                f"matched '{fallback_query or email}' from contact email {email}."
+            )
+        raise SystemExit(f"Slack API error (users.lookupByEmail): {error}")
     user = data.get("user") or {}
     user_id = user.get("id")
     if not user_id:
@@ -3671,7 +3707,8 @@ def _dispatch(argv: list[str]) -> int:
         return 0
 
     if args["command"] == "post":
-        target = resolve_post_target(args["recipient"], contacts, token)
+        lookup_token = resolve_lookup_token(account, token)
+        target = resolve_post_target(args["recipient"], contacts, token, lookup_token)
         channel_id = target["channel_id"]
         ts = send_post(token, channel_id, args["message"])
         uploaded = send_attachments(channel_id, ts, args["paths"], token)

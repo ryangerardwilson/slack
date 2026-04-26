@@ -64,7 +64,8 @@ Lobster's bridge approach. Bot tokens fall back to conversation listing and
 history reads for conversations visible to the bot only.
 
 Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
-`im:history`, `users:read`, `users:read.email`, `files:write`.
+`im:history`, `users:read`, `files:write`. Add `users:read.email` to the bot
+token only if it must resolve email contacts without a configured user token.
 Recommended for `df` and `ls -o`: `files:read`.
 For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 `users:read`, `users:read.email`, and `files:read` when attachment reads matter.
@@ -247,7 +248,7 @@ Example:
 - `codex reset-state`: Clear the local event-service state file.
 - `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. Files and directories are supported; directories are zipped on the fly.
+- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. When both tokens are configured, email contacts are resolved with the user token and posted with the bot token. Files and directories are supported; directories are zipped on the fly.
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.

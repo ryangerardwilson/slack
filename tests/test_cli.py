@@ -273,6 +273,56 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(target["target"], "ar")
         self.assertEqual(target["channel_id"], "D123")
 
+    def test_resolve_post_target_uses_lookup_token_for_email_contacts(self):
+        module = load_main_module()
+
+        with mock.patch.object(module, "lookup_user_id_by_email", return_value="U123") as lookup:
+            with mock.patch.object(module, "open_dm", return_value="D123") as open_dm:
+                target = module.resolve_post_target(
+                    "md",
+                    {"md": "maanas.dwivedi@example.com"},
+                    "xoxb-bot",
+                    lookup_token="xoxp-user",
+                )
+
+        lookup.assert_called_once_with("maanas.dwivedi@example.com", "xoxp-user")
+        open_dm.assert_called_once_with("U123", "xoxb-bot")
+        self.assertEqual(target["channel_id"], "D123")
+
+    def test_resolve_post_target_falls_back_to_name_when_email_scope_missing(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            if method == "users.lookupByEmail":
+                self.assertTrue(kwargs.get("allow_error"))
+                return {"ok": False, "error": "missing_scope"}
+            if method == "users.list":
+                return {
+                    "ok": True,
+                    "members": [
+                        {
+                            "id": "U123",
+                            "name": "maanas.dwivedi",
+                            "profile": {"real_name": "Maanas Dwivedi"},
+                        }
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                }
+            self.fail(f"unexpected Slack method: {method}")
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(module, "open_dm", return_value="D123"):
+                target = module.resolve_post_target(
+                    "md",
+                    {"md": "maanas.dwivedi@example.com"},
+                    "token",
+                )
+
+        self.assertEqual(target["kind"], "email")
+        self.assertEqual(target["label"], "md")
+        self.assertEqual(target["channel_id"], "D123")
+        self.assertEqual(target["user_id"], "U123")
+
     def test_post_dispatch_sends_to_channel_id(self):
         module = load_main_module()
 
