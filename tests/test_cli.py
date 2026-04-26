@@ -914,67 +914,206 @@ class CliContractTests(unittest.TestCase):
 
     def test_tui_conversations_use_search_fast_path(self):
         module = load_main_module()
+        calls = []
 
         def fake_slack_request(method, payload, token, **kwargs):
-            self.assertEqual(method, "search.messages")
-            self.assertEqual(payload["query"], "is:dm")
-            self.assertTrue(kwargs.get("allow_error"))
-            return {
-                "ok": True,
-                "messages": {
-                    "matches": [
-                        {
-                            "channel": {"id": "D1"},
-                            "ts": "100.000100",
-                            "user": "U2",
-                            "text": "latest dm",
+            calls.append((method, dict(payload), kwargs))
+            if method == "search.messages":
+                self.assertEqual(payload["query"], "is:dm")
+                self.assertEqual(payload["count"], "100")
+                self.assertTrue(kwargs.get("allow_error"))
+                return {
+                    "ok": True,
+                    "messages": {
+                        "matches": [
+                            {
+                                "channel": {"id": "D1", "is_im": True, "user": "U2"},
+                                "ts": "100.000100",
+                                "user": "U2",
+                                "text": "search dm",
+                            },
+                            {
+                                "channel": {
+                                    "id": "C1",
+                                    "is_mpim": True,
+                                    "name": "mpdm-rohan--ryan-1",
+                                },
+                                "ts": "99.000100",
+                                "user": "U3",
+                                "text": "search group dm",
+                            },
+                            {
+                                "channel": {"id": "D1"},
+                                "ts": "98.000100",
+                                "user": "U1",
+                                "text": "older self dm",
+                            },
+                        ]
+                    },
+                }
+            if method == "users.info":
+                user_id = payload["user"]
+                return {
+                    "ok": True,
+                    "user": {
+                        "id": user_id,
+                        "name": f"name-{user_id}",
+                        "profile": {
+                            "display_name": f"name-{user_id}",
+                            "email": f"{user_id.lower()}@example.com",
                         },
-                        {
-                            "channel": {"id": "C1", "name": "mpdm-rohan--ryan-1"},
-                            "ts": "99.000100",
-                            "user": "U3",
-                            "text": "latest group dm",
-                        },
-                    ]
-                },
-            }
-
-        def fake_sender(message, token, user_cache):
-            user_id = message.get("user") or "-"
-            return {
-                "id": user_id,
-                "name": f"name-{user_id}",
-                "email": "-",
-                "label": f"name-{user_id}",
-            }
+                    },
+                }
+            self.fail(f"unexpected method {method}")
 
         with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
-            with mock.patch.object(module, "_sender_info", side_effect=fake_sender):
-                with mock.patch.object(module, "get_tui_conversation_infos") as fallback:
-                    rows = module._tui_load_conversations("xoxp-token", "U1", limit=10)
+            with mock.patch.object(module, "_sender_info") as sender_info:
+                with mock.patch.object(module, "_conversation_summary") as summary:
+                    with mock.patch.object(module, "get_tui_conversation_infos") as fallback:
+                        rows = module._tui_load_conversations("xoxp-token", "U1", limit=100)
 
         fallback.assert_not_called()
+        summary.assert_not_called()
+        sender_info.assert_not_called()
         self.assertEqual([row["info"]["channel_id"] for row in rows], ["D1", "C1"])
         self.assertEqual(rows[0]["info"]["surface"], "dm")
-        self.assertEqual(rows[0]["info"]["conversation"], "name-U2")
+        self.assertEqual(rows[0]["info"]["conversation"], "U2")
         self.assertEqual(rows[1]["info"]["surface"], "group_dm")
+        self.assertEqual([entry["message"]["ts"] for entry in rows[0]["messages"]], ["98.000100", "100.000100"])
+        self.assertEqual(rows[0]["latest"]["message"]["text"], "search dm")
+        self.assertFalse(rows[0]["latest"]["unread"])
+        self.assertEqual(module.summarize_attachments(rows[0]["latest"]["message"]), "-")
+        self.assertFalse(rows[0]["history_loaded"])
+        methods = [call[0] for call in calls]
+        self.assertEqual(methods[0], "search.messages")
+        self.assertEqual(methods.count("conversations.history"), 0)
+        self.assertEqual(methods.count("users.info"), 0)
 
-    def test_tui_conversations_fall_back_when_search_scope_missing(self):
+    def test_tui_conversations_require_search_scope(self):
         module = load_main_module()
 
         def fake_slack_request(method, payload, token, **kwargs):
             return {"ok": False, "error": "missing_scope"}
 
         with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
-            with mock.patch.object(
-                module,
-                "get_tui_conversation_infos",
-                return_value=[{"channel_id": "D1", "surface": "dm", "conversation": "D1", "info": {}}],
-            ):
-                rows = module._tui_load_conversations("xoxp-token", "U1", limit=10)
+            with self.assertRaisesRegex(SystemExit, "search:read"):
+                module._tui_load_conversations("xoxp-token", "U1", limit=10)
 
-        self.assertEqual(rows[0]["info"]["channel_id"], "D1")
-        self.assertIsNone(rows[0]["latest"])
+    def test_tui_opened_conversation_hydrates_history_and_files(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(method, "conversations.history")
+            self.assertEqual(payload["channel"], "D1")
+            self.assertEqual(payload["limit"], "100")
+            return {
+                "ok": True,
+                "messages": [
+                    {
+                        "ts": "100.000100",
+                        "user": "U2",
+                        "text": "hydrated dm",
+                        "files": [
+                            {
+                                "id": "F1",
+                                "name": "note.txt",
+                                "url_private_download": "https://files.example/note.txt",
+                            }
+                        ],
+                    },
+                    {"ts": "98.000100", "user": "U1", "text": "older self dm"},
+                ],
+            }
+
+        row = {
+            "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+            "messages": [{"message": {"ts": "100.000100", "text": "search dm"}}],
+            "history_loaded": False,
+        }
+
+        def fake_sender(message, token, user_cache):
+            user_id = message.get("user") or "-"
+            return {"id": user_id, "name": user_id, "email": "-", "label": user_id}
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(module, "_sender_info", side_effect=fake_sender):
+                messages = module._tui_load_messages(row, "xoxp-token", "U1", force=True)
+
+        self.assertTrue(row["history_loaded"])
+        self.assertEqual([entry["message"]["ts"] for entry in messages], ["98.000100", "100.000100"])
+        self.assertEqual(row["latest"]["message"]["text"], "hydrated dm")
+        self.assertEqual(module.summarize_attachments(row["latest"]["message"]), "note.txt")
+
+    def test_tui_opened_conversation_hydrates_dm_label(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            self.assertEqual(method, "users.info")
+            self.assertEqual(payload["user"], "U2")
+            return {
+                "ok": True,
+                "user": {
+                    "id": "U2",
+                    "name": "maanas",
+                    "profile": {"display_name": "Maanas", "email": "maanas@example.com"},
+                },
+            }
+
+        row = {
+            "info": {
+                "channel_id": "D1",
+                "surface": "dm",
+                "conversation": "U2",
+                "user_id": "U2",
+            }
+        }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            module._tui_hydrate_selected_conversation_label(row, "xoxp-token")
+
+        self.assertEqual(row["info"]["conversation"], "Maanas <maanas@example.com>")
+
+    def test_tui_opened_conversation_requires_history_scope(self):
+        module = load_main_module()
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            if method == "conversations.history":
+                return {"ok": False, "error": "missing_scope"}
+            self.fail(f"unexpected method {method}")
+
+        row = {
+            "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+            "messages": [],
+            "history_loaded": False,
+        }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with self.assertRaisesRegex(SystemExit, "im:history"):
+                module._tui_load_messages(row, "xoxp-token", "U1", force=True)
+
+    def test_tui_send_composer_posts_to_selected_conversation(self):
+        module = load_main_module()
+
+        state = {
+            "conversation_index": 0,
+            "conversations": [
+                {
+                    "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+                    "messages": [],
+                }
+            ],
+            "composer": "hello",
+        }
+
+        with mock.patch.object(module, "send_post", return_value="101.000100") as send_post:
+            with mock.patch.object(module, "_tui_refresh_messages") as refresh:
+                sent = module._tui_send_composer_message(state, "xoxp-token", "U1")
+
+        self.assertTrue(sent)
+        self.assertEqual(state["composer"], "")
+        self.assertEqual(state["status"], "sent")
+        send_post.assert_called_once_with("xoxp-token", "D1", "hello")
+        refresh.assert_called_once_with(state, "xoxp-token", "U1", force=True)
 
     def test_tui_open_path_prefers_zip_for_multiple_assets(self):
         module = load_main_module()

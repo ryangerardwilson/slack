@@ -70,7 +70,8 @@ Recommended for `df` and `ls -o`: `files:read`.
 For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 `users:read`, `users:read.email`, and `files:read` when attachment reads matter.
 For `tui`, add `search:read`, `users:read`, `im:read`, `im:history`,
-`mpim:read`, and `mpim:history` to the user token scopes.
+`mpim:read`, `mpim:history`, `chat:write`, and `files:read` to the user token
+scopes.
 For event-driven Codex replies, enable Slack Socket Mode, generate an app-level
 `xapp-` token with `connections:write`, and subscribe the app to `app_mention`
 and `message.im` events.
@@ -168,9 +169,12 @@ Open the DM/group-DM TUI:
 slack 1 tui
 ```
 
-The TUI uses `h`/`l` to switch between the conversation and message panes,
-`j`/`k` to move, `r` to refresh, and `o` or Enter to download the selected
-message's files and open the file or zip in `$VISUAL`, `$EDITOR`, then `vim`.
+The TUI starts on a recent-conversations screen derived from the latest 100
+DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation,
+and `h` from an empty composer to return. The conversation screen hydrates the
+latest 100 messages for that DM/GDM, shows attachment/embed names inline, and
+lets you type a new message at the bottom. Enter sends, `r` refreshes, and
+Ctrl-O opens the latest visible file/embed in `$VISUAL`, `$EDITOR`, then `vim`.
 
 Clear stale conversations and bot-like conversations:
 
@@ -273,7 +277,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for Slack DMs and group DMs only. Use `h`/`l` between panes, `j`/`k` to move, and `o` or Enter to open selected-message files in the editor.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, type at the bottom to send, `h` from an empty composer to return, and Ctrl-O to open visible files/embeds.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

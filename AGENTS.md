@@ -19,7 +19,7 @@
 - `slack ls` scans accessible message history for the configured token by default; saved contacts remain useful as labels and targeted filters. It must label the surface (`dm`, `group_dm`, `channel`, or `private_channel`) rather than implying every result is a one-to-one DM.
 - Use Slack `search.messages` for `ls` with the preset's user token by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
 - `ls` is message-level history, not a conversation summary view or channel browser.
-- `tui` is deliberately limited to `im,mpim` conversations. Do not add public/private channel browsing to it without explicit user direction.
+- `tui` is deliberately limited to recent `im,mpim` conversations: a conversation-list screen from the latest 100 DM/GDM messages, plus a full-screen conversation view that hydrates the selected DM/GDM's latest 100 messages and visible files/embeds. Do not add public/private channel browsing to it without explicit user direction.
 
 ## Interface Rules
 
