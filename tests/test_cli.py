@@ -993,6 +993,65 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(path, "/tmp/D1-100.zip")
 
+    def test_tui_curses_setup_uses_transparent_default_background(self):
+        module = load_main_module()
+        calls = []
+
+        class FakeCurses:
+            class error(Exception):
+                pass
+
+            @staticmethod
+            def curs_set(value):
+                calls.append(("curs_set", value))
+
+            @staticmethod
+            def noecho():
+                calls.append(("noecho",))
+
+            @staticmethod
+            def raw():
+                calls.append(("raw",))
+
+            @staticmethod
+            def nonl():
+                calls.append(("nonl",))
+
+            @staticmethod
+            def start_color():
+                calls.append(("start_color",))
+
+            @staticmethod
+            def use_default_colors():
+                calls.append(("use_default_colors",))
+
+            @staticmethod
+            def assume_default_colors(fg, bg):
+                calls.append(("assume_default_colors", fg, bg))
+
+            @staticmethod
+            def init_pair(pair, fg, bg):
+                calls.append(("init_pair", pair, fg, bg))
+
+            @staticmethod
+            def color_pair(pair):
+                calls.append(("color_pair", pair))
+                return 100 + pair
+
+        class FakeWindow:
+            def keypad(self, value):
+                calls.append(("keypad", value))
+
+            def bkgd(self, char, attr):
+                calls.append(("bkgd", char, attr))
+
+        module._setup_tui_curses(FakeWindow(), FakeCurses)
+
+        self.assertIn(("use_default_colors",), calls)
+        self.assertIn(("assume_default_colors", -1, -1), calls)
+        self.assertIn(("init_pair", 1, -1, -1), calls)
+        self.assertIn(("bkgd", " ", 101), calls)
+
     def test_lookup_user_id_by_name_resolves_unique_exact_match(self):
         module = load_main_module()
 

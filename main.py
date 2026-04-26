@@ -2879,15 +2879,35 @@ def _tui_refresh(state, token, self_user_id):
     state["status"] = f"{len(conversations)} conversations"
 
 
+def _setup_tui_curses(stdscr, curses_module):
+    try:
+        curses_module.curs_set(0)
+    except curses_module.error:
+        pass
+    stdscr.keypad(True)
+    try:
+        curses_module.noecho()
+        curses_module.raw()
+        curses_module.nonl()
+    except curses_module.error:
+        pass
+    try:
+        curses_module.start_color()
+        curses_module.use_default_colors()
+        assume_default = getattr(curses_module, "assume_default_colors", None)
+        if assume_default:
+            assume_default(-1, -1)
+        curses_module.init_pair(1, -1, -1)
+        stdscr.bkgd(" ", curses_module.color_pair(1))
+    except curses_module.error:
+        pass
+
+
 def _run_tui(stdscr, token, self_user_id):
     global curses
     import curses
 
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        pass
-    stdscr.keypad(True)
+    _setup_tui_curses(stdscr, curses)
     state = {
         "focus": "conversations",
         "conversations": [],
