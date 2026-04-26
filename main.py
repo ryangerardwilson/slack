@@ -750,12 +750,71 @@ def _read_token_file(path):
     return token or None
 
 
+def _token_map(config):
+    if not isinstance(config, dict):
+        return {}
+    mapped = {}
+    for container_key in ("token", "tokens"):
+        payload = config.get(container_key)
+        if not isinstance(payload, dict):
+            continue
+        for kind in ("app", "bot", "user"):
+            value = payload.get(kind)
+            if isinstance(value, str) and value.strip() and kind not in mapped:
+                mapped[kind] = value.strip()
+    for key, kind in (
+        ("app_token", "app"),
+        ("socket_token", "app"),
+        ("bot_token", "bot"),
+        ("user_token", "user"),
+    ):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip() and kind not in mapped:
+            mapped[kind] = value.strip()
+    legacy = config.get("token")
+    if isinstance(legacy, str) and legacy.strip():
+        kind = _token_kind(legacy.strip())
+        if kind in {"app", "bot", "user"} and kind not in mapped:
+            mapped[kind] = legacy.strip()
+    return mapped
+
+
 def _direct_token(config, keys):
+    tokens = _token_map(config)
+    key_kinds = {
+        "app": "app",
+        "app_token": "app",
+        "socket_token": "app",
+        "bot": "bot",
+        "bot_token": "bot",
+        "user": "user",
+        "user_token": "user",
+    }
     for key in keys:
+        kind = key_kinds.get(key)
+        if kind and tokens.get(kind):
+            return tokens[kind]
         value = config.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _has_token(config, kind):
+    return bool(_token_map(config).get(kind))
+
+
+def _store_account_tokens(account, app_token=None, bot_token=None, user_token=None):
+    tokens = _token_map(account)
+    if app_token:
+        tokens["app"] = app_token
+    if bot_token:
+        tokens["bot"] = bot_token
+    if user_token:
+        tokens["user"] = user_token
+    account["token"] = {kind: tokens[kind] for kind in ("app", "bot", "user") if tokens.get(kind)}
+    for key in ("app_token", "socket_token", "bot_token", "user_token"):
+        account.pop(key, None)
 
 
 def _read_first_config_token(config, keys):
@@ -830,6 +889,11 @@ def resolve_lookup_token(config=None, fallback_token=None):
     if token and _token_kind(token) == "unknown":
         raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
     return token
+
+
+def resolve_direct_post_token(config=None, fallback_token=None):
+    token = resolve_lookup_token(config, fallback_token)
+    return token or fallback_token
 
 
 def resolve_app_token(config=None):
@@ -937,9 +1001,9 @@ def list_account_presets(config):
                 ("preset", preset),
                 ("name", account.get("name") or "-"),
                 ("team", account.get("team") or account.get("team_id") or "-"),
-                ("bot_token", _token_bool(account.get("bot_token"))),
-                ("user_token", _token_bool(account.get("user_token"))),
-                ("app_token", _token_bool(account.get("app_token"))),
+                ("bot_token", "yes" if _has_token(account, "bot") else "no"),
+                ("user_token", "yes" if _has_token(account, "user") else "no"),
+                ("app_token", "yes" if _has_token(account, "app") else "no"),
                 ("codex", _token_bool(account.get("codex_session_id"))),
                 ("contacts", str(len(normalize_contacts(account)))),
             ]
@@ -1013,9 +1077,10 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
     user_token = _validate_token_kind(user_token, "user", "user_token")
     app_token = _validate_token_kind(app_token, "app", "app_token")
 
-    effective_bot = bot_token or account.get("bot_token")
-    effective_user = user_token or account.get("user_token")
-    effective_app = app_token or account.get("app_token")
+    existing_tokens = _token_map(account)
+    effective_bot = bot_token or existing_tokens.get("bot")
+    effective_user = user_token or existing_tokens.get("user")
+    effective_app = app_token or existing_tokens.get("app")
     if not effective_bot and not effective_user and not effective_app:
         raise SystemExit("Provide -bt, -ut, -at, or -i to store at least one Slack token.")
     if not effective_bot and not effective_user:
@@ -1024,12 +1089,12 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
     auth_data = auth_test(user_token or bot_token or effective_user or effective_bot)
     if name:
         account["name"] = name.strip()
-    if bot_token:
-        account["bot_token"] = bot_token
-    if user_token:
-        account["user_token"] = user_token
-    if app_token:
-        account["app_token"] = app_token
+    _store_account_tokens(
+        account,
+        app_token=effective_app,
+        bot_token=effective_bot,
+        user_token=effective_user,
+    )
     if "contacts" not in account:
         root_contacts = normalize_contacts(config)
         if root_contacts:
@@ -1042,14 +1107,8 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
         del config["defaults"]
     if "default_preset" in config:
         del config["default_preset"]
-    for target_key, source_key in (
-        ("team", "team"),
-        ("team_id", "team_id"),
-        ("url", "url"),
-        ("user_id", "user_id"),
-    ):
-        if auth_data.get(source_key):
-            account[target_key] = auth_data[source_key]
+    for metadata_key in ("team", "team_id", "url", "user_id"):
+        account.pop(metadata_key, None)
     accounts[preset] = account
 
     save_config(config_path, config)
@@ -1057,15 +1116,15 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
         "authorized "
         f"preset={preset} "
         f"name={account.get('name') or '-'} "
-        f"team={account.get('team') or account.get('team_id') or '-'} "
-        f"bot_token={_token_bool(account.get('bot_token'))} "
-        f"user_token={_token_bool(account.get('user_token'))} "
-        f"app_token={_token_bool(account.get('app_token'))}"
+        f"bot_token={'yes' if _has_token(account, 'bot') else 'no'} "
+        f"user_token={'yes' if _has_token(account, 'user') else 'no'} "
+        f"app_token={'yes' if _has_token(account, 'app') else 'no'}"
     )
 
 
-def _resolve_post_target_value(value, token, lookup_token=None):
+def _resolve_post_target_value(value, token, lookup_token=None, direct_token=None):
     lookup_token = lookup_token or token
+    direct_token = direct_token or token
     parsed_message_id = parse_message_id(value)
     if parsed_message_id:
         channel_id, message_ts = parsed_message_id
@@ -1083,7 +1142,7 @@ def _resolve_post_target_value(value, token, lookup_token=None):
             "message_ts": None,
         }
     if USER_ID_RE.match(value):
-        channel_id = open_dm(value, token)
+        channel_id = open_dm(value, direct_token)
         return {
             "kind": "user",
             "target": value,
@@ -1094,7 +1153,7 @@ def _resolve_post_target_value(value, token, lookup_token=None):
     if "@" in value:
         email = value.strip()
         user_id = lookup_user_id_by_email(email, lookup_token)
-        channel_id = open_dm(user_id, token)
+        channel_id = open_dm(user_id, direct_token)
         return {
             "kind": "email",
             "target": email,
@@ -1106,19 +1165,20 @@ def _resolve_post_target_value(value, token, lookup_token=None):
     return None
 
 
-def resolve_post_target(recipient, contacts, token, lookup_token=None):
+def resolve_post_target(recipient, contacts, token, lookup_token=None, direct_token=None):
     lookup_token = lookup_token or token
+    direct_token = direct_token or token
     raw = (recipient or "").strip()
     if not raw:
         raise SystemExit("Post target cannot be empty.")
     if raw in contacts:
-        resolved = _resolve_post_target_value(contacts[raw].strip(), token, lookup_token)
+        resolved = _resolve_post_target_value(contacts[raw].strip(), token, lookup_token, direct_token)
         if resolved:
             resolved["label"] = raw
             resolved["target"] = raw
             return resolved
         raise SystemExit(f"Saved contact '{raw}' is not an email, user id, channel id, or message id.")
-    resolved = _resolve_post_target_value(raw, token, lookup_token)
+    resolved = _resolve_post_target_value(raw, token, lookup_token, direct_token)
     if resolved:
         return resolved
     raise SystemExit("Post target must be a contact label, email, Slack user id, channel id, or message id.")
@@ -3018,7 +3078,31 @@ def _eligible_slack_event(event, bot_user_id):
     return None
 
 
-def _codex_prompt_for_slack(event_info):
+def _event_query(event_info):
+    return event_info.get("text") or ""
+
+
+def _render_codex_prompt_template(template, event_info):
+    rendered = str(template)
+    replacements = {
+        "{}": _event_query(event_info),
+        "{query}": _event_query(event_info),
+        "{text}": _event_query(event_info),
+        "{kind}": event_info.get("kind") or "",
+        "{channel_id}": event_info.get("channel_id") or "",
+        "{user_id}": event_info.get("user_id") or "",
+        "{message_ts}": event_info.get("ts") or "",
+        "{thread_ts}": event_info.get("thread_ts") or "",
+    }
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, str(value))
+    return rendered
+
+
+def _codex_prompt_for_slack(account, event_info):
+    template = account.get("codex_prompt") or account.get("codex_wrapper_prompt")
+    if isinstance(template, str) and template.strip():
+        return _render_codex_prompt_template(template, event_info)
     thread = event_info.get("thread_ts") or "-"
     return f"""Slack message for Ryan.
 
@@ -3037,6 +3121,34 @@ Message:
 """
 
 
+def _strip_code_fence(text):
+    stripped = text.strip()
+    if not stripped.startswith("```") or not stripped.endswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) < 2:
+        return stripped
+    return "\n".join(lines[1:-1]).strip()
+
+
+def _parse_codex_reply_directive(reply):
+    text = _strip_code_fence(reply)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        normalized = re.sub(r'([{,]\s*)(respond|response)\s*:', r'\1"\2":', text)
+        try:
+            payload = json.loads(normalized)
+        except json.JSONDecodeError:
+            return True, reply
+    if not isinstance(payload, dict) or "respond" not in payload:
+        return True, reply
+    respond = payload.get("respond")
+    should_respond = respond is True or respond == 1 or str(respond).strip().lower() in {"1", "true", "yes"}
+    response = payload.get("response") or ""
+    return should_respond and bool(str(response).strip()), str(response).strip()
+
+
 def codex_resume_for_slack(account, event_info):
     session_id = _account_string(account, "codex_session_id", required=True)
     workspace = _expand_path(_account_string(account, "codex_workspace", "~"))
@@ -3048,7 +3160,7 @@ def codex_resume_for_slack(account, event_info):
     home = str(Path.home())
     env["PATH"] = f"{home}/.local/bin:{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"
     codex_args = _account_string_list(account, "codex_args", DEFAULT_CODEX_ARGS)
-    prompt = _codex_prompt_for_slack(event_info)
+    prompt = _codex_prompt_for_slack(account, event_info)
     completed = None
     try:
         with tempfile.TemporaryDirectory(prefix="codex-", dir=str(paths["state_file"].parent)) as tmp_dir:
@@ -3095,7 +3207,7 @@ def _truncate_for_slack(text, account):
 
 
 def _mark_event_read(account, event_info):
-    token = account.get("user_token") or account.get("bot_token")
+    token = _direct_token(account, ("user_token", "bot_token"))
     if not isinstance(token, str) or not token.strip():
         return
     channel_id = event_info.get("channel_id")
@@ -3112,8 +3224,11 @@ def _mark_event_read(account, event_info):
 
 
 def _send_codex_reply(account, event_info, reply):
+    should_respond, reply_text = _parse_codex_reply_directive(reply)
+    if not should_respond:
+        return None
     token = (
-        account.get("user_token")
+        _direct_token(account, ("user_token",))
         if event_info.get("kind") in {"user_direct_message", "user_mention"}
         else None
     )
@@ -3122,7 +3237,7 @@ def _send_codex_reply(account, event_info, reply):
     else:
         token = token.strip()
     thread_ts = event_info.get("thread_ts")
-    text = _truncate_for_slack(reply, account)
+    text = _truncate_for_slack(reply_text, account)
     return send_post(token, event_info["channel_id"], text, thread_ts=thread_ts)
 
 
@@ -3448,8 +3563,8 @@ def codex_status(account, preset):
             "state": str(paths["state_file"]),
             "workspace": _account_string(account, "codex_workspace", "~"),
             "session_id": _account_string(account, "codex_session_id"),
-            "has_app_token": bool(str(account.get("app_token") or "").strip() or _read_token_file(DEFAULT_APP_TOKEN_FILE)),
-            "has_bot_token": bool(str(account.get("bot_token") or "").strip()),
+            "has_app_token": bool(_has_token(account, "app") or _read_token_file(DEFAULT_APP_TOKEN_FILE)),
+            "has_bot_token": _has_token(account, "bot"),
         }
     )
     print(json.dumps(state, indent=2, sort_keys=True))
@@ -3707,11 +3822,13 @@ def _dispatch(argv: list[str]) -> int:
         return 0
 
     if args["command"] == "post":
-        lookup_token = resolve_lookup_token(account, token)
-        target = resolve_post_target(args["recipient"], contacts, token, lookup_token)
+        direct_token = resolve_direct_post_token(account, token)
+        lookup_token = resolve_lookup_token(account, direct_token)
+        target = resolve_post_target(args["recipient"], contacts, token, lookup_token, direct_token)
+        post_token = direct_token if target["kind"] in {"email", "user"} else token
         channel_id = target["channel_id"]
-        ts = send_post(token, channel_id, args["message"])
-        uploaded = send_attachments(channel_id, ts, args["paths"], token)
+        ts = send_post(post_token, channel_id, args["message"])
+        uploaded = send_attachments(channel_id, ts, args["paths"], post_token)
         details = [
             "posted",
             f"target={args['recipient']}",

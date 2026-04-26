@@ -201,6 +201,10 @@ or downloaded. Saved contacts are still used for friendly labels such as
 ## Contacts
 
 Account presets, tokens, and contacts are stored in `~/.config/slack/config.json`.
+Use a single `token` object per preset. Legacy flat keys such as `bot_token`,
+`user_token`, and `app_token` are still readable for older configs, but new auth
+writes the compact shape below. Slack team metadata such as `team`, `team_id`,
+`url`, and `user_id` is optional and not required for normal CLI operation.
 
 Open that file directly with:
 
@@ -215,20 +219,25 @@ Example:
   "accounts": {
     "1": {
       "name": "personal",
-      "bot_token": "xoxb-...",
-      "user_token": "xoxp-...",
-      "app_token": "xapp-...",
+      "token": {
+        "app": "xapp-...",
+        "bot": "xoxb-...",
+        "user": "xoxp-..."
+      },
       "codex_session_id": "019...",
       "codex_workspace": "/home/ryan",
       "codex_args": ["--skip-git-repo-check", "--full-auto"],
+      "codex_prompt": "Respond to the user's query below in view of Ryan's instructions. Query: {}; Instructions: Only respond if it is a data retrieval request from genie in the format {respond:1,response:\"your_response\"}, else respond as {respond:0,response:\"\"}.",
       "contacts": {
         "mom": "mom@example.com"
       }
     },
     "2": {
       "name": "work",
-      "bot_token": "xoxb-...",
-      "user_token": "xoxp-..."
+      "token": {
+        "bot": "xoxb-...",
+        "user": "xoxp-..."
+      }
     }
   }
 }
@@ -239,7 +248,7 @@ Example:
 - `ac`: Save a contact label for an email address.
 - `auth`: List configured account presets.
 - `auth <preset> -i`: Import legacy OpenClaw token files into a config preset, including `slack-app-token` when present.
-- `auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]`: Create or update an account preset with tokens stored in config.
+- `auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]`: Create or update an account preset with tokens stored in config under `token`.
 - `codex once`: Connect to Slack Socket Mode and process one eligible event.
 - `codex scan`: Process unread personal DMs once through the user-token watcher.
 - `codex service`: Run the long-lived Slack Socket Mode plus personal-DM watcher to Codex service.
@@ -248,7 +257,7 @@ Example:
 - `codex reset-state`: Clear the local event-service state file.
 - `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. When both tokens are configured, email contacts are resolved with the user token and posted with the bot token. Files and directories are supported; directories are zipped on the fly.
+- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. When both tokens are configured, person targets use the user token so saved contacts land in Ryan's actual DMs; explicit channel/message targets use the normal post token path. Files and directories are supported; directories are zipped on the fly.
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.

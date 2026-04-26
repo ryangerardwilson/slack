@@ -233,6 +233,18 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(module.resolve_token({"bot_token": "xoxb-config"}), "xoxb-config")
         self.assertEqual(module.resolve_list_token({"user_token": "xoxp-config"}), "xoxp-config")
         self.assertEqual(module.resolve_app_token({"app_token": "xapp-config"}), "xapp-config")
+        self.assertEqual(
+            module.resolve_token({"token": {"bot": "xoxb-nested", "user": "xoxp-nested"}}),
+            "xoxb-nested",
+        )
+        self.assertEqual(
+            module.resolve_list_token({"token": {"bot": "xoxb-nested", "user": "xoxp-nested"}}),
+            "xoxp-nested",
+        )
+        self.assertEqual(
+            module.resolve_app_token({"token": {"app": "xapp-nested"}}),
+            "xapp-nested",
+        )
 
     def test_reply_requires_message_id_target(self):
         module = load_main_module()
@@ -283,10 +295,11 @@ class CliContractTests(unittest.TestCase):
                     {"md": "maanas.dwivedi@example.com"},
                     "xoxb-bot",
                     lookup_token="xoxp-user",
+                    direct_token="xoxp-user",
                 )
 
         lookup.assert_called_once_with("maanas.dwivedi@example.com", "xoxp-user")
-        open_dm.assert_called_once_with("U123", "xoxb-bot")
+        open_dm.assert_called_once_with("U123", "xoxp-user")
         self.assertEqual(target["channel_id"], "D123")
 
     def test_resolve_post_target_falls_back_to_name_when_email_scope_missing(self):
@@ -365,6 +378,54 @@ class CliContractTests(unittest.TestCase):
             stdout.getvalue(),
         )
 
+    def test_post_dispatch_sends_contact_dm_with_user_token(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "accounts": {
+                            "1": {
+                                "token": {"bot": "xoxb-token", "user": "xoxp-token"},
+                                "contacts": {"md": "maanas.dwivedi@example.com"},
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                module.os.environ,
+                {"XDG_CONFIG_HOME": str(config_home)},
+                clear=True,
+            ):
+                with mock.patch.object(module, "auth_test", return_value={"ok": True}):
+                    with mock.patch.object(
+                        module, "lookup_user_id_by_email", return_value="U123"
+                    ) as lookup:
+                        with mock.patch.object(module, "open_dm", return_value="D123") as open_dm:
+                            with mock.patch.object(
+                                module, "send_post", return_value="200.000100"
+                            ) as send_post:
+                                with mock.patch.object(
+                                    module, "send_attachments", return_value=[]
+                                ) as send_attachments:
+                                    with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                        rc = module.main(["1", "post", "md", "hello"])
+
+        self.assertEqual(rc, 0)
+        lookup.assert_called_once_with("maanas.dwivedi@example.com", "xoxp-token")
+        open_dm.assert_called_once_with("U123", "xoxp-token")
+        send_post.assert_called_once_with("xoxp-token", "D123", "hello")
+        send_attachments.assert_called_once_with("D123", "200.000100", [], "xoxp-token")
+        self.assertIn("posted target=md kind=email channel=D123", stdout.getvalue())
+
     def test_auth_stores_tokens_inside_config_accounts(self):
         module = load_main_module()
 
@@ -401,9 +462,17 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         account = config["accounts"]["1"]
-        self.assertEqual(account["bot_token"], "xoxb-token")
-        self.assertEqual(account["user_token"], "xoxp-token")
-        self.assertEqual(account["app_token"], "xapp-token")
+        self.assertEqual(
+            account["token"],
+            {"app": "xapp-token", "bot": "xoxb-token", "user": "xoxp-token"},
+        )
+        self.assertNotIn("bot_token", account)
+        self.assertNotIn("user_token", account)
+        self.assertNotIn("app_token", account)
+        self.assertNotIn("team", account)
+        self.assertNotIn("team_id", account)
+        self.assertNotIn("url", account)
+        self.assertNotIn("user_id", account)
         self.assertEqual(account["name"], "work")
         self.assertNotIn("defaults", config)
         self.assertIn("authorized preset=1", stdout.getvalue())
@@ -438,9 +507,10 @@ class CliContractTests(unittest.TestCase):
             config = json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertEqual(rc, 0)
-        self.assertEqual(config["accounts"]["1"]["bot_token"], "xoxb-token")
-        self.assertEqual(config["accounts"]["1"]["user_token"], "xoxp-token")
-        self.assertEqual(config["accounts"]["1"]["app_token"], "xapp-token")
+        self.assertEqual(
+            config["accounts"]["1"]["token"],
+            {"app": "xapp-token", "bot": "xoxb-token", "user": "xoxp-token"},
+        )
 
     def test_reply_dispatch_sends_thread_reply(self):
         module = load_main_module()
@@ -1072,6 +1142,67 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("--full-auto", captured["command"])
         self.assertEqual(captured["cwd"], workspace)
         self.assertIn("hello codex", captured["input"])
+
+    def test_codex_prompt_template_uses_config_wrapper(self):
+        module = load_main_module()
+
+        account = {
+            "codex_prompt": (
+                'Respond to the user query. Query: {}; Instructions: return '
+                '{respond:1,response:"your_response"} or {respond:0,response:""}.'
+            )
+        }
+        event = {
+            "kind": "direct_message",
+            "channel_id": "D123",
+            "user_id": "U222",
+            "text": "fetch genie revenue",
+            "ts": "100.000100",
+        }
+
+        prompt = module._codex_prompt_for_slack(account, event)
+
+        self.assertIn("Query: fetch genie revenue", prompt)
+        self.assertIn('{respond:1,response:"your_response"}', prompt)
+
+    def test_send_codex_reply_respects_structured_no_response(self):
+        module = load_main_module()
+
+        account = {"token": {"bot": "xoxb-bot", "user": "xoxp-user"}}
+        event = {
+            "kind": "user_direct_message",
+            "channel_id": "D123",
+            "thread_ts": None,
+        }
+        with mock.patch.object(module, "send_post") as send_post:
+            result = module._send_codex_reply(account, event, '{respond:0, response:""}')
+
+        self.assertIsNone(result)
+        send_post.assert_not_called()
+
+    def test_send_codex_reply_sends_structured_response_text(self):
+        module = load_main_module()
+
+        account = {"token": {"bot": "xoxb-bot", "user": "xoxp-user"}}
+        event = {
+            "kind": "user_direct_message",
+            "channel_id": "D123",
+            "thread_ts": None,
+        }
+        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
+            result = module._send_codex_reply(
+                account,
+                event,
+                '{respond:1,response:"Here is the Genie data."}',
+            )
+
+        self.assertEqual(result, "200.000100")
+        send_post.assert_called_once_with(
+            "xoxp-user",
+            "D123",
+            "Here is the Genie data.",
+            thread_ts=None,
+        )
 
     def test_user_dm_entries_use_user_token_for_reply(self):
         module = load_main_module()
