@@ -1764,7 +1764,7 @@ def _fallback_conversation_summary(channel_id, channel=None):
         "members": hint.get("num_members") or "-",
         "user_id": hint.get("user") or "-",
         "channel_id": channel_id,
-        "info": {},
+        "info": hint,
         "user": {},
     }
 
@@ -2535,12 +2535,50 @@ def list_dms(
 
 TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
-TUI_CONVERSATIONS_HELP = "j/k move  l/enter open  r refresh  q quit"
-TUI_CONVERSATION_HELP = "type message  enter send  ctrl-k/j page  empty h back  l files  r refresh  q quit"
-TUI_FILE_MODAL_HELP = "j/k move  l open  h/esc close"
-CTRL_J = 10
-CTRL_K = 11
-CTRL_O = 15
+ERZA_CHAT_SOURCE_PATHS = (
+    "~/.erza/app/src",
+    "~/Infra/erza/app/src",
+)
+TUI_SHORTCUT_LINES = [
+    ("j / k", "move down / up"),
+    ("ctrl+n / p", "next / previous message"),
+    ("l / enter", "open conversation, file picker, or selected file"),
+    ("h", "back or close modal"),
+    ("esc", "leave composer or close modal"),
+    ("i", "return to composer"),
+    ("r", "refresh"),
+    ("g / gg / G", "jump top / bottom"),
+    ("?", "toggle shortcuts"),
+    ("q", "quit"),
+]
+CTRL_N = 14
+CTRL_P = 16
+
+
+def _load_erza_chat_api():
+    for candidate in ERZA_CHAT_SOURCE_PATHS:
+        path = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.exists(os.path.join(path, "erza", "chat.py")) and path not in sys.path:
+            sys.path.insert(0, path)
+    try:
+        from erza.chat import (
+            ChatCallbacks,
+            ChatConversation,
+            ChatEmbed,
+            ChatFile,
+            ChatMessage,
+            run_chat_app,
+        )
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return {
+        "ChatCallbacks": ChatCallbacks,
+        "ChatConversation": ChatConversation,
+        "ChatEmbed": ChatEmbed,
+        "ChatFile": ChatFile,
+        "ChatMessage": ChatMessage,
+        "run_chat_app": run_chat_app,
+    }
 
 
 def _clip(value, width):
@@ -2601,7 +2639,7 @@ def _tui_summary_from_search_match(
             else:
                 user = _tui_fetch_user_info(partner_id, token)
             if user:
-                info["conversation"] = _person_conversation_label(user, partner_id)
+                info["conversation"] = _display_user(user, partner_id)
                 info["name"] = _display_user(user, partner_id)
                 info["email"] = _user_email(user)
                 info["user_id"] = partner_id
@@ -2749,6 +2787,41 @@ def _tui_prefetch_dm_users(channel_hints, token, user_cache):
                 user_cache[partner_id] = user
 
 
+def _tui_fetch_conversation_info(channel_id, channel_hint, token):
+    data = slack_request(
+        "conversations.info",
+        {"channel": channel_id, "include_num_members": "true"},
+        token,
+        http_method="GET",
+        allow_error=True,
+    )
+    merged = dict(channel_hint or {})
+    merged.setdefault("id", channel_id)
+    if data.get("ok") is not True:
+        return merged
+    info = data.get("channel") or {}
+    if isinstance(info, dict):
+        merged.update(info)
+        merged.setdefault("id", channel_id)
+    return merged
+
+
+def _tui_hydrate_conversation_hints(channel_hints, token):
+    if not channel_hints:
+        return {}
+    hydrated = {channel_id: dict(channel or {}) for channel_id, channel in channel_hints.items()}
+    worker_count = min(TUI_HYDRATE_WORKERS, len(channel_hints))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(_tui_fetch_conversation_info, channel_id, channel, token): channel_id
+            for channel_id, channel in channel_hints.items()
+        }
+        for future in as_completed(futures):
+            channel_id = futures[future]
+            hydrated[channel_id] = future.result()
+    return hydrated
+
+
 def _tui_fetch_history_messages(channel_id, token):
     history = slack_request(
         "conversations.history",
@@ -2812,10 +2885,10 @@ def _tui_load_recent_entries(token, self_user_id, limit=TUI_RECENT_MESSAGE_LIMIT
     else:
         _wanted_by_channel, channel_hints = _tui_recent_channel_groups(matches)
         hydrated = {}
+    channel_hints = _tui_hydrate_conversation_hints(channel_hints, token)
     dm_cache = {}
     user_cache = {}
-    if hydrate:
-        _tui_prefetch_dm_users(channel_hints, token, user_cache)
+    _tui_prefetch_dm_users(channel_hints, token, user_cache)
     entries = []
     for match in matches:
         channel_id = (
@@ -2842,8 +2915,8 @@ def _tui_load_recent_entries(token, self_user_id, limit=TUI_RECENT_MESSAGE_LIMIT
                 channel_hint,
                 sender,
                 self_user_id,
-                token if hydrate else None,
-                user_cache if hydrate else None,
+                token,
+                user_cache,
             )
         info = dm_cache[channel_id]
         if info.get("surface") not in {"dm", "group_dm"}:
@@ -2876,17 +2949,27 @@ def _tui_conversation_rows_from_entries(entries, history_loaded=False):
                 "latest": entry,
                 "messages": [],
                 "sort_ts": entry["sort_ts"],
+                "unread_ts": entry["sort_ts"] if entry.get("unread") else 0,
                 "history_loaded": history_loaded,
             },
         )
         row["messages"].append(entry)
+        if entry.get("unread") and entry["sort_ts"] > row.get("unread_ts", 0):
+            row["unread_ts"] = entry["sort_ts"]
         if entry["sort_ts"] > row["sort_ts"]:
             row["sort_ts"] = entry["sort_ts"]
             row["latest"] = entry
     rows = list(grouped.values())
     for row in rows:
         row["messages"].sort(key=lambda item: item["sort_ts"])
-    rows.sort(key=lambda item: item["sort_ts"], reverse=True)
+    rows.sort(
+        key=lambda item: (
+            1 if item.get("unread_ts") else 0,
+            item.get("unread_ts") or 0,
+            item.get("sort_ts") or 0,
+        ),
+        reverse=True,
+    )
     return rows
 
 
@@ -2951,48 +3034,77 @@ def _tui_load_messages(conversation_row, token=None, self_user_id=None, limit=No
     return entries
 
 
-def _tui_selected_message(state):
-    messages = state.get("messages") or []
-    if not messages:
+def _tui_selected_rendered_row(state):
+    rows = state.get("rendered_rows") or []
+    if not rows:
         return None
-    index = max(0, min(int(state.get("message_index") or 0), len(messages) - 1))
-    state["message_index"] = index
-    return messages[index]
+    index = max(0, min(int(state.get("cursor_row") or 0), len(rows) - 1))
+    state["cursor_row"] = index
+    return rows[index]
 
 
-def _tui_latest_message_with_assets(state):
-    messages = state.get("messages") or []
-    for entry in reversed(messages):
-        if summarize_attachments(entry.get("message") or {}) != "-":
-            return entry
-    return _tui_selected_message(state)
-
-
-def _tui_entry_key(entry):
-    if not entry:
+def _tui_selected_file_row(state):
+    row = _tui_selected_rendered_row(state)
+    if not row or row.get("kind") != "file_button":
         return None
-    message = entry.get("message") or {}
-    return (entry.get("channel_id") or entry.get("dm_id"), str(message.get("ts") or ""))
+    return row
 
 
-def _tui_visible_file_entry(state):
-    entries = state.get("visible_file_entries") or []
-    if entries:
-        return entries[-1]
+def _tui_first_file_row_index(rows):
+    for index, row in enumerate(rows or []):
+        if row.get("kind") == "file_button":
+            return index
     return None
 
 
-def _tui_open_file_modal_for_entry(state, entry):
-    if not entry:
-        state["status"] = "no files in visible messages"
+def _tui_message_start_row_indices(rows):
+    return [index for index, row in enumerate(rows or []) if row.get("message_start")]
+
+
+def _tui_first_message_row_index(rows):
+    starts = _tui_message_start_row_indices(rows)
+    return starts[0] if starts else None
+
+
+def _tui_last_message_row_index(rows):
+    starts = _tui_message_start_row_indices(rows)
+    return starts[-1] if starts else None
+
+
+def _tui_move_cursor_row(state, delta):
+    rows = state.get("rendered_rows") or []
+    if not rows:
+        return
+    state["cursor_row"] = max(0, min(len(rows) - 1, int(state.get("cursor_row") or 0) + delta))
+    state["stick_bottom"] = False
+
+
+def _tui_move_message_row(state, delta):
+    rows = state.get("rendered_rows") or []
+    starts = _tui_message_start_row_indices(rows)
+    if not starts:
+        return
+    cursor = max(0, min(int(state.get("cursor_row") or 0), len(rows) - 1))
+    if delta > 0:
+        target = next((index for index in starts if index > cursor), starts[-1])
+    else:
+        previous = [index for index in starts if index < cursor]
+        target = previous[-1] if previous else starts[0]
+    state["cursor_row"] = target
+    state["stick_bottom"] = False
+
+
+def _tui_open_file_modal_for_row(state, row):
+    if not row or row.get("kind") != "file_button":
+        state["status"] = "select a file button"
         return False
-    assets = message_assets(entry.get("message") or {})
+    assets = [asset for asset in row.get("assets") or [] if asset.get("kind") == "file"]
     if not assets:
-        state["status"] = "no files in visible messages"
+        state["status"] = "no files"
         return False
     state["modal"] = {
         "kind": "files",
-        "entry": entry,
+        "entry": row.get("entry"),
         "assets": assets,
         "index": 0,
         "scroll": 0,
@@ -3042,17 +3154,6 @@ def _tui_download_asset_open_path(entry, asset, token):
     return destination
 
 
-def _tui_download_open_path(entry, token):
-    if not entry:
-        return None
-    channel_id = entry.get("channel_id") or entry.get("dm_id")
-    downloads, _code_blocks = _message_details(entry["message"], channel_id, token)
-    if not downloads:
-        return None
-    zip_paths = sorted({item["path"] for item in downloads if item.get("zip_entry")})
-    return zip_paths[0] if zip_paths else downloads[0]["path"]
-
-
 def _open_path_in_editor(path):
     editor_cmd = resolve_editor_cmd()
     try:
@@ -3073,11 +3174,10 @@ def _tui_conversation_line(row, width):
     latest = row.get("latest") or {}
     entry = latest if isinstance(latest, dict) else {}
     surface = "gdm" if info.get("surface") == "group_dm" else "dm"
-    unread = "*" if entry.get("unread") else " "
+    unread = "*" if row.get("unread_ts") else " "
     date = format_ts((entry.get("message") or {}).get("ts")) if entry else "-"
-    text = compact_text(message_text(entry.get("message") or {})) if entry else ""
     label = info.get("conversation") or info.get("name") or info.get("channel_id") or "-"
-    return _clip(f"{unread} {surface:<3} {label}  {date}  {text}", width)
+    return _clip(f"{unread} {surface:<3} {label}  {date}", width)
 
 
 def _tui_message_line(entry, width):
@@ -3087,6 +3187,16 @@ def _tui_message_line(entry, width):
     attach_label = f" [{attachments}]" if attachments != "-" else ""
     text = compact_text(message_text(entry.get("message") or {}))
     return _clip(f"{marker} {format_ts(entry['message'].get('ts'))}  {sender}: {text}{attach_label}", width)
+
+
+def _tui_sender_name(sender):
+    sender = sender or {}
+    name = str(sender.get("name") or "").strip()
+    if name and name != "-":
+        return name
+    label = str(sender.get("label") or "-").strip()
+    label = re.sub(r"\s*<[^>]+>\s*$", "", label).strip()
+    return label or "-"
 
 
 def _tui_selected_conversation(state):
@@ -3103,23 +3213,105 @@ def _tui_conversation_label(row):
     return info.get("conversation") or info.get("name") or info.get("channel_id") or "-"
 
 
+def _tui_box_top(title, inner_width):
+    title_text = _clip(f"[ {title} ]", max(1, inner_width))
+    return "+-" + title_text + "-" * max(inner_width + 1 - len(title_text), 0) + "+"
+
+
+def _tui_box_bottom(box_width):
+    return "+" + "-" * max(0, box_width - 2) + "+"
+
+
+def _tui_box_content(value, inner_width):
+    return f"| {str(value or '')[:inner_width]:<{inner_width}} |"
+
+
+def _tui_file_button_label(count):
+    return f"<<<{count} Files>>>"
+
+
+def _tui_nested_file_box_rows(assets, inner_width):
+    count = len(assets or [])
+    button = _tui_file_button_label(count)
+    title = "[ Files ]"
+    nested_inner = max(12, min(inner_width - 4, max(len(button), len(title)) + 2))
+    nested_width = nested_inner + 4
+    top = "+-" + title + "-" * max(nested_inner + 1 - len(title), 0) + "+"
+    bottom = "+" + "-" * max(0, nested_width - 2) + "+"
+    content = f"| {button:<{nested_inner}} |"
+    return top, content, bottom
+
+
+def _tui_embed_box_rows(embed, inner_width):
+    title = "[ Embed ]"
+    name = str(embed.get("name") or "embed").strip()
+    url = str(embed.get("url") or "").strip()
+    text = str(embed.get("text") or "").strip()
+    raw_lines = [item for item in (name, url, text) if item]
+    if not raw_lines:
+        raw_lines = ["embed"]
+    nested_inner = max(12, min(inner_width - 4, max(len(title), *(len(item) for item in raw_lines)) + 2))
+    rows = ["+-" + title + "-" * max(nested_inner + 1 - len(title), 0) + "+"]
+    for raw_line in raw_lines:
+        for line in textwrap.wrap(raw_line, nested_inner) or [""]:
+            rows.append(f"| {line:<{nested_inner}} |")
+    rows.append("+" + "-" * max(0, nested_inner + 2) + "+")
+    return rows
+
+
 def _tui_render_message_rows(messages, width):
     rows = []
-    text_width = max(10, width - 4)
+    box_width = max(24, width)
+    inner_width = max(10, box_width - 4)
     for entry in messages:
         message = entry.get("message") or {}
-        sender = (entry.get("sender") or {}).get("label") or "-"
+        sender = _tui_sender_name(entry.get("sender") or {})
         stamp = format_ts(message.get("ts"))
-        rows.append({"text": f"{sender}  {stamp}", "entry": entry})
-        text = message_text(message) or "-"
+        assets = message_assets(message)
+        file_assets = [asset for asset in assets if asset.get("kind") == "file"]
+        embed_assets = [asset for asset in assets if asset.get("kind") == "embed"]
+        rows.append(
+            {
+                "text": _tui_box_top(f"{sender}  {stamp}", inner_width),
+                "entry": entry,
+                "kind": "message_box",
+                "message_start": True,
+            }
+        )
+        text = (message.get("text") or "").strip() or "-"
         for paragraph in str(text).splitlines() or [""]:
-            wrapped = textwrap.wrap(paragraph, text_width) or [""]
-            rows.extend({"text": f"  {line}", "entry": entry} for line in wrapped)
-        attachments = summarize_attachments(message)
-        if attachments != "-":
-            rows.append({"text": f"  files: {attachments}", "entry": entry})
-        rows.append({"text": "", "entry": None})
-    return rows[:-1] if rows else [{"text": "No messages.", "entry": None}]
+            wrapped = textwrap.wrap(paragraph, inner_width) or [""]
+            rows.extend(
+                {
+                    "text": _tui_box_content(line, inner_width),
+                    "entry": entry,
+                    "kind": "message_text",
+                }
+                for line in wrapped
+            )
+        for embed in embed_assets:
+            for line in _tui_embed_box_rows(embed, inner_width):
+                rows.append({"text": _tui_box_content(line, inner_width), "entry": entry, "kind": "embed_box"})
+        if file_assets:
+            top, button, bottom = _tui_nested_file_box_rows(file_assets, inner_width)
+            rows.append({"text": _tui_box_content(top, inner_width), "entry": entry, "kind": "file_box"})
+            rows.append(
+                {
+                    "text": _tui_box_content(button, inner_width),
+                    "entry": entry,
+                    "assets": file_assets,
+                    "file_index": 0,
+                    "kind": "file_button",
+                }
+            )
+            rows.append({"text": _tui_box_content(bottom, inner_width), "entry": entry, "kind": "file_box"})
+        rows.append({"text": _tui_box_bottom(box_width), "entry": entry, "kind": "message_box"})
+        rows.append({"text": "", "entry": None, "kind": "spacer"})
+    if rows:
+        rows = rows[:-1]
+    else:
+        rows = [{"text": "No messages.", "entry": None, "kind": "empty"}]
+    return rows
 
 
 def _tui_render_message_lines(messages, width):
@@ -3148,25 +3340,93 @@ def _tui_adjust_scroll(index, scroll, height, length):
     return max(0, min(scroll, max(0, length - height)))
 
 
-def _tui_draw_box(window, y, x, height, width, title, active=False):
-    attr = 0
-    try:
-        attr = curses.A_BOLD if active else 0
-    except NameError:
-        attr = 0
-    _safe_addstr(window, y, x, _clip(title, width), attr)
-    if y + 1 < y + height:
-        _safe_addstr(window, y + 1, x, "-" * max(0, width - 1))
+def _tui_shortcut_modal_lines(inner_width):
+    lines = []
+    for label, description in TUI_SHORTCUT_LINES:
+        wrapped = textwrap.wrap(description, width=max(10, inner_width - 15)) or [description]
+        for index, part in enumerate(wrapped):
+            prefix = f"{label:<13} " if index == 0 else " " * 14
+            lines.append(_clip(prefix + part, inner_width))
+    return lines
+
+
+def _tui_draw_modal_box(stdscr, title, lines, *, selected_index=None, item_offset=0, body_height=None):
+    height, width = stdscr.getmaxyx()
+    if height < 6 or width < 24:
+        return
+    inner_width = min(max(24, max((len(line) for line in lines), default=0)), max(24, width - 8))
+    box_width = inner_width + 4
+    max_body_height = max(1, height - 4)
+    if body_height is None:
+        effective_body_height = min(len(lines), max_body_height)
+    else:
+        effective_body_height = min(max(1, int(body_height)), max_body_height)
+    body_lines = list(lines[:effective_body_height])
+    if len(body_lines) < effective_body_height:
+        body_lines.extend([""] * (effective_body_height - len(body_lines)))
+    box_height = len(body_lines) + 2
+    y = max(0, (height - box_height) // 2)
+    x = max(0, (width - box_width) // 2)
+    top = _tui_box_top(title, inner_width)
+    bottom = _tui_box_bottom(box_width)
+    _safe_addstr(stdscr, y, x, top)
+    for index, line in enumerate(body_lines, start=1):
+        screen_y = y + index
+        _safe_addstr(stdscr, screen_y, x, "| ")
+        _safe_addstr(stdscr, screen_y, x + 2, " " * inner_width)
+        _safe_addstr(stdscr, screen_y, x + box_width - 2, " |")
+        _safe_addstr(stdscr, screen_y, x + 2, _clip(line, inner_width))
+        if selected_index is not None and item_offset + index - 1 == selected_index:
+            _safe_addstr(stdscr, screen_y, max(0, x - 2), ">")
+    _safe_addstr(stdscr, y + box_height - 1, x, bottom)
+
+
+def _tui_draw_shortcuts_modal(stdscr):
+    height, width = stdscr.getmaxyx()
+    inner_width = min(64, max(24, width - 8))
+    _tui_draw_modal_box(stdscr, "Shortcuts", _tui_shortcut_modal_lines(inner_width))
+
+
+def _tui_draw_file_modal(stdscr, state):
+    modal = state.get("modal") or {}
+    if modal.get("kind") != "files":
+        return
+    assets = modal.get("assets") or []
+    if not assets:
+        return
+    height, _width = stdscr.getmaxyx()
+    list_height = min(7, max(1, height - 4))
+    index = max(0, min(int(modal.get("index") or 0), len(assets) - 1))
+    modal["index"] = index
+    modal["scroll"] = _tui_adjust_scroll(
+        index,
+        int(modal.get("scroll") or 0),
+        list_height,
+        len(assets),
+    )
+    scroll = int(modal["scroll"])
+    visible_assets = assets[scroll : scroll + list_height]
+    lines = [
+        f"{item.get('kind') or 'file'}  {item.get('name') or 'attachment'}"
+        for item in visible_assets
+    ]
+    _tui_draw_modal_box(
+        stdscr,
+        f"{len(assets)} Files",
+        lines,
+        selected_index=index,
+        item_offset=scroll,
+        body_height=7,
+    )
 
 
 def _tui_draw_conversations(stdscr, state, height, width):
     title = f"slack tui  conversations  {state.get('status') or ''}".strip()
     _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
     _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
-    _safe_addstr(stdscr, height - 1, 0, _clip(TUI_CONVERSATIONS_HELP, width - 1))
     conversations = state.get("conversations") or []
     conv_index = int(state.get("conversation_index") or 0)
-    conv_rows = max(1, height - 3)
+    conv_rows = max(1, height - 2)
     state["conversation_scroll"] = _tui_adjust_scroll(
         conv_index,
         int(state.get("conversation_scroll") or 0),
@@ -3177,56 +3437,14 @@ def _tui_draw_conversations(stdscr, state, height, width):
         idx = int(state["conversation_scroll"]) + row_offset
         if idx >= len(conversations):
             break
-        attr = curses.A_REVERSE if idx == conv_index else 0
+        if idx == conv_index:
+            _safe_addstr(stdscr, 2 + row_offset, 0, ">")
         _safe_addstr(
             stdscr,
             2 + row_offset,
-            0,
-            _tui_conversation_line(conversations[idx], width - 1),
-            attr,
+            2,
+            _tui_conversation_line(conversations[idx], width - 3),
         )
-
-
-def _tui_draw_file_modal(stdscr, state, height, width):
-    modal = state.get("modal") or {}
-    if modal.get("kind") != "files":
-        return
-    assets = modal.get("assets") or []
-    modal_width = min(max(42, width - 8), 88)
-    modal_height = min(max(8, len(assets) + 4), max(8, height - 4))
-    y = max(1, (height - modal_height) // 2)
-    x = max(0, (width - modal_width) // 2)
-    list_height = max(1, modal_height - 4)
-    index = max(0, min(int(modal.get("index") or 0), max(0, len(assets) - 1)))
-    modal["index"] = index
-    modal["scroll"] = _tui_adjust_scroll(
-        index,
-        int(modal.get("scroll") or 0),
-        list_height,
-        len(assets),
-    )
-
-    horizontal = "-" * max(0, modal_width - 2)
-    _safe_addstr(stdscr, y, x, f"+{horizontal}+")
-    for row in range(1, modal_height - 1):
-        _safe_addstr(stdscr, y + row, x, "|")
-        _safe_addstr(stdscr, y + row, x + modal_width - 1, "|")
-    _safe_addstr(stdscr, y + modal_height - 1, x, f"+{horizontal}+")
-    _safe_addstr(stdscr, y + 1, x + 2, _clip(f"files ({len(assets)})", modal_width - 4))
-    _safe_addstr(stdscr, y + 2, x + 2, _clip(TUI_FILE_MODAL_HELP, modal_width - 4))
-
-    for row_offset in range(list_height):
-        asset_index = int(modal["scroll"]) + row_offset
-        if asset_index >= len(assets):
-            break
-        asset = assets[asset_index]
-        label = f"{asset.get('kind') or 'file'}  {asset.get('name') or 'attachment'}"
-        attr = 0
-        try:
-            attr = curses.A_REVERSE if asset_index == index else 0
-        except NameError:
-            attr = 0
-        _safe_addstr(stdscr, y + 3 + row_offset, x + 2, _clip(label, modal_width - 4), attr)
 
 
 def _tui_draw_conversation(stdscr, state, height, width):
@@ -3234,12 +3452,24 @@ def _tui_draw_conversation(stdscr, state, height, width):
     label = _tui_conversation_label(selected_conv)
     status = state.get("status") or ""
     messages = state.get("messages") or []
-    rendered = _tui_render_message_rows(messages, width - 1)
-    message_height = max(1, height - 5)
+    input_active = bool(state.get("input_active", True))
+    rendered = _tui_render_message_rows(messages, width - 3)
+    message_height = max(1, height - 4)
     state["message_view_height"] = message_height
+    state["rendered_rows"] = rendered
     max_scroll = max(0, len(rendered) - message_height)
-    if state.get("stick_bottom", True):
+    if input_active and state.get("stick_bottom", True):
         scroll = max_scroll
+        state["cursor_row"] = max(0, len(rendered) - 1)
+    elif not input_active:
+        cursor_row = max(0, min(int(state.get("cursor_row") or 0), max(0, len(rendered) - 1)))
+        state["cursor_row"] = cursor_row
+        scroll = _tui_adjust_scroll(
+            cursor_row,
+            int(state.get("message_scroll") or 0),
+            message_height,
+            len(rendered),
+        )
     else:
         scroll = max(0, min(int(state.get("message_scroll") or 0), max_scroll))
     state["message_scroll"] = scroll
@@ -3248,32 +3478,23 @@ def _tui_draw_conversation(stdscr, state, height, width):
     title = f"slack tui  {label}  {transcript_status}  {status}".strip()
     _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
     _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
-    _safe_addstr(stdscr, height - 3, 0, "-" * max(0, width - 1))
-    _safe_addstr(stdscr, height - 1, 0, _clip(TUI_CONVERSATION_HELP, width - 1))
-    visible_file_entries = []
-    visible_file_keys = set()
+    _safe_addstr(stdscr, height - 2, 0, "-" * max(0, width - 1))
     for row_offset in range(message_height):
         idx = int(state["message_scroll"]) + row_offset
         if idx >= len(rendered):
             break
         row = rendered[idx]
-        entry = row.get("entry")
-        if entry and summarize_attachments(entry.get("message") or {}) != "-":
-            key = _tui_entry_key(entry)
-            if key not in visible_file_keys:
-                visible_file_keys.add(key)
-                visible_file_entries.append(entry)
-        _safe_addstr(stdscr, 2 + row_offset, 0, _clip(row["text"], width - 1))
-    state["visible_file_entries"] = visible_file_entries
+        if not input_active and idx == state.get("cursor_row"):
+            _safe_addstr(stdscr, 2 + row_offset, 0, ">")
+        _safe_addstr(stdscr, 2 + row_offset, 2, _clip(row["text"], width - 3))
 
     composer = state.get("composer") or ""
-    prompt = f"> {composer}"
+    prompt = f"> {composer}" if input_active else "[nav]"
     prompt_width = max(1, width - 1)
     visible_prompt = prompt[-prompt_width:]
-    _safe_addstr(stdscr, height - 2, 0, _clip(visible_prompt, prompt_width))
-    _safe_move(stdscr, height - 2, min(len(visible_prompt), prompt_width - 1))
-    if state.get("modal"):
-        _tui_draw_file_modal(stdscr, state, height, width)
+    _safe_addstr(stdscr, height - 1, 0, _clip(visible_prompt, prompt_width))
+    if input_active:
+        _safe_move(stdscr, height - 1, min(len(visible_prompt), prompt_width - 1))
 
 
 def _tui_draw(stdscr, state):
@@ -3287,6 +3508,10 @@ def _tui_draw(stdscr, state):
         _tui_draw_conversation(stdscr, state, height, width)
     else:
         _tui_draw_conversations(stdscr, state, height, width)
+    if state.get("modal"):
+        _tui_draw_file_modal(stdscr, state)
+    if state.get("show_help"):
+        _tui_draw_shortcuts_modal(stdscr)
     stdscr.refresh()
 
 
@@ -3304,6 +3529,62 @@ def _tui_refresh_messages(state, token, self_user_id, keep_latest=True, force=Fa
     state["message_index"] = max(0, len(messages) - 1) if keep_latest else 0
     state["message_scroll"] = 0
     state["stick_bottom"] = True
+    state["cursor_row"] = max(0, int(state.get("rendered_line_count") or 1) - 1)
+
+
+def _tui_latest_message_ts(messages):
+    latest = None
+    for entry in messages or []:
+        ts = str((entry.get("message") or {}).get("ts") or "")
+        if not ts:
+            continue
+        try:
+            ts_value = float(ts)
+        except (TypeError, ValueError):
+            continue
+        if latest is None or ts_value > latest[0]:
+            latest = (ts_value, ts)
+    return latest[1] if latest else None
+
+
+def _tui_clear_conversation_unread(conversation_row, messages, latest_ts):
+    if conversation_row is None:
+        return
+    for entry in messages or []:
+        entry["unread"] = False
+    conversation_row["unread_ts"] = 0
+    if messages:
+        latest = max(messages, key=lambda item: item.get("sort_ts") or 0)
+        conversation_row["latest"] = latest
+        conversation_row["sort_ts"] = latest.get("sort_ts") or conversation_row.get("sort_ts") or 0
+    info = conversation_row.get("info") or {}
+    if latest_ts:
+        info["last_read"] = latest_ts
+        nested = info.get("info")
+        if isinstance(nested, dict):
+            nested["last_read"] = latest_ts
+
+
+def _tui_mark_selected_conversation_read(state, token):
+    selected = _tui_selected_conversation(state)
+    messages = state.get("messages") or []
+    channel_id = ((selected or {}).get("info") or {}).get("channel_id")
+    latest_ts = _tui_latest_message_ts(messages)
+    if not selected or not channel_id or not latest_ts:
+        return False
+    data = slack_request(
+        "conversations.mark",
+        {"channel": channel_id, "ts": latest_ts},
+        token,
+        use_form=True,
+        allow_error=True,
+    )
+    if data.get("ok") is not True:
+        selected["mark_read_error"] = data.get("error") or "unknown_error"
+        return False
+    selected.pop("mark_read_error", None)
+    _tui_clear_conversation_unread(selected, messages, latest_ts)
+    return True
 
 
 def _tui_refresh(state, token, self_user_id):
@@ -3348,12 +3629,19 @@ def _tui_open_selected_conversation(state, token, self_user_id):
         return
     state["mode"] = "conversation"
     state["composer"] = ""
+    state["input_active"] = True
+    state["modal"] = None
     state["status"] = "loading..."
     _tui_hydrate_selected_conversation_label(_tui_selected_conversation(state), token)
     _tui_refresh_messages(state, token, self_user_id, force=True)
     selected = _tui_selected_conversation(state)
+    marked_read = _tui_mark_selected_conversation_read(state, token)
     message_count = len(state.get("messages") or [])
-    state["status"] = f"{message_count} messages"
+    mark_error = (selected or {}).get("mark_read_error")
+    if mark_error:
+        state["status"] = f"{message_count} messages  mark_read:{mark_error}"
+    else:
+        state["status"] = f"{message_count} messages" + ("  read" if marked_read else "")
     if selected:
         selected["history_loaded"] = True
 
@@ -3361,7 +3649,9 @@ def _tui_open_selected_conversation(state, token, self_user_id):
 def _tui_close_conversation(state):
     state["mode"] = "conversations"
     state["composer"] = ""
+    state["input_active"] = True
     state["stick_bottom"] = True
+    state["modal"] = None
     state["status"] = ""
 
 
@@ -3389,25 +3679,6 @@ def _tui_delete_word(value):
     return value[: value.rfind(" ") + 1] if " " in value else ""
 
 
-def _tui_open_entry_in_editor(stdscr, curses_module, state, token, entry):
-    path = _tui_download_open_path(entry, token)
-    if not path:
-        state["status"] = "no files in visible messages"
-        return
-    curses_module.def_prog_mode()
-    curses_module.endwin()
-    try:
-        _open_path_in_editor(path)
-    finally:
-        curses_module.reset_prog_mode()
-        stdscr.keypad(True)
-        try:
-            curses_module.curs_set(0)
-        except curses_module.error:
-            pass
-    state["status"] = f"opened {path}"
-
-
 def _tui_open_modal_asset_in_editor(stdscr, curses_module, state, token):
     modal = state.get("modal") or {}
     entry = modal.get("entry")
@@ -3428,6 +3699,171 @@ def _tui_open_modal_asset_in_editor(stdscr, curses_module, state, token):
         except curses_module.error:
             pass
     state["status"] = f"opened {path}"
+
+
+def _erza_conversation_date(row):
+    latest = (row or {}).get("latest") or {}
+    message = latest.get("message") if isinstance(latest, dict) else {}
+    ts = (message or {}).get("ts") or (row or {}).get("sort_ts")
+    return format_ts(ts)
+
+
+def _erza_conversation_from_row(row, chat_api):
+    info = (row or {}).get("info") or {}
+    channel_id = info.get("channel_id") or info.get("id") or "-"
+    return chat_api["ChatConversation"](
+        conversation_id=channel_id,
+        label=_tui_conversation_label(row),
+        date=_erza_conversation_date(row),
+        kind=info.get("surface") or "dm",
+        unread=bool((row or {}).get("unread_ts")),
+        metadata={"row": row},
+    )
+
+
+def _erza_file_from_asset(asset, chat_api):
+    payload = asset.get("payload") if isinstance(asset.get("payload"), dict) else {}
+    return chat_api["ChatFile"](
+        name=asset.get("name") or _asset_filename(asset),
+        file_id=str(payload.get("id") or asset.get("file_id") or ""),
+        kind=asset.get("kind") or "file",
+        metadata={"asset": asset},
+    )
+
+
+def _erza_embed_from_asset(asset, chat_api):
+    return chat_api["ChatEmbed"](
+        title=asset.get("name") or "Embed",
+        url=asset.get("url") or "",
+        text=asset.get("text") or "",
+        metadata={"asset": asset},
+    )
+
+
+def _erza_message_from_entry(entry, chat_api):
+    message = entry.get("message") or {}
+    channel_id = entry.get("channel_id") or entry.get("dm_id")
+    assets = message_assets(message)
+    return chat_api["ChatMessage"](
+        message_id=message_id(channel_id, message.get("ts")),
+        sender=_tui_sender_name(entry.get("sender") or {}),
+        date=format_ts(message.get("ts")),
+        text=message.get("text") or "",
+        files=[
+            _erza_file_from_asset(asset, chat_api)
+            for asset in assets
+            if asset.get("kind") == "file"
+        ],
+        embeds=[
+            _erza_embed_from_asset(asset, chat_api)
+            for asset in assets
+            if asset.get("kind") == "embed"
+        ],
+        unread=bool(entry.get("unread")),
+        metadata={"entry": entry},
+    )
+
+
+def _erza_row_for_conversation(conversation):
+    metadata = getattr(conversation, "metadata", {}) or {}
+    row = metadata.get("row")
+    return row if isinstance(row, dict) else None
+
+
+def _erza_channel_id(conversation):
+    row = _erza_row_for_conversation(conversation)
+    info = (row or {}).get("info") or {}
+    return info.get("channel_id") or getattr(conversation, "conversation_id", None)
+
+
+def _erza_message_entries(messages):
+    entries = []
+    for message in messages or []:
+        metadata = getattr(message, "metadata", {}) or {}
+        entry = metadata.get("entry")
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _build_erza_chat_callbacks(token, self_user_id, chat_api):
+    row_cache = {}
+
+    def load_conversations():
+        rows = _tui_load_conversations(token, self_user_id, TUI_RECENT_MESSAGE_LIMIT)
+        row_cache.clear()
+        conversations = []
+        for row in rows:
+            conversation = _erza_conversation_from_row(row, chat_api)
+            row_cache[conversation.conversation_id] = row
+            conversations.append(conversation)
+        return conversations
+
+    def load_messages(conversation):
+        row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
+        if not row:
+            return []
+        _tui_hydrate_selected_conversation_label(row, token)
+        entries = _tui_load_messages(row, token, self_user_id, force=True)
+        conversation.label = _tui_conversation_label(row)
+        conversation.date = _erza_conversation_date(row)
+        conversation.unread = bool(row.get("unread_ts"))
+        return [_erza_message_from_entry(entry, chat_api) for entry in entries]
+
+    def send_message(conversation, text):
+        channel_id = _erza_channel_id(conversation)
+        if not channel_id:
+            raise SystemExit("no selected conversation")
+        return send_post(token, channel_id, text)
+
+    def mark_read(conversation, messages):
+        row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
+        channel_id = _erza_channel_id(conversation)
+        entries = _erza_message_entries(messages)
+        latest_ts = _tui_latest_message_ts(entries)
+        if not row or not channel_id or not latest_ts:
+            return False
+        data = slack_request(
+            "conversations.mark",
+            {"channel": channel_id, "ts": latest_ts},
+            token,
+            use_form=True,
+            allow_error=True,
+        )
+        if data.get("ok") is not True:
+            row["mark_read_error"] = data.get("error") or "unknown_error"
+            return False
+        row.pop("mark_read_error", None)
+        _tui_clear_conversation_unread(row, entries, latest_ts)
+        conversation.unread = False
+        return True
+
+    def open_file(conversation, message, file_item):
+        del conversation
+        metadata = getattr(file_item, "metadata", {}) or {}
+        asset = metadata.get("asset")
+        entry_metadata = getattr(message, "metadata", {}) or {}
+        entry = entry_metadata.get("entry")
+        if not isinstance(entry, dict) or not isinstance(asset, dict):
+            return None
+        return _tui_download_asset_open_path(entry, asset, token)
+
+    return chat_api["ChatCallbacks"](
+        load_conversations=load_conversations,
+        load_messages=load_messages,
+        send_message=send_message,
+        mark_read=mark_read,
+        open_file=open_file,
+    )
+
+
+def _run_erza_chat_tui(token, self_user_id):
+    chat_api = _load_erza_chat_api()
+    if chat_api is None:
+        return False
+    callbacks = _build_erza_chat_callbacks(token, self_user_id, chat_api)
+    chat_api["run_chat_app"](callbacks, title="slack tui")
+    return True
 
 
 def _setup_tui_curses(stdscr, curses_module):
@@ -3469,7 +3905,12 @@ def _run_tui(stdscr, token, self_user_id):
         "message_scroll": 0,
         "message_view_height": 1,
         "rendered_line_count": 0,
+        "rendered_rows": [],
+        "cursor_row": 0,
         "stick_bottom": True,
+        "input_active": True,
+        "modal": None,
+        "show_help": False,
         "composer": "",
         "status": "loading...",
     }
@@ -3478,6 +3919,32 @@ def _run_tui(stdscr, token, self_user_id):
     while True:
         _tui_draw(stdscr, state)
         key = stdscr.getch()
+        if state.get("show_help"):
+            if key in (ord("?"), 27, ord("h")):
+                state["show_help"] = False
+                continue
+            if key in (ord("q"),):
+                return
+            continue
+        if key in (ord("?"),):
+            state["show_help"] = True
+            continue
+        if state.get("modal"):
+            if key in (27, ord("h")):
+                state["modal"] = None
+                continue
+            if key in (ord("q"),):
+                return
+            if key in (ord("j"), curses.KEY_DOWN):
+                _tui_move_file_modal(state, 1)
+                continue
+            if key in (ord("k"), curses.KEY_UP):
+                _tui_move_file_modal(state, -1)
+                continue
+            if key in (ord("l"), curses.KEY_ENTER, 10, 13):
+                _tui_open_modal_asset_in_editor(stdscr, curses, state, token)
+                continue
+            continue
         if state.get("mode") == "conversations":
             if key in (ord("q"), 27):
                 return
@@ -3507,90 +3974,88 @@ def _run_tui(stdscr, token, self_user_id):
                 continue
             continue
 
+        input_active = bool(state.get("input_active", True))
         composer = state.get("composer") or ""
-        if state.get("modal"):
-            if key in (27, ord("h"), ord("q")):
-                state["modal"] = None
+        if input_active:
+            if key in (27,):
+                state["input_active"] = False
+                state["stick_bottom"] = False
+                rows = state.get("rendered_rows") or []
+                if rows:
+                    latest_message_index = _tui_last_message_row_index(rows)
+                    state["cursor_row"] = latest_message_index if latest_message_index is not None else len(rows) - 1
                 continue
-            if key in (ord("j"), curses.KEY_DOWN):
-                _tui_move_file_modal(state, 1)
+            if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                if composer.strip():
+                    state["status"] = "sending..."
+                    _tui_draw(stdscr, state)
+                    try:
+                        _tui_send_composer_message(state, token, self_user_id)
+                    except SystemExit as exc:
+                        state["status"] = str(exc)
                 continue
-            if key in (ord("k"), curses.KEY_UP):
-                _tui_move_file_modal(state, -1)
+            if key in (curses.KEY_BACKSPACE, 8, 127):
+                state["composer"] = composer[:-1]
                 continue
-            if key in (ord("l"), curses.KEY_ENTER, 13):
-                _tui_open_modal_asset_in_editor(stdscr, curses, state, token)
-                continue
-            continue
-        if key in (27,):
-            if composer:
+            if key in (21,):  # ctrl-u
                 state["composer"] = ""
-            else:
-                _tui_close_conversation(state)
+                continue
+            if key in (23,):  # ctrl-w
+                state["composer"] = _tui_delete_word(composer)
+                continue
+            if 32 <= key <= 126:
+                state["composer"] = composer + chr(key)
             continue
-        if key in (ord("q"),) and not composer:
+
+        if key in (ord("q"),):
             return
-        if key in (ord("h"),) and not composer:
+        if key in (ord("h"),):
             _tui_close_conversation(state)
             continue
-        if key in (ord("r"),) and not composer:
+        if key in (ord("i"), curses.KEY_ENTER, 13):
+            state["input_active"] = True
+            state["stick_bottom"] = True
+            continue
+        if key in (ord("r"),):
             state["status"] = "loading..."
             _tui_draw(stdscr, state)
             _tui_refresh_messages(state, token, self_user_id, force=True)
             state["status"] = f"{len(state.get('messages') or [])} messages"
             continue
-        if key in (ord("l"),) and not composer:
-            _tui_open_file_modal_for_entry(state, _tui_visible_file_entry(state))
+        if key in (ord("j"), curses.KEY_DOWN):
+            _tui_move_cursor_row(state, 1)
             continue
-        if key in (CTRL_O,):
-            _tui_open_entry_in_editor(stdscr, curses, state, token, _tui_latest_message_with_assets(state))
+        if key in (ord("k"), curses.KEY_UP):
+            _tui_move_cursor_row(state, -1)
             continue
-        if key in (CTRL_K,):
-            page = max(1, int(state.get("message_view_height") or 1) - 1)
-            state["message_scroll"] = max(0, int(state.get("message_scroll") or 0) - page)
+        if key in (CTRL_N,):
+            _tui_move_message_row(state, 1)
+            continue
+        if key in (CTRL_P,):
+            _tui_move_message_row(state, -1)
+            continue
+        if key in (ord("G"), curses.KEY_END):
+            rows = state.get("rendered_rows") or []
+            latest_message_index = _tui_last_message_row_index(rows)
+            state["cursor_row"] = latest_message_index if latest_message_index is not None else max(0, len(rows) - 1)
             state["stick_bottom"] = False
             continue
-        if key in (CTRL_J,):
-            page = max(1, int(state.get("message_view_height") or 1) - 1)
-            state["message_scroll"] = int(state.get("message_scroll") or 0) + page
+        if key in (ord("g"),):
+            rows = state.get("rendered_rows") or []
+            first_message_index = _tui_first_message_row_index(rows)
+            state["cursor_row"] = first_message_index if first_message_index is not None else 0
             state["stick_bottom"] = False
             continue
-        if key in (curses.KEY_UP,):
-            state["message_scroll"] = max(0, int(state.get("message_scroll") or 0) - 1)
-            state["stick_bottom"] = False
+        if key in (ord("l"),):
+            _tui_open_file_modal_for_row(state, _tui_selected_file_row(state))
             continue
-        if key in (curses.KEY_DOWN,):
-            state["message_scroll"] = int(state.get("message_scroll") or 0) + 1
-            state["stick_bottom"] = False
-            continue
-        if key in (curses.KEY_END,):
-            state["stick_bottom"] = True
-            continue
-        if key in (curses.KEY_ENTER, 13):
-            if composer.strip():
-                state["status"] = "sending..."
-                _tui_draw(stdscr, state)
-                try:
-                    _tui_send_composer_message(state, token, self_user_id)
-                except SystemExit as exc:
-                    state["status"] = str(exc)
-            continue
-        if key in (curses.KEY_BACKSPACE, 8, 127):
-            state["composer"] = composer[:-1]
-            continue
-        if key in (21,):  # ctrl-u
-            state["composer"] = ""
-            continue
-        if key in (23,):  # ctrl-w
-            state["composer"] = _tui_delete_word(composer)
-            continue
-        if 32 <= key <= 126:
-            state["composer"] = composer + chr(key)
 
 
 def run_slack_tui(token, self_user_id):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise SystemExit("slack tui requires an interactive terminal.")
+    if _run_erza_chat_tui(token, self_user_id):
+        return
     import curses
 
     curses.wrapper(_run_tui, token, self_user_id)
@@ -4226,7 +4691,7 @@ def _strip_code_fence(text):
     return "\n".join(lines[1:-1]).strip()
 
 
-def _parse_codex_reply_directive(reply):
+def _parse_codex_reply_directive(reply, require_directive=False):
     text = _strip_code_fence(reply)
     try:
         payload = json.loads(text)
@@ -4235,13 +4700,21 @@ def _parse_codex_reply_directive(reply):
         try:
             payload = json.loads(normalized)
         except json.JSONDecodeError:
-            return True, reply
+            return (False, "") if require_directive else (True, reply)
     if not isinstance(payload, dict) or "respond" not in payload:
-        return True, reply
+        return (False, "") if require_directive else (True, reply)
     respond = payload.get("respond")
     should_respond = respond is True or respond == 1 or str(respond).strip().lower() in {"1", "true", "yes"}
     response = payload.get("response") or ""
     return should_respond and bool(str(response).strip()), str(response).strip()
+
+
+def _codex_requires_structured_reply(account):
+    for key in ("codex_prompt", "codex_wrapper_prompt"):
+        value = account.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def codex_resume_for_slack(account, event_info):
@@ -4319,7 +4792,10 @@ def _mark_event_read(account, event_info):
 
 
 def _send_codex_reply(account, event_info, reply):
-    should_respond, reply_text = _parse_codex_reply_directive(reply)
+    should_respond, reply_text = _parse_codex_reply_directive(
+        reply,
+        require_directive=_codex_requires_structured_reply(account),
+    )
     if not should_respond:
         return None
     token = (

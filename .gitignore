@@ -3,3 +3,11 @@ __pycache__/
 .venv/
 env/
 venv/
+
+# Attachments downloaded by `slack o` or the TUI file picker when run from repo root.
+/C*-F*-*
+/D*-F*-*
+/G*-F*-*
+/C*-[0-9]*-[0-9]*-*
+/D*-[0-9]*-[0-9]*-*
+/G*-[0-9]*-[0-9]*-*

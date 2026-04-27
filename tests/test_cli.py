@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -951,6 +952,29 @@ class CliContractTests(unittest.TestCase):
                         ]
                     },
                 }
+            if method == "conversations.info":
+                channel_id = payload["channel"]
+                if channel_id == "D1":
+                    return {
+                        "ok": True,
+                        "channel": {
+                            "id": "D1",
+                            "is_im": True,
+                            "user": "U2",
+                            "last_read": "99.000100",
+                        },
+                    }
+                if channel_id == "C1":
+                    return {
+                        "ok": True,
+                        "channel": {
+                            "id": "C1",
+                            "is_mpim": True,
+                            "name": "mpdm-rohan--ryan-1",
+                            "last_read": "200.000100",
+                        },
+                    }
+                self.fail(f"unexpected channel {channel_id}")
             if method == "users.info":
                 user_id = payload["user"]
                 return {
@@ -977,17 +1001,48 @@ class CliContractTests(unittest.TestCase):
         sender_info.assert_not_called()
         self.assertEqual([row["info"]["channel_id"] for row in rows], ["D1", "C1"])
         self.assertEqual(rows[0]["info"]["surface"], "dm")
-        self.assertEqual(rows[0]["info"]["conversation"], "U2")
+        self.assertEqual(rows[0]["info"]["conversation"], "name-U2")
         self.assertEqual(rows[1]["info"]["surface"], "group_dm")
+        self.assertEqual(rows[1]["info"]["conversation"], "rohan, ryan")
         self.assertEqual([entry["message"]["ts"] for entry in rows[0]["messages"]], ["98.000100", "100.000100"])
         self.assertEqual(rows[0]["latest"]["message"]["text"], "search dm")
-        self.assertFalse(rows[0]["latest"]["unread"])
+        self.assertTrue(rows[0]["latest"]["unread"])
         self.assertEqual(module.summarize_attachments(rows[0]["latest"]["message"]), "-")
         self.assertFalse(rows[0]["history_loaded"])
+        conversation_line = module._tui_conversation_line(rows[0], 120)
+        self.assertIn("name-U2", conversation_line)
+        self.assertNotIn("search dm", conversation_line)
         methods = [call[0] for call in calls]
         self.assertEqual(methods[0], "search.messages")
         self.assertEqual(methods.count("conversations.history"), 0)
-        self.assertEqual(methods.count("users.info"), 0)
+        self.assertEqual(methods.count("conversations.info"), 2)
+        self.assertEqual(methods.count("users.info"), 1)
+
+    def test_tui_conversations_sort_unread_chains_before_read_recency(self):
+        module = load_main_module()
+
+        entries = [
+            {
+                "sort_ts": 300.0,
+                "surface": "dm",
+                "channel_id": "D-read",
+                "conversation": "read latest",
+                "message": {"ts": "300.000100"},
+                "unread": False,
+            },
+            {
+                "sort_ts": 200.0,
+                "surface": "dm",
+                "channel_id": "D-unread",
+                "conversation": "unread older",
+                "message": {"ts": "200.000100"},
+                "unread": True,
+            },
+        ]
+
+        rows = module._tui_conversation_rows_from_entries(entries)
+
+        self.assertEqual([row["info"]["channel_id"] for row in rows], ["D-unread", "D-read"])
 
     def test_tui_conversations_require_search_scope(self):
         module = load_main_module()
@@ -1091,6 +1146,52 @@ class CliContractTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "im:history"):
                 module._tui_load_messages(row, "xoxp-token", "U1", force=True)
 
+    def test_tui_open_selected_conversation_marks_latest_message_read(self):
+        module = load_main_module()
+        calls = []
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            calls.append((method, dict(payload), kwargs))
+            if method == "conversations.history":
+                return {
+                    "ok": True,
+                    "messages": [
+                        {"ts": "100.000100", "user": "U2", "text": "latest"},
+                        {"ts": "98.000100", "user": "U2", "text": "older"},
+                    ],
+                }
+            if method == "conversations.mark":
+                return {"ok": True}
+            self.fail(f"unexpected method {method}")
+
+        def fake_sender(message, token, user_cache):
+            return {"id": message.get("user"), "name": "maanas", "email": "-", "label": "maanas"}
+
+        state = {
+            "mode": "conversations",
+            "conversation_index": 0,
+            "conversations": [
+                {
+                    "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+                    "messages": [],
+                    "unread_ts": 100.000100,
+                    "history_loaded": False,
+                }
+            ],
+        }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(module, "_sender_info", side_effect=fake_sender):
+                module._tui_open_selected_conversation(state, "xoxp-token", "U1")
+
+        mark_call = next(call for call in calls if call[0] == "conversations.mark")
+        self.assertEqual(mark_call[1], {"channel": "D1", "ts": "100.000100"})
+        self.assertTrue(mark_call[2].get("use_form"))
+        self.assertEqual(state["conversations"][0]["unread_ts"], 0)
+        self.assertFalse(any(entry["unread"] for entry in state["messages"]))
+        self.assertEqual(state["conversations"][0]["info"]["last_read"], "100.000100")
+        self.assertIn("read", state["status"])
+
     def test_tui_send_composer_posts_to_selected_conversation(self):
         module = load_main_module()
 
@@ -1115,47 +1216,224 @@ class CliContractTests(unittest.TestCase):
         send_post.assert_called_once_with("xoxp-token", "D1", "hello")
         refresh.assert_called_once_with(state, "xoxp-token", "U1", force=True)
 
-    def test_tui_open_path_prefers_zip_for_multiple_assets(self):
+    def test_erza_chat_callbacks_adapt_slack_conversations_messages_and_files(self):
         module = load_main_module()
 
+        def obj_factory(**defaults):
+            def factory(*args, **kwargs):
+                fields = dict(defaults)
+                positional = list(fields)
+                for key, value in zip(positional, args):
+                    fields[key] = value
+                fields.update(kwargs)
+                return types.SimpleNamespace(**fields)
+
+            return factory
+
+        class FakeCallbacks:
+            def __init__(self, load_conversations, load_messages, send_message, mark_read, open_file):
+                self.load_conversations = load_conversations
+                self.load_messages = load_messages
+                self.send_message = send_message
+                self.mark_read = mark_read
+                self.open_file = open_file
+
+        chat_api = {
+            "ChatCallbacks": FakeCallbacks,
+            "ChatConversation": obj_factory(
+                conversation_id="",
+                label="",
+                date="",
+                kind="dm",
+                unread=False,
+                metadata=None,
+            ),
+            "ChatMessage": obj_factory(
+                message_id="",
+                sender="",
+                date="",
+                text="",
+                files=None,
+                embeds=None,
+                unread=False,
+                metadata=None,
+            ),
+            "ChatFile": obj_factory(name="", file_id="", kind="file", metadata=None),
+            "ChatEmbed": obj_factory(title="Embed", url="", text="", metadata=None),
+        }
         entry = {
             "channel_id": "D1",
-            "message": {"ts": "100.000100", "text": "files"},
+            "dm_id": "D1",
+            "sort_ts": 100.000100,
+            "unread": True,
+            "sender": {"name": "maanas", "label": "maanas <maanas@example.com>"},
+            "message": {
+                "ts": "100.000100",
+                "text": "see this",
+                "files": [{"id": "F1", "name": "note.txt", "url_private_download": "https://files/note"}],
+                "attachments": [
+                    {"title": "spec", "title_link": "https://example.com/spec", "text": "embedded doc"}
+                ],
+            },
         }
-        downloads = [
-            {"path": "/tmp/D1-100.zip", "zip_entry": "one.txt"},
-            {"path": "/tmp/D1-100.zip", "zip_entry": "two.txt"},
-        ]
+        row = {
+            "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+            "latest": entry,
+            "messages": [entry],
+            "sort_ts": 100.000100,
+            "unread_ts": 100.000100,
+        }
 
-        with mock.patch.object(module, "_message_details", return_value=(downloads, [])):
-            path = module._tui_download_open_path(entry, "xoxp-token")
+        with mock.patch.object(module, "_tui_load_conversations", return_value=[row]):
+            with mock.patch.object(module, "_tui_load_messages", return_value=[entry]):
+                callbacks = module._build_erza_chat_callbacks("xoxp-token", "U1", chat_api)
+                conversations = callbacks.load_conversations()
+                messages = callbacks.load_messages(conversations[0])
 
-        self.assertEqual(path, "/tmp/D1-100.zip")
+        self.assertEqual(conversations[0].conversation_id, "D1")
+        self.assertEqual(conversations[0].label, "Maanas")
+        self.assertTrue(conversations[0].unread)
+        self.assertEqual(messages[0].message_id, "D1:100.000100")
+        self.assertEqual(messages[0].sender, "maanas")
+        self.assertEqual(messages[0].files[0].name, "note.txt")
+        self.assertEqual(messages[0].embeds[0].title, "spec")
 
-    def test_tui_file_modal_lists_assets_and_moves(self):
+        with mock.patch.object(module, "send_post", return_value="101.000100") as send_post:
+            callbacks.send_message(conversations[0], "hello")
+        send_post.assert_called_once_with("xoxp-token", "D1", "hello")
+
+        with mock.patch.object(module, "slack_request", return_value={"ok": True}) as slack_request:
+            self.assertTrue(callbacks.mark_read(conversations[0], messages))
+        slack_request.assert_called_once_with(
+            "conversations.mark",
+            {"channel": "D1", "ts": "100.000100"},
+            "xoxp-token",
+            use_form=True,
+            allow_error=True,
+        )
+        self.assertFalse(conversations[0].unread)
+        self.assertEqual(row["unread_ts"], 0)
+
+        with mock.patch.object(module, "_tui_download_asset_open_path", return_value="/tmp/note.txt") as open_path:
+            self.assertEqual(callbacks.open_file(conversations[0], messages[0], messages[0].files[0]), "/tmp/note.txt")
+        open_path.assert_called_once()
+
+    def test_tui_render_message_rows_boxes_messages_and_file_button(self):
         module = load_main_module()
 
         entry = {
             "channel_id": "D1",
             "message": {
                 "ts": "100.000100",
+                "text": "files",
                 "files": [{"id": "F1", "name": "note.txt"}],
-                "attachments": [{"title": "spec", "title_link": "https://example.com/spec"}],
+                "attachments": [
+                    {
+                        "title": "spec",
+                        "title_link": "https://example.com/spec",
+                        "text": "embedded doc preview",
+                    }
+                ],
             },
+            "sender": {"name": "maanas", "label": "maanas <maanas@example.com>"},
         }
-        state = {}
 
-        opened = module._tui_open_file_modal_for_entry(state, entry)
+        rows = module._tui_render_message_rows([entry], 80)
+        texts = [row["text"] for row in rows]
+        file_rows = [row for row in rows if row.get("kind") == "file_button"]
 
-        self.assertTrue(opened)
-        self.assertEqual([asset["name"] for asset in state["modal"]["assets"]], ["note.txt", "spec"])
+        self.assertTrue(texts[0].startswith("+-[ maanas  1970-01-01"))
+        self.assertNotIn("maanas@example.com", texts[0])
+        rendered = "\n".join(texts)
+        self.assertIn("[ Embed ]", rendered)
+        self.assertIn("spec", rendered)
+        self.assertIn("embedded doc preview", rendered)
+        self.assertIn("| <<<1 Files>>>", rendered)
+        self.assertEqual(len(file_rows), 1)
+        self.assertEqual([asset["name"] for asset in file_rows[0]["assets"]], ["note.txt"])
+
+    def test_tui_cursor_selects_file_button_and_opens_modal(self):
+        module = load_main_module()
+
+        entry = {"channel_id": "D1", "message": {"ts": "100.000100"}}
+        assets = [{"kind": "file", "name": "note.txt"}]
+        state = {
+            "rendered_rows": [
+                {"kind": "message", "entry": entry},
+                {"kind": "file_button", "entry": entry, "assets": assets},
+            ],
+            "cursor_row": 1,
+        }
+
+        self.assertEqual(module._tui_selected_file_row(state)["assets"][0]["name"], "note.txt")
+        self.assertTrue(module._tui_open_file_modal_for_row(state, module._tui_selected_file_row(state)))
+        self.assertEqual([asset["name"] for asset in state["modal"]["assets"]], ["note.txt"])
         self.assertEqual(module._tui_selected_modal_asset(state)["name"], "note.txt")
         module._tui_move_file_modal(state, 1)
-        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "spec")
-        module._tui_move_file_modal(state, 1)
-        self.assertEqual(module._tui_selected_modal_asset(state)["name"], "spec")
-        module._tui_move_file_modal(state, -1)
         self.assertEqual(module._tui_selected_modal_asset(state)["name"], "note.txt")
+        module._tui_move_cursor_row(state, -1)
+        self.assertIsNone(module._tui_selected_file_row(state))
+        module._tui_move_cursor_row(state, 10)
+        self.assertEqual(module._tui_selected_file_row(state)["assets"][0]["name"], "note.txt")
+        self.assertEqual(module._tui_first_file_row_index(state["rendered_rows"]), 1)
+
+    def test_tui_message_navigation_targets_message_starts(self):
+        module = load_main_module()
+
+        messages = [
+            {"message": {"ts": "100.000100", "text": "one"}, "sender": {"label": "a"}},
+            {"message": {"ts": "101.000100", "text": "two"}, "sender": {"label": "b"}},
+            {"message": {"ts": "102.000100", "text": "three"}, "sender": {"label": "c"}},
+        ]
+        rows = module._tui_render_message_rows(messages, 80)
+        starts = module._tui_message_start_row_indices(rows)
+        state = {"rendered_rows": rows, "cursor_row": starts[-1]}
+
+        self.assertEqual(len(starts), 3)
+        self.assertEqual(module._tui_last_message_row_index(rows), starts[-1])
+        module._tui_move_message_row(state, -1)
+        self.assertEqual(state["cursor_row"], starts[1])
+        module._tui_move_message_row(state, 1)
+        self.assertEqual(state["cursor_row"], starts[2])
+        self.assertFalse(state["stick_bottom"])
+
+    def test_tui_file_modal_uses_fixed_height_and_scrolls(self):
+        module = load_main_module()
+        added = []
+
+        class FakeWindow:
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getmaxyx(self):
+                return (20, 80)
+
+            def addnstr(self, y, x, text, limit, attr=0):
+                added.append((y, x, text[:limit]))
+
+            def move(self, y, x):
+                pass
+
+        state = {
+            "modal": {
+                "kind": "files",
+                "assets": [{"kind": "file", "name": f"file-{index}.txt"} for index in range(10)],
+                "index": 9,
+                "scroll": 0,
+            }
+        }
+
+        module._tui_draw_file_modal(FakeWindow(), state)
+
+        self.assertEqual(state["modal"]["scroll"], 3)
+        content_rows = [item for item in added if item[2] == "| "]
+        self.assertEqual(len(content_rows), 7)
+        self.assertTrue(any(text == ">" for _, _, text in added))
+        self.assertFalse(any("file-0.txt" in text for _, _, text in added))
+        self.assertTrue(any("file-9.txt" in text for _, _, text in added))
 
     def test_tui_download_asset_open_path_writes_selected_embed(self):
         module = load_main_module()
@@ -1235,8 +1513,53 @@ class CliContractTests(unittest.TestCase):
 
         self.assertIn("100 messages", added[0][2])
         self.assertIn("/", added[0][2])
-        self.assertEqual(state["rendered_line_count"], 300)
-        self.assertEqual(state["visible_file_entries"][-1]["message"]["files"][0]["name"], "note.txt")
+        self.assertEqual(state["rendered_line_count"], 402)
+        self.assertIn("| <<<1 Files>>>", "\n".join(item[2] for item in added))
+        self.assertNotIn("FILES:", [item[2] for item in added])
+
+    def test_tui_draw_conversation_marks_focus_with_pointer_not_reverse(self):
+        module = load_main_module()
+        added = []
+
+        class FakeWindow:
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getmaxyx(self):
+                return (12, 80)
+
+            def addnstr(self, y, x, text, limit, attr=0):
+                added.append((y, x, text[:limit], attr))
+
+            def move(self, y, x):
+                pass
+
+        state = {
+            "mode": "conversation",
+            "conversations": [
+                {"info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"}}
+            ],
+            "conversation_index": 0,
+            "messages": [
+                {
+                    "message": {"ts": "100.000100", "text": "hello"},
+                    "sender": {"label": "sender"},
+                }
+            ],
+            "input_active": False,
+            "cursor_row": 1,
+            "message_scroll": 0,
+            "stick_bottom": False,
+            "composer": "",
+        }
+
+        module._tui_draw(FakeWindow(), state)
+
+        self.assertTrue(any(x == 0 and text == ">" for _, x, text, _ in added))
+        self.assertFalse(any(attr for *_, attr in added))
 
     def test_tui_curses_setup_uses_transparent_default_background(self):
         module = load_main_module()
@@ -1655,6 +1978,31 @@ class CliContractTests(unittest.TestCase):
             "Here is the Genie data.",
             thread_ts=None,
         )
+
+    def test_send_codex_reply_requires_structured_response_with_wrapper(self):
+        module = load_main_module()
+
+        account = {
+            "token": {"bot": "xoxb-bot", "user": "xoxp-user"},
+            "codex_prompt": (
+                'Query: {}; Instructions: respond as {respond:1,response:"text"} '
+                'or {respond:0,response:""}.'
+            ),
+        }
+        event = {
+            "kind": "user_direct_message",
+            "channel_id": "D123",
+            "thread_ts": None,
+        }
+        with mock.patch.object(module, "send_post") as send_post:
+            result = module._send_codex_reply(
+                account,
+                event,
+                "Ask tomorrow. Today it may look impulsive.",
+            )
+
+        self.assertIsNone(result)
+        send_post.assert_not_called()
 
     def test_user_dm_entries_use_user_token_for_reply(self):
         module = load_main_module()
