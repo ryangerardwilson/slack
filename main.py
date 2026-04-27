@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -2535,6 +2536,7 @@ def list_dms(
 
 TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
+TUI_LATEST_MESSAGE_CURSOR = -1
 ERZA_CHAT_SOURCE_PATHS = (
     "~/.erza/app/src",
     "~/Infra/erza/app/src",
@@ -2544,8 +2546,8 @@ TUI_SHORTCUT_LINES = [
     ("ctrl+n / p", "next / previous message"),
     ("l / enter", "open conversation, file picker, or selected file"),
     ("h", "back or close modal"),
-    ("esc", "leave composer or close modal"),
-    ("i", "return to composer"),
+    ("i", "enter insert mode"),
+    ("esc", "return to normal mode or close modal"),
     ("r", "refresh"),
     ("g / gg / G", "jump top / bottom"),
     ("?", "toggle shortcuts"),
@@ -3094,6 +3096,10 @@ def _tui_move_message_row(state, delta):
     state["stick_bottom"] = False
 
 
+def _tui_focus_latest_message(state):
+    state["cursor_row"] = TUI_LATEST_MESSAGE_CURSOR
+
+
 def _tui_open_file_modal_for_row(state, row):
     if not row or row.get("kind") != "file_button":
         state["status"] = "select a file button"
@@ -3154,12 +3160,61 @@ def _tui_download_asset_open_path(entry, asset, token):
     return destination
 
 
-def _open_path_in_editor(path):
-    editor_cmd = resolve_editor_cmd()
+def _open_path(path):
+    command, wait = _resolve_file_open_command(path)
     try:
-        return subprocess.run(editor_cmd + [path], check=False).returncode
+        if wait:
+            return subprocess.run(command, check=False).returncode
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return 0
     except FileNotFoundError:
-        raise SystemExit(f"Editor not found: {editor_cmd[0]}")
+        raise SystemExit(f"File opener not found: {command[0]}")
+
+
+def _resolve_file_open_command(path):
+    mime_type, _encoding = mimetypes.guess_type(path)
+    if mime_type == "application/pdf":
+        command = _first_available_open_command(
+            os.getenv("SLACK_PDF_VIEWER"),
+            os.getenv("ERZA_PDF_VIEWER"),
+            "zathura",
+            "evince",
+            "xdg-open",
+        )
+        if command:
+            return _expand_file_open_command(command, path), False
+    if mime_type and mime_type.startswith("image/"):
+        command = _first_available_open_command(
+            os.getenv("SLACK_IMAGE_VIEWER"),
+            os.getenv("ERZA_IMAGE_VIEWER"),
+            "swayimg",
+            "imv",
+            "feh",
+            "xdg-open",
+        )
+        if command:
+            return _expand_file_open_command(command, path), False
+    return resolve_editor_cmd() + [path], True
+
+
+def _first_available_open_command(*commands):
+    for raw_command in commands:
+        command = shlex.split(raw_command or "")
+        if command and shutil.which(command[0]):
+            return command
+    return None
+
+
+def _expand_file_open_command(command, path):
+    if any("{file}" in token for token in command):
+        return [token.replace("{file}", path) for token in command]
+    return list(command) + [path]
 
 
 def _tui_status_for_entry(entry):
@@ -3452,7 +3507,7 @@ def _tui_draw_conversation(stdscr, state, height, width):
     label = _tui_conversation_label(selected_conv)
     status = state.get("status") or ""
     messages = state.get("messages") or []
-    input_active = bool(state.get("input_active", True))
+    input_active = bool(state.get("input_active", False))
     rendered = _tui_render_message_rows(messages, width - 3)
     message_height = max(1, height - 4)
     state["message_view_height"] = message_height
@@ -3462,14 +3517,24 @@ def _tui_draw_conversation(stdscr, state, height, width):
         scroll = max_scroll
         state["cursor_row"] = max(0, len(rendered) - 1)
     elif not input_active:
-        cursor_row = max(0, min(int(state.get("cursor_row") or 0), max(0, len(rendered) - 1)))
+        raw_cursor_row = state.get("cursor_row", TUI_LATEST_MESSAGE_CURSOR)
+        try:
+            cursor_row_value = int(raw_cursor_row)
+        except (TypeError, ValueError):
+            cursor_row_value = TUI_LATEST_MESSAGE_CURSOR
+        if cursor_row_value == TUI_LATEST_MESSAGE_CURSOR:
+            latest_message_index = _tui_last_message_row_index(rendered)
+            cursor_row = latest_message_index if latest_message_index is not None else max(0, len(rendered) - 1)
+            scroll = max_scroll
+        else:
+            cursor_row = max(0, min(cursor_row_value, max(0, len(rendered) - 1)))
+            scroll = _tui_adjust_scroll(
+                cursor_row,
+                int(state.get("message_scroll") or 0),
+                message_height,
+                len(rendered),
+            )
         state["cursor_row"] = cursor_row
-        scroll = _tui_adjust_scroll(
-            cursor_row,
-            int(state.get("message_scroll") or 0),
-            message_height,
-            len(rendered),
-        )
     else:
         scroll = max(0, min(int(state.get("message_scroll") or 0), max_scroll))
     state["message_scroll"] = scroll
@@ -3489,7 +3554,7 @@ def _tui_draw_conversation(stdscr, state, height, width):
         _safe_addstr(stdscr, 2 + row_offset, 2, _clip(row["text"], width - 3))
 
     composer = state.get("composer") or ""
-    prompt = f"> {composer}" if input_active else "[nav]"
+    prompt = f"> {composer}" if input_active else "[normal]"
     prompt_width = max(1, width - 1)
     visible_prompt = prompt[-prompt_width:]
     _safe_addstr(stdscr, height - 1, 0, _clip(visible_prompt, prompt_width))
@@ -3629,11 +3694,16 @@ def _tui_open_selected_conversation(state, token, self_user_id):
         return
     state["mode"] = "conversation"
     state["composer"] = ""
-    state["input_active"] = True
+    state["input_active"] = False
+    state["stick_bottom"] = False
+    state["cursor_row"] = TUI_LATEST_MESSAGE_CURSOR
     state["modal"] = None
     state["status"] = "loading..."
     _tui_hydrate_selected_conversation_label(_tui_selected_conversation(state), token)
     _tui_refresh_messages(state, token, self_user_id, force=True)
+    state["input_active"] = False
+    state["stick_bottom"] = False
+    _tui_focus_latest_message(state)
     selected = _tui_selected_conversation(state)
     marked_read = _tui_mark_selected_conversation_read(state, token)
     message_count = len(state.get("messages") or [])
@@ -3649,8 +3719,8 @@ def _tui_open_selected_conversation(state, token, self_user_id):
 def _tui_close_conversation(state):
     state["mode"] = "conversations"
     state["composer"] = ""
-    state["input_active"] = True
-    state["stick_bottom"] = True
+    state["input_active"] = False
+    state["stick_bottom"] = False
     state["modal"] = None
     state["status"] = ""
 
@@ -3690,7 +3760,7 @@ def _tui_open_modal_asset_in_editor(stdscr, curses_module, state, token):
     curses_module.def_prog_mode()
     curses_module.endwin()
     try:
-        _open_path_in_editor(path)
+        _open_path(path)
     finally:
         curses_module.reset_prog_mode()
         stdscr.keypad(True)
@@ -3907,8 +3977,8 @@ def _run_tui(stdscr, token, self_user_id):
         "rendered_line_count": 0,
         "rendered_rows": [],
         "cursor_row": 0,
-        "stick_bottom": True,
-        "input_active": True,
+        "stick_bottom": False,
+        "input_active": False,
         "modal": None,
         "show_help": False,
         "composer": "",
@@ -3974,16 +4044,13 @@ def _run_tui(stdscr, token, self_user_id):
                 continue
             continue
 
-        input_active = bool(state.get("input_active", True))
+        input_active = bool(state.get("input_active", False))
         composer = state.get("composer") or ""
         if input_active:
             if key in (27,):
                 state["input_active"] = False
                 state["stick_bottom"] = False
-                rows = state.get("rendered_rows") or []
-                if rows:
-                    latest_message_index = _tui_last_message_row_index(rows)
-                    state["cursor_row"] = latest_message_index if latest_message_index is not None else len(rows) - 1
+                _tui_focus_latest_message(state)
                 continue
             if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
                 if composer.strip():
@@ -4012,7 +4079,7 @@ def _run_tui(stdscr, token, self_user_id):
         if key in (ord("h"),):
             _tui_close_conversation(state)
             continue
-        if key in (ord("i"), curses.KEY_ENTER, 13):
+        if key in (ord("i"),):
             state["input_active"] = True
             state["stick_bottom"] = True
             continue
@@ -4020,6 +4087,9 @@ def _run_tui(stdscr, token, self_user_id):
             state["status"] = "loading..."
             _tui_draw(stdscr, state)
             _tui_refresh_messages(state, token, self_user_id, force=True)
+            state["input_active"] = False
+            state["stick_bottom"] = False
+            _tui_focus_latest_message(state)
             state["status"] = f"{len(state.get('messages') or [])} messages"
             continue
         if key in (ord("j"), curses.KEY_DOWN):
@@ -4035,9 +4105,7 @@ def _run_tui(stdscr, token, self_user_id):
             _tui_move_message_row(state, -1)
             continue
         if key in (ord("G"), curses.KEY_END):
-            rows = state.get("rendered_rows") or []
-            latest_message_index = _tui_last_message_row_index(rows)
-            state["cursor_row"] = latest_message_index if latest_message_index is not None else max(0, len(rows) - 1)
+            _tui_focus_latest_message(state)
             state["stick_bottom"] = False
             continue
         if key in (ord("g"),):

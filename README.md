@@ -170,20 +170,23 @@ slack 1 tui
 ```
 
 The TUI starts on a recent-conversations screen derived from the latest 100
-DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation,
-`h` in conversation navigation mode to return. The conversation list shows
-participant names, omits message previews, and sorts conversations with the
-most recent unread message first before normal recency. The conversation screen hydrates
-the latest 100 messages for that DM/GDM, renders messages in boxed rows, and
-shows embeds inline as text in an embed box. Messages with real Slack files show
-a nested `<<<X Files>>>` button.
-Enter sends and `r` refreshes. Press Esc to leave the composer, then use `j`/`k`
-to move line-by-line, Ctrl-N/Ctrl-P to move message-by-message, and `g`/`G` to
-jump through the loaded transcript. `gg` works as the same first-message jump.
-The active line is marked with `>`.
+DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation.
+Conversations open in normal mode, with the latest message focused. Press `i`
+to enter insert mode, type the message, Enter to send, and Esc to return to
+normal mode. Press `h` in normal mode to return to the conversation list. The
+conversation list shows participant names, omits message previews, and sorts
+conversations with the most recent unread message first before normal recency.
+The conversation screen hydrates the latest 100 messages for that DM/GDM,
+renders messages in boxed rows, and shows embeds inline as text in an embed box.
+Messages with real Slack files show a nested `<<<X Files>>>` button. In normal
+mode, use `j`/`k` to move line-by-line, Ctrl-N/Ctrl-P to move
+message-by-message, and `g`/`G` to jump through the loaded transcript. `gg`
+works as the same first-message jump. The active line is marked with `>`.
 Press `l` on `<<<X Files>>>` to open a file picker modal, then `j`/`k` and `l`
-inside that modal to open the selected file in `$VISUAL`, `$EDITOR`, then `vim`.
-Press `?` to toggle the shortcuts modal.
+inside that modal to open the selected file. PDFs default to `zathura`, images
+default to `swayimg`, and other files fall back through `$VISUAL`, `$EDITOR`,
+then `vim`. Override viewers with `$SLACK_PDF_VIEWER` or `$SLACK_IMAGE_VIEWER`
+when needed. Press `?` to toggle the shortcuts modal.
 
 When the installed Erza runtime is available, `slack tui` uses `erza.chat` for
 the shared conversation-list, boxed transcript, composer, and file-picker
@@ -295,7 +298,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, type at the bottom to send, Esc to leave the composer, `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `l` on `<<<X Files>>>` to open the file picker, `i` to type again, `h` to return, and `?` for shortcuts. Embeds render inline as text boxes instead of file-picker items.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

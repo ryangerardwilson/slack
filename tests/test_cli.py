@@ -1191,6 +1191,8 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse(any(entry["unread"] for entry in state["messages"]))
         self.assertEqual(state["conversations"][0]["info"]["last_read"], "100.000100")
         self.assertIn("read", state["status"])
+        self.assertFalse(state["input_active"])
+        self.assertEqual(state["cursor_row"], module.TUI_LATEST_MESSAGE_CURSOR)
 
     def test_tui_send_composer_posts_to_selected_conversation(self):
         module = load_main_module()
@@ -1215,6 +1217,24 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(state["status"], "sent")
         send_post.assert_called_once_with("xoxp-token", "D1", "hello")
         refresh.assert_called_once_with(state, "xoxp-token", "U1", force=True)
+
+    def test_tui_file_open_command_defaults_pdf_and_images_to_viewers(self):
+        module = load_main_module()
+
+        def fake_which(command):
+            return f"/usr/bin/{command}" if command in {"zathura", "swayimg", "vim"} else None
+
+        with mock.patch.object(module.shutil, "which", side_effect=fake_which):
+            pdf_command, pdf_wait = module._resolve_file_open_command("/tmp/report.pdf")
+            image_command, image_wait = module._resolve_file_open_command("/tmp/photo.png")
+            text_command, text_wait = module._resolve_file_open_command("/tmp/note.txt")
+
+        self.assertEqual(pdf_command, ["zathura", "/tmp/report.pdf"])
+        self.assertFalse(pdf_wait)
+        self.assertEqual(image_command, ["swayimg", "/tmp/photo.png"])
+        self.assertFalse(image_wait)
+        self.assertEqual(text_command, ["vim", "/tmp/note.txt"])
+        self.assertTrue(text_wait)
 
     def test_erza_chat_callbacks_adapt_slack_conversations_messages_and_files(self):
         module = load_main_module()
@@ -1514,6 +1534,8 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("100 messages", added[0][2])
         self.assertIn("/", added[0][2])
         self.assertEqual(state["rendered_line_count"], 402)
+        self.assertEqual(state["cursor_row"], module._tui_last_message_row_index(state["rendered_rows"]))
+        self.assertIn("[normal]", [item[2] for item in added])
         self.assertIn("| <<<1 Files>>>", "\n".join(item[2] for item in added))
         self.assertNotIn("FILES:", [item[2] for item in added])
 
