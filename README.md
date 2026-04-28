@@ -70,8 +70,10 @@ Recommended for `df` and `ls -o`: `files:read`.
 For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 `users:read`, `users:read.email`, and `files:read` when attachment reads matter.
 For `tui`, add `search:read`, `users:read`, `im:read`, `im:history`,
-`mpim:read`, `mpim:history`, `chat:write`, and `files:read` to the user token
-scopes.
+`im:write`, `mpim:read`, `mpim:history`, `mpim:write`, `chat:write`, and
+`files:read` to the user token scopes. `im:write` and `mpim:write` are required
+for opening conversations to mark them read through Slack's `conversations.mark`
+API.
 For the realtime `events` cache, keep those user-token scopes and enable Slack
 Socket Mode with an app-level `xapp-` token that has `connections:write`.
 Subscribe the Slack app to `message.im` and `message.mpim` events. The cache
@@ -191,9 +193,10 @@ Messages with real Slack files show a nested `<<<X Files>>>` button. In normal
 mode, use `j`/`k` to move line-by-line, Ctrl-N/Ctrl-P to move
 message-by-message, and `g`/`G` to jump through the loaded transcript. `gg`
 works as the same first-message jump. The active line is marked with `>`.
-Press `l` on `<<<X Files>>>` to open a file picker modal, then `j`/`k` and `l`
-inside that modal to open the selected file. PDFs default to `zathura`, images
-default to `swayimg`, and other files fall back through `$VISUAL`, `$EDITOR`,
+Use `,mra` in normal mode to mark all loaded DM/GDM conversations read. Press
+`l` on `<<<X Files>>>` to open a file picker modal, then `j`/`k` and `l` inside
+that modal to open the selected file. PDFs default to `zathura`, images default
+to `swayimg`, and other files fall back through `$VISUAL`, `$EDITOR`,
 then `vim`. Override viewers with `$SLACK_PDF_VIEWER` or `$SLACK_IMAGE_VIEWER`
 when needed. Press `?` to toggle the shortcuts modal.
 
@@ -333,7 +336,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `,mra` to mark all loaded conversations read, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

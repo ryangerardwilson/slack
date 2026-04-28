@@ -20,6 +20,7 @@
 - Use Slack `search.messages` for `ls` with the preset's user token by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
 - `ls` is message-level history, not a conversation summary view or channel browser.
 - `tui` is deliberately limited to recent `im,mpim` conversations: a conversation-list screen from the latest 100 DM/GDM messages, plus a full-screen conversation view that hydrates the selected DM/GDM's latest 100 messages and visible files/embeds. Do not add public/private channel browsing to it without explicit user direction.
+- Opening conversations in `tui` marks Ryan's read cursor with the user token. That requires `im:write` for DMs and `mpim:write` for group DMs; read/history scopes alone are insufficient.
 - `events service` owns the per-preset SQLite DM/GDM cache used by `ls` and `tui`. Avoid multiple simultaneous Socket Mode consumers for the same Slack app token: when `slack-codex-<preset>` is active, the events service should stay sync-only and the Codex socket service should write the cache.
 
 ## Interface Rules

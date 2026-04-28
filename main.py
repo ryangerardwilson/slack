@@ -2798,7 +2798,7 @@ def _tui_search_recent_matches(token, limit):
 def _tui_scope_error():
     return (
         "slack tui requires user token scopes: search:read, users:read, "
-        "im:read, im:history, mpim:read, mpim:history."
+        "im:read, im:history, im:write, mpim:read, mpim:history, mpim:write."
     )
 
 
@@ -4128,6 +4128,23 @@ def _tui_latest_message_ts(messages):
     return latest[1] if latest else None
 
 
+def _tui_conversation_latest_ts(conversation_row):
+    if not conversation_row:
+        return None
+    entries = list(conversation_row.get("messages") or [])
+    latest = conversation_row.get("latest")
+    if isinstance(latest, dict):
+        entries.append(latest)
+    ts = _tui_latest_message_ts(entries)
+    if ts:
+        return ts
+    sort_ts = conversation_row.get("sort_ts")
+    try:
+        return f"{float(sort_ts):.6f}" if sort_ts else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _tui_clear_conversation_unread(conversation_row, messages, latest_ts):
     if conversation_row is None:
         return
@@ -4146,13 +4163,11 @@ def _tui_clear_conversation_unread(conversation_row, messages, latest_ts):
             nested["last_read"] = latest_ts
 
 
-def _tui_mark_selected_conversation_read(state, token):
-    selected = _tui_selected_conversation(state)
-    messages = state.get("messages") or []
-    channel_id = ((selected or {}).get("info") or {}).get("channel_id")
-    latest_ts = _tui_latest_message_ts(messages)
-    if not selected or not channel_id or not latest_ts:
-        return False
+def _tui_mark_conversation_row_read(conversation_row, token, cache_path=None):
+    channel_id = ((conversation_row or {}).get("info") or {}).get("channel_id")
+    latest_ts = _tui_conversation_latest_ts(conversation_row)
+    if not conversation_row or not channel_id or not latest_ts:
+        return False, "missing_ts"
     data = slack_request(
         "conversations.mark",
         {"channel": channel_id, "ts": latest_ts},
@@ -4161,11 +4176,81 @@ def _tui_mark_selected_conversation_read(state, token):
         allow_error=True,
     )
     if data.get("ok") is not True:
-        selected["mark_read_error"] = data.get("error") or "unknown_error"
+        conversation_row["mark_read_error"] = _tui_mark_read_error(conversation_row, data)
+        return False, conversation_row["mark_read_error"]
+    conversation_row.pop("mark_read_error", None)
+    _tui_clear_conversation_unread(conversation_row, conversation_row.get("messages") or [], latest_ts)
+    _event_cache_mark_read(cache_path, channel_id, latest_ts)
+    return True, ""
+
+
+def _tui_mark_selected_conversation_read(state, token):
+    selected = _tui_selected_conversation(state)
+    messages = state.get("messages") or []
+    if not selected:
         return False
-    selected.pop("mark_read_error", None)
-    _tui_clear_conversation_unread(selected, messages, latest_ts)
+    selected["messages"] = messages
+    marked, _error = _tui_mark_conversation_row_read(selected, token)
+    return marked
+
+
+def _tui_mark_all_conversations_read(state, token, cache_path=None):
+    conversations = state.get("conversations") or []
+    marked = 0
+    failed = []
+    for row in conversations:
+        if not bool(row.get("unread_ts")):
+            continue
+        marked_read, error = _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
+        if marked_read:
+            marked += 1
+        else:
+            failed.append(error)
+    if failed:
+        state["status"] = f"marked_read={marked} failed={len(failed)} {failed[0]}"
+        return False
+    for entry in state.get("messages") or []:
+        entry["unread"] = False
+    state["status"] = f"marked_read={marked}"
     return True
+
+
+def _tui_apply_leader_key(state, key, token, cache_path=None):
+    if key == 27:
+        state["leader_buffer"] = ""
+        return False
+    leader = state.get("leader_buffer") or ""
+    if not leader:
+        if key == ord(","):
+            state["leader_buffer"] = ","
+            state["status"] = ","
+            return True
+        return False
+    if not 32 <= key <= 126:
+        state["leader_buffer"] = ""
+        return True
+    sequence = leader + chr(key)
+    if not ",mra".startswith(sequence):
+        state["leader_buffer"] = ""
+        state["status"] = ""
+        return True
+    state["leader_buffer"] = sequence
+    state["status"] = sequence
+    if sequence == ",mra":
+        state["leader_buffer"] = ""
+        _tui_mark_all_conversations_read(state, token, cache_path=cache_path)
+    return True
+
+
+def _tui_mark_read_error(conversation_row, data):
+    error = data.get("error") or "unknown_error"
+    if error == "missing_scope":
+        surface = ((conversation_row or {}).get("info") or {}).get("surface")
+        if surface == "group_dm":
+            return "missing_scope:add mpim:write to user token"
+        if surface == "dm":
+            return "missing_scope:add im:write to user token"
+    return error
 
 
 def _tui_refresh(state, token, self_user_id, cache_path=None):
@@ -4226,8 +4311,12 @@ def _tui_open_selected_conversation(state, token, self_user_id, cache_path=None)
     _tui_focus_latest_message(state)
     selected = _tui_selected_conversation(state)
     marked_read = _tui_mark_selected_conversation_read(state, token)
-    if selected:
-        _event_cache_mark_read(cache_path, (selected.get("info") or {}).get("channel_id"), _tui_latest_message_ts(state.get("messages") or []))
+    if marked_read and selected:
+        _event_cache_mark_read(
+            cache_path,
+            (selected.get("info") or {}).get("channel_id"),
+            _tui_latest_message_ts(state.get("messages") or []),
+        )
     message_count = len(state.get("messages") or [])
     mark_error = (selected or {}).get("mark_read_error")
     if mark_error:
@@ -4584,26 +4673,34 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=None):
 
     def mark_read(conversation, messages):
         row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
-        channel_id = _erza_channel_id(conversation)
         entries = _erza_message_entries(messages)
-        latest_ts = _tui_latest_message_ts(entries)
-        if not row or not channel_id or not latest_ts:
+        if not row:
             return False
-        data = slack_request(
-            "conversations.mark",
-            {"channel": channel_id, "ts": latest_ts},
-            token,
-            use_form=True,
-            allow_error=True,
-        )
-        if data.get("ok") is not True:
-            row["mark_read_error"] = data.get("error") or "unknown_error"
-            return False
-        row.pop("mark_read_error", None)
-        _tui_clear_conversation_unread(row, entries, latest_ts)
-        _event_cache_mark_read(cache_path, channel_id, latest_ts)
+        row["messages"] = entries
+        marked, error = _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
+        if not marked:
+            return error
         conversation.unread = False
         return True
+
+    def mark_all_read(conversations):
+        marked = 0
+        failed = []
+        for conversation in conversations or []:
+            row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
+            if not row:
+                continue
+            if not bool(row.get("unread_ts")) and not bool(getattr(conversation, "unread", False)):
+                continue
+            marked_read, error = _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
+            if marked_read:
+                conversation.unread = False
+                marked += 1
+            else:
+                failed.append(error)
+        if failed:
+            return f"{marked} marked, {len(failed)} failed: {failed[0]}"
+        return marked
 
     def open_file(conversation, message, file_item):
         del conversation
@@ -4621,6 +4718,7 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=None):
         send_message=send_message,
         mark_read=mark_read,
         open_file=open_file,
+        mark_all_read=mark_all_read,
     )
 
 
@@ -4680,6 +4778,7 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
         "show_help": False,
         "composer": "",
         "composer_cursor": 0,
+        "leader_buffer": "",
         "status": "loading...",
     }
     _tui_draw(stdscr, state)
@@ -4766,6 +4865,8 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
 
         if key in (ord("q"),):
             return
+        if _tui_apply_leader_key(state, key, token, cache_path=cache_path):
+            continue
         if key in (ord("h"),):
             _tui_close_conversation(state)
             continue

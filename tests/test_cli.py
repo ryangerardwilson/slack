@@ -1323,8 +1323,85 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse(any(entry["unread"] for entry in state["messages"]))
         self.assertEqual(state["conversations"][0]["info"]["last_read"], "100.000100")
         self.assertIn("read", state["status"])
+
+    def test_tui_group_dm_mark_read_missing_scope_explains_scope(self):
+        module = load_main_module()
+        calls = []
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            calls.append((method, dict(payload), kwargs))
+            if method == "conversations.history":
+                return {
+                    "ok": True,
+                    "messages": [{"ts": "100.000100", "user": "U2", "text": "latest"}],
+                }
+            if method == "conversations.mark":
+                return {"ok": False, "error": "missing_scope"}
+            self.fail(f"unexpected method {method}")
+
+        state = {
+            "mode": "conversations",
+            "conversation_index": 0,
+            "conversations": [
+                {
+                    "info": {"channel_id": "G1", "surface": "group_dm", "conversation": "A, B"},
+                    "messages": [],
+                    "unread_ts": 100.000100,
+                    "history_loaded": False,
+                }
+            ],
+        }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            with mock.patch.object(module, "_sender_info", return_value={"id": "U2", "name": "a", "email": "-", "label": "a"}):
+                module._tui_open_selected_conversation(state, "xoxp-token", "U1")
+
+        mark_call = next(call for call in calls if call[0] == "conversations.mark")
+        self.assertEqual(mark_call[1], {"channel": "G1", "ts": "100.000100"})
+        self.assertIn("mpim:write", state["status"])
+        self.assertEqual(state["conversations"][0]["unread_ts"], 100.000100)
+        self.assertTrue(any(entry["unread"] for entry in state["messages"]))
         self.assertFalse(state["input_active"])
         self.assertEqual(state["cursor_row"], module.TUI_LATEST_MESSAGE_CURSOR)
+
+    def test_tui_leader_mra_marks_all_loaded_conversations_read(self):
+        module = load_main_module()
+        calls = []
+
+        def fake_slack_request(method, payload, token, **kwargs):
+            calls.append((method, dict(payload), token, kwargs))
+            if method == "conversations.mark":
+                return {"ok": True}
+            self.fail(f"unexpected method {method}")
+
+        state = {
+            "conversations": [
+                {
+                    "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
+                    "latest": {"message": {"ts": "100.000100"}},
+                    "messages": [{"message": {"ts": "100.000100"}, "sort_ts": 100.000100, "unread": True}],
+                    "unread_ts": 100.000100,
+                },
+                {
+                    "info": {"channel_id": "G1", "surface": "group_dm", "conversation": "A, B"},
+                    "latest": {"message": {"ts": "101.000100"}},
+                    "messages": [{"message": {"ts": "101.000100"}, "sort_ts": 101.000100, "unread": True}],
+                    "unread_ts": 101.000100,
+                },
+            ],
+            "messages": [{"message": {"ts": "101.000100"}, "unread": True}],
+        }
+
+        with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+            self.assertTrue(module._tui_apply_leader_key(state, ord(","), "xoxp-token"))
+            self.assertTrue(module._tui_apply_leader_key(state, ord("m"), "xoxp-token"))
+            self.assertTrue(module._tui_apply_leader_key(state, ord("r"), "xoxp-token"))
+            self.assertTrue(module._tui_apply_leader_key(state, ord("a"), "xoxp-token"))
+
+        self.assertEqual([call[1] for call in calls], [{"channel": "D1", "ts": "100.000100"}, {"channel": "G1", "ts": "101.000100"}])
+        self.assertEqual(state["status"], "marked_read=2")
+        self.assertFalse(any(row["unread_ts"] for row in state["conversations"]))
+        self.assertFalse(any(entry["unread"] for entry in state["messages"]))
 
     def test_tui_send_composer_posts_to_selected_conversation(self):
         module = load_main_module()
@@ -1459,12 +1536,13 @@ class CliContractTests(unittest.TestCase):
             return factory
 
         class FakeCallbacks:
-            def __init__(self, load_conversations, load_messages, send_message, mark_read, open_file):
+            def __init__(self, load_conversations, load_messages, send_message, mark_read, open_file, mark_all_read=None):
                 self.load_conversations = load_conversations
                 self.load_messages = load_messages
                 self.send_message = send_message
                 self.mark_read = mark_read
                 self.open_file = open_file
+                self.mark_all_read = mark_all_read
 
         chat_api = {
             "ChatCallbacks": FakeCallbacks,
@@ -1532,6 +1610,28 @@ class CliContractTests(unittest.TestCase):
 
         with mock.patch.object(module, "slack_request", return_value={"ok": True}) as slack_request:
             self.assertTrue(callbacks.mark_read(conversations[0], messages))
+        slack_request.assert_called_once_with(
+            "conversations.mark",
+            {"channel": "D1", "ts": "100.000100"},
+            "xoxp-token",
+            use_form=True,
+            allow_error=True,
+        )
+        self.assertFalse(conversations[0].unread)
+        self.assertEqual(row["unread_ts"], 0)
+
+        row["info"]["surface"] = "group_dm"
+        row["unread_ts"] = 100.000100
+        messages[0].unread = True
+        conversations[0].unread = True
+        with mock.patch.object(module, "slack_request", return_value={"ok": False, "error": "missing_scope"}):
+            result = callbacks.mark_read(conversations[0], messages)
+        self.assertEqual(result, "missing_scope:add mpim:write to user token")
+        self.assertTrue(conversations[0].unread)
+        self.assertEqual(row["unread_ts"], 100.000100)
+
+        with mock.patch.object(module, "slack_request", return_value={"ok": True}) as slack_request:
+            self.assertEqual(callbacks.mark_all_read(conversations), 1)
         slack_request.assert_called_once_with(
             "conversations.mark",
             {"channel": "D1", "ts": "100.000100"},
