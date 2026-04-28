@@ -72,6 +72,11 @@ For the user-token fast path, use `search:read`, `im:read`, `im:history`,
 For `tui`, add `search:read`, `users:read`, `im:read`, `im:history`,
 `mpim:read`, `mpim:history`, `chat:write`, and `files:read` to the user token
 scopes.
+For the realtime `events` cache, keep those user-token scopes and enable Slack
+Socket Mode with an app-level `xapp-` token that has `connections:write`.
+Subscribe the Slack app to `message.im` and `message.mpim` events. The cache
+uses Socket Mode for new DM/GDM events and the user token for labels, history
+hydration, and periodic reconciliation.
 For event-driven Codex replies, enable Slack Socket Mode, generate an app-level
 `xapp-` token with `connections:write`, and subscribe the app to `app_mention`
 and `message.im` events.
@@ -174,6 +179,10 @@ DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation.
 Conversations open in normal mode, with the latest message focused. Press `i`
 to enter insert mode, type the message, Enter to send, and Esc to return to
 normal mode. Press `h` in normal mode to return to the conversation list. The
+insert-mode composer uses Erza-style editing: Ctrl-A/Ctrl-E for start/end,
+Ctrl-B/Ctrl-F for character movement, Alt-B/Alt-F for word movement,
+Ctrl-W/Ctrl-H for deleting the previous word/character, and Ctrl-D/Ctrl-K/Ctrl-U
+for deleting the next character/to end/full input. The
 conversation list shows participant names, omits message previews, and sorts
 conversations with the most recent unread message first before normal recency.
 The conversation screen hydrates the latest 100 messages for that DM/GDM,
@@ -190,7 +199,8 @@ when needed. Press `?` to toggle the shortcuts modal.
 
 When the installed Erza runtime is available, `slack tui` uses `erza.chat` for
 the shared conversation-list, boxed transcript, composer, and file-picker
-interaction model. The older local curses loop remains as a fallback for older
+interaction model, including the Erza matrix loading overlay for slow message
+loads and sends. The older local curses loop remains as a fallback for older
 installs or packaging environments without Erza on disk.
 
 Clear stale conversations and bot-like conversations:
@@ -226,6 +236,22 @@ When `codex_prompt` or `codex_wrapper_prompt` is configured, the service only
 sends Codex output that parses as a response directive such as
 `{respond:1,response:"..."}`. `{respond:0,response:""}` and unstructured text
 are treated as no-reply.
+
+Run the realtime DM/GDM cache service:
+
+```bash
+slack 1 events sync
+slack 1 events ti
+slack 1 events status
+slack 1 events logs 80
+```
+
+`events sync` warms the local per-preset SQLite cache from the latest visible
+DM/GDM conversations. `events ti` installs a user systemd service that uses the
+same Slack Socket Mode credentials to acknowledge `message.im` and
+`message.mpim` events as they arrive, while periodically reconciling recent
+history through the user token. `slack 1 ls` and `slack 1 tui` read this cache
+first, then fall back to Slack API reads when the cache is empty.
 
 `slack 1 ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
@@ -292,13 +318,19 @@ Example:
 - `codex ti` / `codex td`: Install or disable the user systemd service for the preset.
 - `codex st` / `codex logs [lines]` / `codex status`: Inspect the event service.
 - `codex reset-state`: Clear the local event-service state file.
+- `events sync`: Warm the local per-preset DM/GDM event cache from recent Slack history.
+- `events once`: Connect to Slack Socket Mode and cache one eligible DM/GDM event.
+- `events service`: Run the long-lived Socket Mode DM/GDM cache with periodic history reconciliation.
+- `events ti` / `events td`: Install or disable the user systemd service for the preset.
+- `events st` / `events logs [lines]` / `events status`: Inspect the realtime cache service.
+- `events reset-cache`: Clear the local per-preset event cache database.
 - `su <query>`: Search saved contact labels/emails and Slack workspace users.
 - `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
 - `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. When both tokens are configured, person targets use the user token so saved contacts land in Ryan's actual DMs; explicit channel/message targets use the normal post token path. Files and directories are supported; directories are zipped on the fly.
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.

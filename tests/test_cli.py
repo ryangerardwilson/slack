@@ -194,6 +194,24 @@ class CliContractTests(unittest.TestCase):
         scan = module.parse_args(["1", "codex", "scan"])
         self.assertEqual(scan["codex_action"], "scan")
 
+    def test_events_command_parses_cache_service_actions(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["1", "events", "service"])
+
+        self.assertEqual(parsed["preset"], "1")
+        self.assertEqual(parsed["command"], "events")
+        self.assertEqual(parsed["events_action"], "service")
+
+        logs = module.parse_args(["1", "events", "logs", "120"])
+        self.assertEqual(logs["events_action"], "logs")
+        self.assertEqual(logs["events_lines"], 120)
+
+        alias = module.parse_args(["1", "event", "sync"])
+        self.assertEqual(alias["preset"], "1")
+        self.assertEqual(alias["command"], "events")
+        self.assertEqual(alias["events_action"], "sync")
+
     def test_tui_command_parses_with_preset(self):
         module = load_main_module()
 
@@ -468,7 +486,10 @@ class CliContractTests(unittest.TestCase):
                         rc = module.main(["1", "tui"])
 
         self.assertEqual(rc, 0)
-        tui.assert_called_once_with("xoxp-token", "U1")
+        tui.assert_called_once()
+        args, kwargs = tui.call_args
+        self.assertEqual(args, ("xoxp-token", "U1"))
+        self.assertTrue(str(kwargs["cache_path"]).endswith("events-1.db"))
 
     def test_auth_stores_tokens_inside_config_accounts(self):
         module = load_main_module()
@@ -702,6 +723,7 @@ class CliContractTests(unittest.TestCase):
             sender_filter=None,
             contains_filter=None,
             time_limit=None,
+            cache_path=None,
         ):
             calls.update(
                 {
@@ -715,6 +737,7 @@ class CliContractTests(unittest.TestCase):
                     "sender_filter": sender_filter,
                     "contains_filter": contains_filter,
                     "time_limit": time_limit,
+                    "cache_path": cache_path,
                 }
             )
 
@@ -749,6 +772,7 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse(calls["open_mode"])
         self.assertIsNone(calls["label"])
         self.assertEqual(calls["sender_filter"], "maanas")
+        self.assertTrue(str(calls["cache_path"]).endswith("events-default.db"))
 
     def test_search_dms_uses_user_token_fast_path(self):
         module = load_main_module()
@@ -1044,6 +1068,114 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual([row["info"]["channel_id"] for row in rows], ["D-unread", "D-read"])
 
+    def test_event_cache_powers_tui_conversations_and_open_without_api(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "events.db"
+            entry = {
+                "sort_ts": 100.000100,
+                "email": "maanas@example.com",
+                "dm_id": "D1",
+                "channel_id": "D1",
+                "surface": "dm",
+                "conversation": "Maanas",
+                "members": "-",
+                "message": {"ts": "100.000100", "user": "U2", "text": "cached dm"},
+                "sender": {"id": "U2", "name": "Maanas", "email": "maanas@example.com", "label": "Maanas"},
+                "unread": True,
+            }
+            module._event_cache_store_entries(cache_path, [entry], history_loaded=True)
+
+            with mock.patch.object(module, "slack_request", side_effect=AssertionError("network not expected")):
+                rows = module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path)
+                messages = module._tui_load_messages(rows[0], "xoxp-token", "U1", force=True, cache_path=cache_path)
+
+        self.assertEqual(rows[0]["info"]["channel_id"], "D1")
+        self.assertTrue(rows[0]["history_loaded"])
+        self.assertEqual(messages[0]["message"]["text"], "cached dm")
+        self.assertTrue(messages[0]["unread"])
+
+    def test_ls_uses_event_cache_before_searching_slack(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "events.db"
+            module._event_cache_store_entries(
+                cache_path,
+                [
+                    {
+                        "sort_ts": 100.000100,
+                        "email": "maanas@example.com",
+                        "dm_id": "D1",
+                        "channel_id": "D1",
+                        "surface": "dm",
+                        "conversation": "Maanas",
+                        "members": "-",
+                        "message": {"ts": "100.000100", "user": "U2", "text": "cached dm"},
+                        "sender": {"id": "U2", "name": "Maanas", "email": "maanas@example.com", "label": "Maanas"},
+                        "unread": True,
+                    }
+                ],
+            )
+
+            with mock.patch.object(module, "search_dms", side_effect=AssertionError("search not expected")):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    module.list_dms(
+                        {},
+                        "xoxp-token",
+                        10,
+                        "all",
+                        "U1",
+                        False,
+                        cache_path=cache_path,
+                    )
+
+        output = stdout.getvalue()
+        self.assertIn("cached dm", output)
+        self.assertIn("message_id: D1:100.000100", output)
+
+    def test_socket_event_payload_is_cached_and_deduped(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "events.db"
+            account = {"events_cache_db": str(cache_path)}
+            payload = {
+                "event_id": "Ev1",
+                "event": {
+                    "type": "message",
+                    "channel": "D1",
+                    "channel_type": "im",
+                    "user": "U2",
+                    "text": "live dm",
+                    "ts": "101.000100",
+                },
+            }
+            summary = {
+                "channel_id": "D1",
+                "surface": "dm",
+                "conversation": "Maanas",
+                "email": "maanas@example.com",
+                "members": "-",
+                "user_id": "U2",
+                "info": {"last_read": "0"},
+            }
+            sender = {"id": "U2", "name": "Maanas", "email": "maanas@example.com", "label": "Maanas"}
+
+            with mock.patch.object(module, "_conversation_summary", return_value=summary):
+                with mock.patch.object(module, "_sender_info", return_value=sender):
+                    stored = module._event_cache_store_socket_payload(account, "1", payload, "xoxp-token", "U1", {}, {})
+                    duplicate = module._event_cache_store_socket_payload(account, "1", payload, "xoxp-token", "U1", {}, {})
+
+            entries = module._event_cache_load_entries(cache_path, "U1")
+
+        self.assertTrue(stored)
+        self.assertFalse(duplicate)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["message"]["text"], "live dm")
+        self.assertTrue(entries[0]["unread"])
+
     def test_tui_conversations_require_search_scope(self):
         module = load_main_module()
 
@@ -1235,6 +1367,82 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse(image_wait)
         self.assertEqual(text_command, ["vim", "/tmp/note.txt"])
         self.assertTrue(text_wait)
+
+    def test_tui_insert_mode_supports_emacs_style_composer_movement(self):
+        module = load_main_module()
+        state = {
+            "composer": "hello brave world",
+            "composer_cursor": len("hello brave world"),
+        }
+
+        state["composer_cursor"] = module._tui_move_cursor_backward_word(
+            state["composer"],
+            state["composer_cursor"],
+        )
+        self.assertEqual(state["composer_cursor"], len("hello brave "))
+
+        module._tui_delete_composer_previous_word(state)
+        self.assertEqual(state["composer"], "hello world")
+        self.assertEqual(state["composer_cursor"], len("hello "))
+
+        state["composer_cursor"] = 0
+        module._tui_insert_composer_text(state, ">")
+        self.assertEqual(state["composer"], ">hello world")
+        self.assertEqual(state["composer_cursor"], 1)
+
+        state["composer_cursor"] = len(state["composer"])
+        module._tui_delete_composer_backward(state)
+        self.assertEqual(state["composer"], ">hello worl")
+
+        state["composer_cursor"] = 0
+        state["composer_cursor"] = module._tui_move_cursor_forward_word(
+            state["composer"],
+            state["composer_cursor"],
+        )
+        self.assertEqual(state["composer_cursor"], len(">hello"))
+
+        text, cursor_col = module._tui_composer_prompt_view("abcdefghijklmnopqrstuvwxyz", 25, 12)
+        self.assertEqual(text, "> qrstuvwxyz")
+        self.assertEqual(cursor_col, 11)
+
+    def test_tui_fallback_composer_key_handler_supports_erza_input_controls(self):
+        module = load_main_module()
+
+        class FakeCurses:
+            KEY_BACKSPACE = 263
+            KEY_HOME = 262
+            KEY_END = 360
+            KEY_LEFT = 260
+            KEY_RIGHT = 261
+
+        state = {
+            "composer": "alpha beta",
+            "composer_cursor": len("alpha beta"),
+        }
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_B))
+        self.assertEqual(state["composer_cursor"], len("alpha bet"))
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_F))
+        self.assertEqual(state["composer_cursor"], len("alpha beta"))
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_H))
+        self.assertEqual(state["composer"], "alpha bet")
+        self.assertEqual(state["composer_cursor"], len("alpha bet"))
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_A))
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_D))
+        self.assertEqual(state["composer"], "lpha bet")
+        self.assertEqual(state["composer_cursor"], 0)
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_F))
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_K))
+        self.assertEqual(state["composer"], "l")
+        self.assertEqual(state["composer_cursor"], 1)
+
+        self.assertTrue(module._tui_apply_composer_edit_key(FakeCurses, state, module.CTRL_U))
+        self.assertEqual(state["composer"], "")
+        self.assertEqual(state["composer_cursor"], 0)
 
     def test_erza_chat_callbacks_adapt_slack_conversations_messages_and_files(self):
         module = load_main_module()

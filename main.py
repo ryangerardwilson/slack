@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,8 @@ COMMANDS = {
     "conf",
     "df",
     "dm",
+    "event",
+    "events",
     "ls",
     "mra",
     "o",
@@ -53,6 +56,9 @@ DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
 DEFAULT_APP_TOKEN_FILE = "~/.openclaw/credentials/slack-app-token"
 DEFAULT_LIST_LIMIT = 10
 DEFAULT_CODEX_ARGS = ["--skip-git-repo-check", "--full-auto"]
+EVENT_CACHE_SCHEMA_VERSION = 1
+EVENT_SYNC_CONVERSATION_LIMIT = 20
+EVENT_SOCKET_TIMEOUT_SECONDS = 70
 _RELATIVE_TIME_RE = re.compile(r"^(?P<amount>\d+)(?P<unit>[dwmy])$", re.IGNORECASE)
 _ISO_MONTH_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})$")
 _ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$")
@@ -119,6 +125,11 @@ features:
   slack 1 codex ti
   slack 1 codex status
   slack 1 codex logs 80
+
+  keep a local realtime DM/GDM event cache for faster ls/tui loads
+  # slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache
+  slack 1 events ti
+  slack 1 events status
 
   post a message from a configured Slack account to a contact, channel, or conversation
   # slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...]
@@ -316,6 +327,7 @@ def _top_level_usage():
         "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>] [-at <app_token>]] | "
         "slack <preset> ac <label> <email> | slack <preset> su <query> | slack conf | "
         "slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state | "
+        "slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache | "
         "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
         "slack <preset> reply <message_id> <message> [path...] | "
         "slack <preset> df <channel_id> <file_id> [output_path] | "
@@ -364,6 +376,8 @@ def parse_args(argv):
         "auth_list": False,
         "codex_action": None,
         "codex_lines": 80,
+        "events_action": None,
+        "events_lines": 80,
         "config": None,
         "version": False,
         "upgrade": False,
@@ -471,6 +485,26 @@ def parse_args(argv):
                 args["codex_action"] = action
                 return args
             raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
+        if token in {"events", "event"}:
+            args["command"] = "events"
+            if not remaining or remaining[0] in {"help", "-h"}:
+                args["events_action"] = "help"
+                return args
+            action = remaining[0]
+            rest = remaining[1:]
+            if action in {"once", "sync", "service", "ti", "td", "st", "status", "reset-cache"}:
+                if rest:
+                    raise SystemExit(f"Use: slack <preset> events {action}")
+                args["events_action"] = action
+                return args
+            if action == "logs":
+                if len(rest) > 1:
+                    raise SystemExit("Use: slack <preset> events logs [lines]")
+                if rest:
+                    args["events_lines"] = _parse_positive_int(rest[0], "events logs lines")
+                args["events_action"] = action
+                return args
+            raise SystemExit("Use: slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache")
         if token in {"post", "dm"}:
             if len(remaining) < 2:
                 raise SystemExit(
@@ -2462,19 +2496,32 @@ def list_dms(
     sender_filter=None,
     contains_filter=None,
     time_limit=None,
+    cache_path=None,
 ):
-    entries = search_dms(
+    entries = _event_cache_search_entries(
+        cache_path,
         contacts,
-        token,
         limit,
         filter_mode,
         self_user_id,
-        open_mode,
         label=label,
         sender_filter=sender_filter,
         contains_filter=contains_filter,
         time_limit=time_limit,
     )
+    if not entries:
+        entries = search_dms(
+            contacts,
+            token,
+            limit,
+            filter_mode,
+            self_user_id,
+            open_mode,
+            label=label,
+            sender_filter=sender_filter,
+            contains_filter=contains_filter,
+            time_limit=time_limit,
+        )
     if entries is None:
         entries = []
         if label:
@@ -2527,6 +2574,7 @@ def list_dms(
                 token,
                 use_form=True,
             )
+            _event_cache_mark_read(cache_path, channel_id, ts)
             marked += 1
         print(f"ls_opened messages={len(selected)} marked_conversations={marked}")
         return
@@ -2547,14 +2595,31 @@ TUI_SHORTCUT_LINES = [
     ("l / enter", "open conversation, file picker, or selected file"),
     ("h", "back or close modal"),
     ("i", "enter insert mode"),
+    ("ctrl+a/e", "composer start / end"),
+    ("ctrl+b/f", "composer previous / next character"),
+    ("alt+b/f", "composer previous / next word"),
+    ("ctrl+w/h", "delete previous word / character"),
+    ("ctrl+d/k/u", "delete next char / to end / full input"),
     ("esc", "return to normal mode or close modal"),
     ("r", "refresh"),
     ("g / gg / G", "jump top / bottom"),
     ("?", "toggle shortcuts"),
     ("q", "quit"),
 ]
+CTRL_A = 1
+CTRL_B = 2
+CTRL_D = 4
+CTRL_E = 5
+CTRL_F = 6
+CTRL_H = 8
+CTRL_K = 11
 CTRL_N = 14
 CTRL_P = 16
+CTRL_U = 21
+CTRL_W = 23
+TUI_ALT_B = -1001
+TUI_ALT_F = -1002
+TUI_INSERT_ESCAPE_SEQUENCE_TIMEOUT_MS = 25
 
 
 def _load_erza_chat_api():
@@ -2975,7 +3040,11 @@ def _tui_conversation_rows_from_entries(entries, history_loaded=False):
     return rows
 
 
-def _tui_load_conversations(token, self_user_id, limit=TUI_RECENT_MESSAGE_LIMIT):
+def _tui_load_conversations(token, self_user_id, limit=TUI_RECENT_MESSAGE_LIMIT, cache_path=None):
+    if cache_path:
+        cached_rows = _event_cache_load_conversation_rows(cache_path, self_user_id, limit)
+        if cached_rows:
+            return cached_rows
     return _tui_conversation_rows_from_entries(
         _tui_load_recent_entries(token, self_user_id, limit, hydrate=False),
         history_loaded=False,
@@ -3016,9 +3085,22 @@ def _tui_entries_from_history(conversation_row, token, self_user_id, limit=TUI_R
     return entries
 
 
-def _tui_load_messages(conversation_row, token=None, self_user_id=None, limit=None, force=False):
+def _tui_load_messages(conversation_row, token=None, self_user_id=None, limit=None, force=False, cache_path=None):
     if not conversation_row:
         return []
+    cache_channel_id = ((conversation_row.get("info") or {}).get("channel_id") or "")
+    if cache_path and cache_channel_id and conversation_row.get("history_loaded"):
+        cached_entries = _event_cache_load_channel_entries(
+            cache_path,
+            cache_channel_id,
+            self_user_id,
+            limit or TUI_RECENT_MESSAGE_LIMIT,
+        )
+        if cached_entries:
+            conversation_row["messages"] = cached_entries
+            conversation_row["latest"] = cached_entries[-1]
+            conversation_row["sort_ts"] = cached_entries[-1]["sort_ts"]
+            return cached_entries
     if token and self_user_id and (force or not conversation_row.get("history_loaded")):
         entries = _tui_entries_from_history(
             conversation_row,
@@ -3031,9 +3113,436 @@ def _tui_load_messages(conversation_row, token=None, self_user_id=None, limit=No
         if entries:
             conversation_row["latest"] = entries[-1]
             conversation_row["sort_ts"] = entries[-1]["sort_ts"]
+        if cache_path:
+            _event_cache_store_conversation_row(cache_path, conversation_row, history_loaded=True)
     entries = list(conversation_row.get("messages") or [])
     entries.sort(key=lambda item: item["sort_ts"])
     return entries
+
+
+def _event_cache_paths(account, preset):
+    slug = _safe_preset_slug(preset)
+    base = _state_base_dir()
+    return {
+        "db_file": _expand_path(account.get("events_cache_db") or account.get("event_cache_db") or str(base / f"events-{slug}.db")),
+        "log_file": _expand_path(account.get("events_log_file") or str(base / f"events-{slug}.log")),
+    }
+
+
+def _event_cache_db_path(account, preset):
+    return _event_cache_paths(account, preset)["db_file"]
+
+
+def _json_dumps(value):
+    return json.dumps(value if isinstance(value, (dict, list)) else {}, sort_keys=True, separators=(",", ":"))
+
+
+def _json_loads(value, default):
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return default
+    return parsed if isinstance(parsed, type(default)) else default
+
+
+def _ts_float(value, default=0.0):
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _event_cache_connect(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    _event_cache_init(conn)
+    return conn
+
+
+def _event_cache_init(conn):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS conversations (
+            channel_id TEXT PRIMARY KEY,
+            surface TEXT NOT NULL,
+            conversation TEXT NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            members TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            last_read TEXT NOT NULL,
+            info_json TEXT NOT NULL,
+            latest_ts REAL NOT NULL DEFAULT 0,
+            unread_ts REAL NOT NULL DEFAULT 0,
+            history_loaded INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            message_id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            sort_ts REAL NOT NULL,
+            user_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            unread INTEGER NOT NULL DEFAULT 0,
+            sender_json TEXT NOT NULL,
+            message_json TEXT NOT NULL,
+            event_id TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel_id, sort_ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_sort_ts ON messages(sort_ts DESC);
+        CREATE TABLE IF NOT EXISTS events (
+            event_id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            received_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS cache_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO cache_state(key, value) VALUES(?, ?)",
+        ("schema_version", str(EVENT_CACHE_SCHEMA_VERSION)),
+    )
+    conn.commit()
+
+
+def _event_cache_now():
+    return datetime.now().astimezone().isoformat()
+
+
+def _event_cache_get_state(conn, key, default=""):
+    row = conn.execute("SELECT value FROM cache_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def _event_cache_set_state(conn, key, value):
+    conn.execute("INSERT OR REPLACE INTO cache_state(key, value) VALUES(?, ?)", (key, str(value)))
+
+
+def _event_cache_claim_event(conn, event_id, channel_id, ts):
+    if not event_id:
+        return True
+    try:
+        conn.execute(
+            "INSERT INTO events(event_id, channel_id, ts, received_at) VALUES(?, ?, ?, ?)",
+            (event_id, channel_id or "", ts or "", _event_cache_now()),
+        )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def _event_cache_conversation_info_from_entry(entry):
+    return {
+        "channel_id": entry.get("channel_id") or entry.get("dm_id") or "-",
+        "surface": entry.get("surface") or "dm",
+        "conversation": entry.get("conversation") or entry.get("email") or entry.get("channel_id") or "-",
+        "name": entry.get("conversation") or entry.get("email") or entry.get("channel_id") or "-",
+        "email": entry.get("email") or "-",
+        "members": entry.get("members") or "-",
+        "user_id": entry.get("user_id") or (entry.get("sender") or {}).get("id") or "-",
+        "info": {"last_read": "0"},
+    }
+
+
+def _event_cache_merge_info(existing, incoming):
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if value not in (None, "", "-"):
+            merged[key] = value
+    nested = dict((existing or {}).get("info") or {})
+    nested.update((incoming or {}).get("info") or {})
+    if nested:
+        merged["info"] = nested
+    return merged
+
+
+def _event_cache_upsert_conversation(conn, info, *, latest_ts=0.0, unread_ts=0.0, history_loaded=False):
+    info = dict(info or {})
+    channel_id = info.get("channel_id") or info.get("id")
+    if not channel_id:
+        return
+    existing_row = conn.execute(
+        "SELECT * FROM conversations WHERE channel_id = ?",
+        (channel_id,),
+    ).fetchone()
+    existing_info = _json_loads(existing_row["info_json"], {}) if existing_row else {}
+    info = _event_cache_merge_info(existing_info, info)
+    surface = info.get("surface") or _conversation_surface(info, channel_id)
+    conversation = info.get("conversation") or info.get("name") or channel_id
+    name = info.get("name") or conversation
+    email = info.get("email") or "-"
+    members = str(info.get("members") or "-")
+    user_id = info.get("user_id") or "-"
+    last_read = str(info.get("last_read") or (info.get("info") or {}).get("last_read") or "0")
+    if existing_row:
+        latest_ts = max(float(existing_row["latest_ts"] or 0), float(latest_ts or 0))
+        unread_ts = max(float(existing_row["unread_ts"] or 0), float(unread_ts or 0))
+        history_loaded = bool(history_loaded or existing_row["history_loaded"])
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO conversations(
+            channel_id, surface, conversation, name, email, members, user_id,
+            last_read, info_json, latest_ts, unread_ts, history_loaded, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            channel_id,
+            surface,
+            conversation,
+            name,
+            email,
+            members,
+            user_id,
+            last_read,
+            _json_dumps(info),
+            float(latest_ts or 0),
+            float(unread_ts or 0),
+            1 if history_loaded else 0,
+            _event_cache_now(),
+        ),
+    )
+
+
+def _event_cache_upsert_entry(conn, entry, *, event_id=None, history_loaded=False):
+    message = entry.get("message") or {}
+    channel_id = entry.get("channel_id") or entry.get("dm_id")
+    ts = str(message.get("ts") or "")
+    if not channel_id or not ts:
+        return False
+    sort_ts = float(entry.get("sort_ts") or _ts_float(ts))
+    if event_id and not _event_cache_claim_event(conn, event_id, channel_id, ts):
+        return False
+    unread_ts = sort_ts if entry.get("unread") else 0.0
+    info = _event_cache_conversation_info_from_entry(entry)
+    _event_cache_upsert_conversation(
+        conn,
+        info,
+        latest_ts=sort_ts,
+        unread_ts=unread_ts,
+        history_loaded=history_loaded,
+    )
+    sender = entry.get("sender") or {}
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO messages(
+            message_id, channel_id, ts, sort_ts, user_id, text, unread,
+            sender_json, message_json, event_id, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id(channel_id, ts),
+            channel_id,
+            ts,
+            sort_ts,
+            str(message.get("user") or sender.get("id") or "-"),
+            message_text(message),
+            1 if entry.get("unread") else 0,
+            _json_dumps(sender),
+            _json_dumps(message),
+            event_id or "",
+            _event_cache_now(),
+        ),
+    )
+    return True
+
+
+def _event_cache_store_conversation_row(cache_path, row, *, history_loaded=None):
+    if not cache_path or not row:
+        return 0
+    with _event_cache_connect(cache_path) as conn:
+        info = dict(row.get("info") or {})
+        channel_id = info.get("channel_id")
+        latest_ts = float(row.get("sort_ts") or 0)
+        unread_ts = float(row.get("unread_ts") or 0)
+        _event_cache_upsert_conversation(
+            conn,
+            info,
+            latest_ts=latest_ts,
+            unread_ts=unread_ts,
+            history_loaded=bool(row.get("history_loaded")) if history_loaded is None else bool(history_loaded),
+        )
+        count = 0
+        for entry in row.get("messages") or []:
+            if channel_id and not entry.get("channel_id"):
+                entry = {**entry, "channel_id": channel_id, "dm_id": channel_id}
+            if _event_cache_upsert_entry(conn, entry, history_loaded=bool(history_loaded)):
+                count += 1
+        conn.commit()
+        return count
+
+
+def _event_cache_store_entries(cache_path, entries, *, event_id=None, history_loaded=False):
+    if not cache_path:
+        return 0
+    with _event_cache_connect(cache_path) as conn:
+        count = 0
+        for entry in entries or []:
+            if _event_cache_upsert_entry(conn, entry, event_id=event_id, history_loaded=history_loaded):
+                count += 1
+        conn.commit()
+        return count
+
+
+def _event_cache_entry_from_row(row, self_user_id=None):
+    info = _json_loads(row["info_json"], {})
+    channel_id = row["channel_id"]
+    info.setdefault("channel_id", channel_id)
+    info.setdefault("surface", row["conversation_surface"])
+    info.setdefault("conversation", row["conversation_label"])
+    info.setdefault("name", row["conversation_name"])
+    info.setdefault("email", row["conversation_email"])
+    info.setdefault("members", row["conversation_members"])
+    info.setdefault("user_id", row["conversation_user_id"])
+    message = _json_loads(row["message_json"], {})
+    sender = _json_loads(row["sender_json"], {})
+    unread = bool(row["unread"])
+    if self_user_id and message.get("user") == self_user_id:
+        unread = False
+    return {
+        "sort_ts": float(row["sort_ts"] or 0),
+        "email": info.get("email") or "-",
+        "dm_id": channel_id,
+        "channel_id": channel_id,
+        "surface": info.get("surface") or "dm",
+        "conversation": info.get("conversation") or info.get("name") or channel_id,
+        "user_id": info.get("user_id") or "-",
+        "members": info.get("members") or "-",
+        "message": message,
+        "sender": sender,
+        "unread": unread,
+    }
+
+
+def _event_cache_load_entries(cache_path, self_user_id=None, limit=100, channel_id=None):
+    path = Path(cache_path) if cache_path else None
+    if not path or not path.exists():
+        return []
+    query = """
+        SELECT messages.*, conversations.info_json, conversations.surface,
+               conversations.surface AS conversation_surface,
+               conversations.conversation AS conversation_label,
+               conversations.name AS conversation_name,
+               conversations.email AS conversation_email,
+               conversations.members AS conversation_members,
+               conversations.user_id AS conversation_user_id
+        FROM messages
+        JOIN conversations ON conversations.channel_id = messages.channel_id
+    """
+    params = []
+    if channel_id:
+        query += " WHERE messages.channel_id = ?"
+        params.append(channel_id)
+    query += " ORDER BY messages.sort_ts DESC LIMIT ?"
+    params.append(max(1, int(limit or 100)))
+    with _event_cache_connect(path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    entries = [_event_cache_entry_from_row(row, self_user_id) for row in rows]
+    entries.sort(key=lambda item: item["sort_ts"])
+    return entries
+
+
+def _event_cache_history_loaded_map(cache_path):
+    path = Path(cache_path) if cache_path else None
+    if not path or not path.exists():
+        return {}
+    with _event_cache_connect(path) as conn:
+        rows = conn.execute("SELECT channel_id, history_loaded FROM conversations").fetchall()
+    return {row["channel_id"]: bool(row["history_loaded"]) for row in rows}
+
+
+def _event_cache_load_conversation_rows(cache_path, self_user_id, limit=TUI_RECENT_MESSAGE_LIMIT):
+    entries = _event_cache_load_entries(cache_path, self_user_id, max(TUI_RECENT_MESSAGE_LIMIT * 5, limit * 5))
+    if not entries:
+        return []
+    rows = _tui_conversation_rows_from_entries(entries, history_loaded=False)
+    history_loaded = _event_cache_history_loaded_map(cache_path)
+    for row in rows:
+        channel_id = (row.get("info") or {}).get("channel_id")
+        row["history_loaded"] = bool(history_loaded.get(channel_id))
+    return rows[:limit]
+
+
+def _event_cache_load_channel_entries(cache_path, channel_id, self_user_id=None, limit=TUI_RECENT_MESSAGE_LIMIT):
+    return _event_cache_load_entries(cache_path, self_user_id, limit, channel_id=channel_id)
+
+
+def _event_cache_mark_read(cache_path, channel_id, latest_ts):
+    if not cache_path or not channel_id or not latest_ts:
+        return
+    with _event_cache_connect(cache_path) as conn:
+        conn.execute(
+            "UPDATE conversations SET unread_ts = 0, last_read = ?, updated_at = ? WHERE channel_id = ?",
+            (str(latest_ts), _event_cache_now(), channel_id),
+        )
+        conn.execute(
+            "UPDATE messages SET unread = 0, updated_at = ? WHERE channel_id = ? AND sort_ts <= ?",
+            (_event_cache_now(), channel_id, _ts_float(latest_ts)),
+        )
+        conn.commit()
+
+
+def _event_cache_label_matches(entry, contacts, label):
+    if not label:
+        return True
+    if label not in contacts:
+        raise SystemExit(f"Unknown contact label: {label}")
+    target = str(contacts[label] or "").strip().lower()
+    sender = entry.get("sender") or {}
+    haystack = " ".join(
+        str(value)
+        for value in (
+            label,
+            target,
+            entry.get("conversation"),
+            entry.get("email"),
+            entry.get("user_id"),
+            sender.get("id"),
+            sender.get("name"),
+            sender.get("email"),
+            sender.get("label"),
+        )
+        if value
+    ).lower()
+    return bool(target and target in haystack) or label.lower() in haystack
+
+
+def _event_cache_search_entries(
+    cache_path,
+    contacts,
+    limit,
+    filter_mode,
+    self_user_id,
+    label=None,
+    sender_filter=None,
+    contains_filter=None,
+    time_limit=None,
+):
+    entries = _event_cache_load_entries(cache_path, self_user_id, max(200, limit * 20))
+    if not entries:
+        return []
+    selected = []
+    for entry in sorted(entries, key=lambda item: item["sort_ts"], reverse=True):
+        if not _event_cache_label_matches(entry, contacts, label):
+            continue
+        if not _entry_passes_filters(entry, filter_mode, sender_filter, contains_filter, time_limit):
+            continue
+        selected.append(entry)
+        if len(selected) >= limit:
+            break
+    selected.sort(key=lambda item: item["sort_ts"])
+    return selected
 
 
 def _tui_selected_rendered_row(state):
@@ -3554,12 +4063,18 @@ def _tui_draw_conversation(stdscr, state, height, width):
         _safe_addstr(stdscr, 2 + row_offset, 2, _clip(row["text"], width - 3))
 
     composer = state.get("composer") or ""
-    prompt = f"> {composer}" if input_active else "[normal]"
     prompt_width = max(1, width - 1)
-    visible_prompt = prompt[-prompt_width:]
+    if input_active:
+        visible_prompt, cursor_col = _tui_composer_prompt_view(
+            composer,
+            state.get("composer_cursor") or 0,
+            prompt_width,
+        )
+    else:
+        visible_prompt, cursor_col = "[normal]", 0
     _safe_addstr(stdscr, height - 1, 0, _clip(visible_prompt, prompt_width))
     if input_active:
-        _safe_move(stdscr, height - 1, min(len(visible_prompt), prompt_width - 1))
+        _safe_move(stdscr, height - 1, cursor_col)
 
 
 def _tui_draw(stdscr, state):
@@ -3580,7 +4095,7 @@ def _tui_draw(stdscr, state):
     stdscr.refresh()
 
 
-def _tui_refresh_messages(state, token, self_user_id, keep_latest=True, force=False):
+def _tui_refresh_messages(state, token, self_user_id, keep_latest=True, force=False, cache_path=None):
     conversations = state.get("conversations") or []
     if not conversations:
         state["messages"] = []
@@ -3589,7 +4104,7 @@ def _tui_refresh_messages(state, token, self_user_id, keep_latest=True, force=Fa
         return
     conv_index = max(0, min(int(state.get("conversation_index") or 0), len(conversations) - 1))
     state["conversation_index"] = conv_index
-    messages = _tui_load_messages(conversations[conv_index], token, self_user_id, force=force)
+    messages = _tui_load_messages(conversations[conv_index], token, self_user_id, force=force, cache_path=cache_path)
     state["messages"] = messages
     state["message_index"] = max(0, len(messages) - 1) if keep_latest else 0
     state["message_scroll"] = 0
@@ -3652,14 +4167,14 @@ def _tui_mark_selected_conversation_read(state, token):
     return True
 
 
-def _tui_refresh(state, token, self_user_id):
+def _tui_refresh(state, token, self_user_id, cache_path=None):
     previous_channel = None
     conversations = state.get("conversations") or []
     if conversations:
         selected = conversations[max(0, min(int(state.get("conversation_index") or 0), len(conversations) - 1))]
         previous_channel = (selected.get("info") or {}).get("channel_id")
     state["status"] = "loading..."
-    conversations = _tui_load_conversations(token, self_user_id)
+    conversations = _tui_load_conversations(token, self_user_id, cache_path=cache_path)
     state["conversations"] = conversations
     state["conversation_index"] = 0
     if previous_channel:
@@ -3688,24 +4203,30 @@ def _tui_hydrate_selected_conversation_label(row, token):
     info["user"] = user
 
 
-def _tui_open_selected_conversation(state, token, self_user_id):
+def _tui_open_selected_conversation(state, token, self_user_id, cache_path=None):
     if not _tui_selected_conversation(state):
         state["status"] = "no conversations"
         return
     state["mode"] = "conversation"
     state["composer"] = ""
+    state["composer_cursor"] = 0
     state["input_active"] = False
     state["stick_bottom"] = False
     state["cursor_row"] = TUI_LATEST_MESSAGE_CURSOR
     state["modal"] = None
     state["status"] = "loading..."
     _tui_hydrate_selected_conversation_label(_tui_selected_conversation(state), token)
-    _tui_refresh_messages(state, token, self_user_id, force=True)
+    if cache_path:
+        _tui_refresh_messages(state, token, self_user_id, force=True, cache_path=cache_path)
+    else:
+        _tui_refresh_messages(state, token, self_user_id, force=True)
     state["input_active"] = False
     state["stick_bottom"] = False
     _tui_focus_latest_message(state)
     selected = _tui_selected_conversation(state)
     marked_read = _tui_mark_selected_conversation_read(state, token)
+    if selected:
+        _event_cache_mark_read(cache_path, (selected.get("info") or {}).get("channel_id"), _tui_latest_message_ts(state.get("messages") or []))
     message_count = len(state.get("messages") or [])
     mark_error = (selected or {}).get("mark_read_error")
     if mark_error:
@@ -3719,13 +4240,14 @@ def _tui_open_selected_conversation(state, token, self_user_id):
 def _tui_close_conversation(state):
     state["mode"] = "conversations"
     state["composer"] = ""
+    state["composer_cursor"] = 0
     state["input_active"] = False
     state["stick_bottom"] = False
     state["modal"] = None
     state["status"] = ""
 
 
-def _tui_send_composer_message(state, token, self_user_id):
+def _tui_send_composer_message(state, token, self_user_id, cache_path=None):
     text = (state.get("composer") or "").strip()
     if not text:
         return False
@@ -3735,9 +4257,22 @@ def _tui_send_composer_message(state, token, self_user_id):
         state["status"] = "no selected conversation"
         return False
     state["status"] = "sending..."
-    send_post(token, channel_id, text)
+    ts = send_post(token, channel_id, text)
+    if cache_path and ts:
+        info = (selected or {}).get("info") or {"channel_id": channel_id, "surface": "dm", "conversation": channel_id}
+        entry = _tui_entry_from_message(
+            {"ts": ts, "user": self_user_id, "text": text},
+            info,
+            {"id": self_user_id, "name": "me", "email": "-", "label": "me"},
+            self_user_id,
+        )
+        _event_cache_store_entries(cache_path, [entry])
     state["composer"] = ""
-    _tui_refresh_messages(state, token, self_user_id, force=True)
+    state["composer_cursor"] = 0
+    if cache_path:
+        _tui_refresh_messages(state, token, self_user_id, force=True, cache_path=cache_path)
+    else:
+        _tui_refresh_messages(state, token, self_user_id, force=True)
     state["status"] = "sent"
     return True
 
@@ -3747,6 +4282,155 @@ def _tui_delete_word(value):
     if not value:
         return ""
     return value[: value.rfind(" ") + 1] if " " in value else ""
+
+
+def _tui_decode_insert_key(stdscr, curses_module, state, key):
+    if key != 27 or state.get("mode") != "conversation" or not state.get("input_active"):
+        return key
+    try:
+        stdscr.timeout(TUI_INSERT_ESCAPE_SEQUENCE_TIMEOUT_MS)
+        next_key = stdscr.getch()
+    except curses_module.error:
+        next_key = -1
+    finally:
+        try:
+            stdscr.timeout(-1)
+        except curses_module.error:
+            pass
+    if next_key in (ord("b"), ord("B")):
+        return TUI_ALT_B
+    if next_key in (ord("f"), ord("F")):
+        return TUI_ALT_F
+    return key
+
+
+def _tui_clamp_composer_cursor(state):
+    composer = state.get("composer") or ""
+    cursor = int(state.get("composer_cursor") or 0)
+    cursor = max(0, min(cursor, len(composer)))
+    state["composer_cursor"] = cursor
+    return cursor
+
+
+def _tui_move_cursor_backward_word(value, cursor):
+    cursor = max(0, min(int(cursor or 0), len(value)))
+    while cursor > 0 and value[cursor - 1].isspace():
+        cursor -= 1
+    while cursor > 0 and not value[cursor - 1].isspace():
+        cursor -= 1
+    return cursor
+
+
+def _tui_move_cursor_forward_word(value, cursor):
+    cursor = max(0, min(int(cursor or 0), len(value)))
+    while cursor < len(value) and value[cursor].isspace():
+        cursor += 1
+    while cursor < len(value) and not value[cursor].isspace():
+        cursor += 1
+    return cursor
+
+
+def _tui_insert_composer_text(state, value):
+    composer = state.get("composer") or ""
+    cursor = _tui_clamp_composer_cursor(state)
+    state["composer"] = composer[:cursor] + value + composer[cursor:]
+    state["composer_cursor"] = cursor + len(value)
+
+
+def _tui_delete_composer_backward(state):
+    composer = state.get("composer") or ""
+    cursor = _tui_clamp_composer_cursor(state)
+    if cursor <= 0:
+        return
+    state["composer"] = composer[: cursor - 1] + composer[cursor:]
+    state["composer_cursor"] = cursor - 1
+
+
+def _tui_delete_composer_forward(state):
+    composer = state.get("composer") or ""
+    cursor = _tui_clamp_composer_cursor(state)
+    if cursor >= len(composer):
+        return
+    state["composer"] = composer[:cursor] + composer[cursor + 1 :]
+
+
+def _tui_delete_composer_previous_word(state):
+    composer = state.get("composer") or ""
+    cursor = _tui_clamp_composer_cursor(state)
+    new_cursor = _tui_move_cursor_backward_word(composer, cursor)
+    state["composer"] = composer[:new_cursor] + composer[cursor:]
+    state["composer_cursor"] = new_cursor
+
+
+def _tui_composer_prompt_view(composer, cursor, width):
+    prompt = "> "
+    width = max(1, int(width or 1))
+    if width <= len(prompt):
+        return prompt[:width], min(width - 1, len(prompt))
+    field_width = max(1, width - len(prompt))
+    cursor = max(0, min(int(cursor or 0), len(composer)))
+    max_start = max(len(composer) - field_width, 0)
+    if len(composer) <= field_width:
+        start = 0
+    elif cursor >= field_width:
+        start = min(cursor - field_width + 1, max_start)
+    else:
+        start = 0
+    visible = composer[start : start + field_width]
+    text = prompt + visible
+    cursor_col = len(prompt) + cursor - start
+    return _clip(text, width), min(max(cursor_col, 0), width - 1)
+
+
+def _tui_apply_composer_edit_key(curses_module, state, key):
+    if key in (curses_module.KEY_BACKSPACE, CTRL_H, 127):
+        _tui_delete_composer_backward(state)
+        return True
+    if key == CTRL_D:
+        _tui_delete_composer_forward(state)
+        return True
+    if key == CTRL_U:
+        state["composer"] = ""
+        state["composer_cursor"] = 0
+        return True
+    if key == CTRL_K:
+        cursor = _tui_clamp_composer_cursor(state)
+        state["composer"] = (state.get("composer") or "")[:cursor]
+        return True
+    if key == CTRL_W:
+        _tui_delete_composer_previous_word(state)
+        return True
+    if key in (CTRL_A, curses_module.KEY_HOME):
+        state["composer_cursor"] = 0
+        return True
+    if key in (CTRL_E, curses_module.KEY_END):
+        state["composer_cursor"] = len(state.get("composer") or "")
+        return True
+    if key in (CTRL_B, curses_module.KEY_LEFT):
+        state["composer_cursor"] = max(0, _tui_clamp_composer_cursor(state) - 1)
+        return True
+    if key in (CTRL_F, curses_module.KEY_RIGHT):
+        state["composer_cursor"] = min(
+            len(state.get("composer") or ""),
+            _tui_clamp_composer_cursor(state) + 1,
+        )
+        return True
+    if key == TUI_ALT_B:
+        state["composer_cursor"] = _tui_move_cursor_backward_word(
+            state.get("composer") or "",
+            state.get("composer_cursor") or 0,
+        )
+        return True
+    if key == TUI_ALT_F:
+        state["composer_cursor"] = _tui_move_cursor_forward_word(
+            state.get("composer") or "",
+            state.get("composer_cursor") or 0,
+        )
+        return True
+    if 32 <= key <= 126:
+        _tui_insert_composer_text(state, chr(key))
+        return True
+    return False
 
 
 def _tui_open_modal_asset_in_editor(stdscr, curses_module, state, token):
@@ -3856,11 +4540,11 @@ def _erza_message_entries(messages):
     return entries
 
 
-def _build_erza_chat_callbacks(token, self_user_id, chat_api):
+def _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=None):
     row_cache = {}
 
     def load_conversations():
-        rows = _tui_load_conversations(token, self_user_id, TUI_RECENT_MESSAGE_LIMIT)
+        rows = _tui_load_conversations(token, self_user_id, TUI_RECENT_MESSAGE_LIMIT, cache_path=cache_path)
         row_cache.clear()
         conversations = []
         for row in rows:
@@ -3874,7 +4558,7 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api):
         if not row:
             return []
         _tui_hydrate_selected_conversation_label(row, token)
-        entries = _tui_load_messages(row, token, self_user_id, force=True)
+        entries = _tui_load_messages(row, token, self_user_id, force=True, cache_path=cache_path)
         conversation.label = _tui_conversation_label(row)
         conversation.date = _erza_conversation_date(row)
         conversation.unread = bool(row.get("unread_ts"))
@@ -3884,7 +4568,18 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api):
         channel_id = _erza_channel_id(conversation)
         if not channel_id:
             raise SystemExit("no selected conversation")
-        return send_post(token, channel_id, text)
+        ts = send_post(token, channel_id, text)
+        if cache_path and ts:
+            row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id) or {}
+            info = row.get("info") or {"channel_id": channel_id, "surface": "dm", "conversation": channel_id}
+            entry = _tui_entry_from_message(
+                {"ts": ts, "user": self_user_id, "text": text},
+                info,
+                {"id": self_user_id, "name": "me", "email": "-", "label": "me"},
+                self_user_id,
+            )
+            _event_cache_store_entries(cache_path, [entry])
+        return ts
 
     def mark_read(conversation, messages):
         row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
@@ -3905,6 +4600,7 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api):
             return False
         row.pop("mark_read_error", None)
         _tui_clear_conversation_unread(row, entries, latest_ts)
+        _event_cache_mark_read(cache_path, channel_id, latest_ts)
         conversation.unread = False
         return True
 
@@ -3927,11 +4623,11 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api):
     )
 
 
-def _run_erza_chat_tui(token, self_user_id):
+def _run_erza_chat_tui(token, self_user_id, cache_path=None):
     chat_api = _load_erza_chat_api()
     if chat_api is None:
         return False
-    callbacks = _build_erza_chat_callbacks(token, self_user_id, chat_api)
+    callbacks = _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=cache_path)
     chat_api["run_chat_app"](callbacks, title="slack tui")
     return True
 
@@ -3960,7 +4656,7 @@ def _setup_tui_curses(stdscr, curses_module):
         pass
 
 
-def _run_tui(stdscr, token, self_user_id):
+def _run_tui(stdscr, token, self_user_id, cache_path=None):
     global curses
     import curses
 
@@ -3982,13 +4678,15 @@ def _run_tui(stdscr, token, self_user_id):
         "modal": None,
         "show_help": False,
         "composer": "",
+        "composer_cursor": 0,
         "status": "loading...",
     }
     _tui_draw(stdscr, state)
-    _tui_refresh(state, token, self_user_id)
+    _tui_refresh(state, token, self_user_id, cache_path=cache_path)
     while True:
         _tui_draw(stdscr, state)
         key = stdscr.getch()
+        key = _tui_decode_insert_key(stdscr, curses, state, key)
         if state.get("show_help"):
             if key in (ord("?"), 27, ord("h")):
                 state["show_help"] = False
@@ -4021,7 +4719,7 @@ def _run_tui(stdscr, token, self_user_id):
             if key in (ord("r"),):
                 state["status"] = "loading..."
                 _tui_draw(stdscr, state)
-                _tui_refresh(state, token, self_user_id)
+                _tui_refresh(state, token, self_user_id, cache_path=cache_path)
                 continue
             if key in (ord("g"),):
                 state["conversation_index"] = 0
@@ -4040,12 +4738,11 @@ def _run_tui(stdscr, token, self_user_id):
                 state["mode"] = "conversation"
                 state["status"] = "loading..."
                 _tui_draw(stdscr, state)
-                _tui_open_selected_conversation(state, token, self_user_id)
+                _tui_open_selected_conversation(state, token, self_user_id, cache_path=cache_path)
                 continue
             continue
 
         input_active = bool(state.get("input_active", False))
-        composer = state.get("composer") or ""
         if input_active:
             if key in (27,):
                 state["input_active"] = False
@@ -4053,25 +4750,17 @@ def _run_tui(stdscr, token, self_user_id):
                 _tui_focus_latest_message(state)
                 continue
             if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                composer = state.get("composer") or ""
                 if composer.strip():
                     state["status"] = "sending..."
                     _tui_draw(stdscr, state)
                     try:
-                        _tui_send_composer_message(state, token, self_user_id)
+                        _tui_send_composer_message(state, token, self_user_id, cache_path=cache_path)
                     except SystemExit as exc:
                         state["status"] = str(exc)
                 continue
-            if key in (curses.KEY_BACKSPACE, 8, 127):
-                state["composer"] = composer[:-1]
+            if _tui_apply_composer_edit_key(curses, state, key):
                 continue
-            if key in (21,):  # ctrl-u
-                state["composer"] = ""
-                continue
-            if key in (23,):  # ctrl-w
-                state["composer"] = _tui_delete_word(composer)
-                continue
-            if 32 <= key <= 126:
-                state["composer"] = composer + chr(key)
             continue
 
         if key in (ord("q"),):
@@ -4086,7 +4775,7 @@ def _run_tui(stdscr, token, self_user_id):
         if key in (ord("r"),):
             state["status"] = "loading..."
             _tui_draw(stdscr, state)
-            _tui_refresh_messages(state, token, self_user_id, force=True)
+            _tui_refresh_messages(state, token, self_user_id, force=True, cache_path=cache_path)
             state["input_active"] = False
             state["stick_bottom"] = False
             _tui_focus_latest_message(state)
@@ -4119,14 +4808,14 @@ def _run_tui(stdscr, token, self_user_id):
             continue
 
 
-def run_slack_tui(token, self_user_id):
+def run_slack_tui(token, self_user_id, cache_path=None):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise SystemExit("slack tui requires an interactive terminal.")
-    if _run_erza_chat_tui(token, self_user_id):
+    if _run_erza_chat_tui(token, self_user_id, cache_path=cache_path):
         return
     import curses
 
-    curses.wrapper(_run_tui, token, self_user_id)
+    curses.wrapper(_run_tui, token, self_user_id, cache_path)
 
 
 def open_dm_messages(dm_id, token, self_user_id):
@@ -4704,6 +5393,329 @@ def _eligible_slack_event(event, bot_user_id):
             "raw": event,
         }
     return None
+
+
+def _event_cache_eligible_message(event):
+    if not isinstance(event, dict) or event.get("type") != "message":
+        return None
+    if event.get("subtype"):
+        return None
+    channel_id = event.get("channel") or ""
+    channel_type = event.get("channel_type") or ""
+    if channel_type not in {"im", "mpim"} and not str(channel_id).startswith(("D", "G")):
+        return None
+    return event
+
+
+def _event_cache_entry_from_event(event, token, self_user_id, user_cache, conversation_cache):
+    event = _event_cache_eligible_message(event)
+    if not event:
+        return None
+    channel_id = event.get("channel")
+    if not channel_id:
+        return None
+    if channel_id not in conversation_cache:
+        channel_hint = {
+            "id": channel_id,
+            "is_im": event.get("channel_type") == "im" or str(channel_id).startswith("D"),
+            "is_mpim": event.get("channel_type") == "mpim",
+        }
+        try:
+            conversation_cache[channel_id] = _conversation_summary(channel_hint, token, user_cache)
+        except SystemExit:
+            conversation_cache[channel_id] = _fallback_conversation_summary(channel_id, channel_hint)
+    info = conversation_cache[channel_id]
+    if info.get("surface") not in {"dm", "group_dm"}:
+        return None
+    try:
+        sender = _sender_info(event, token, user_cache)
+    except SystemExit:
+        user_id = event.get("user") or "-"
+        sender = {"id": user_id, "name": user_id, "email": "-", "label": user_id}
+    return _tui_entry_from_message(event, info, sender, self_user_id)
+
+
+def _event_cache_store_socket_payload(account, preset, payload, token, self_user_id, user_cache, conversation_cache):
+    event = payload.get("event") if isinstance(payload, dict) else {}
+    entry = _event_cache_entry_from_event(event, token, self_user_id, user_cache, conversation_cache)
+    if not entry:
+        return False
+    cache_path = _event_cache_db_path(account, preset)
+    with _event_cache_connect(cache_path) as conn:
+        stored = _event_cache_upsert_entry(
+            conn,
+            entry,
+            event_id=str(payload.get("event_id") or ""),
+            history_loaded=False,
+        )
+        if stored:
+            _event_cache_set_state(conn, "last_event_at", _event_cache_now())
+            _event_cache_set_state(conn, "last_channel", entry.get("channel_id") or "")
+            _event_cache_set_state(conn, "last_message_ts", (entry.get("message") or {}).get("ts") or "")
+            count = int(_event_cache_get_state(conn, "processed_events", "0") or 0) + 1
+            _event_cache_set_state(conn, "processed_events", str(count))
+        conn.commit()
+    if stored:
+        _events_log(account, preset, f"cached channel={entry.get('channel_id')} ts={(entry.get('message') or {}).get('ts')}")
+    return stored
+
+
+def events_sync_once(account, preset, *, quiet=False):
+    token = resolve_list_token(account)
+    auth_data = auth_test(token)
+    self_user_id = auth_data.get("user_id")
+    if not self_user_id:
+        raise SystemExit("Unable to determine the current Slack user.")
+    cache_path = _event_cache_db_path(account, preset)
+    rows = _tui_load_conversations(token, self_user_id, TUI_RECENT_MESSAGE_LIMIT, cache_path=None)
+    stored_messages = 0
+    for row in rows:
+        _event_cache_store_conversation_row(cache_path, row, history_loaded=bool(row.get("history_loaded")))
+    for row in rows[: _account_int(account, "events_sync_conversation_limit", EVENT_SYNC_CONVERSATION_LIMIT)]:
+        _tui_hydrate_selected_conversation_label(row, token)
+        entries = _tui_load_messages(row, token, self_user_id, force=True, cache_path=cache_path)
+        row["messages"] = entries
+        row["history_loaded"] = True
+        stored_messages += _event_cache_store_conversation_row(cache_path, row, history_loaded=True)
+    with _event_cache_connect(cache_path) as conn:
+        _event_cache_set_state(conn, "last_sync_at", _event_cache_now())
+        _event_cache_set_state(conn, "last_sync_conversations", str(len(rows)))
+        _event_cache_set_state(conn, "last_sync_messages", str(stored_messages))
+        conn.commit()
+    if not quiet:
+        print(f"events_sync conversations={len(rows)} messages={stored_messages} cache={cache_path}")
+    return stored_messages
+
+
+def _events_socket_loop(account, preset, *, once=False):
+    app_token = resolve_app_token(account)
+    token = resolve_list_token(account)
+    auth_data = auth_test(token)
+    self_user_id = auth_data.get("user_id")
+    if not self_user_id:
+        raise SystemExit("Unable to determine the current Slack user.")
+    socket = _open_socket_mode_connection(app_token)
+    socket.settimeout(_account_int(account, "events_socket_timeout_seconds", EVENT_SOCKET_TIMEOUT_SECONDS))
+    user_cache = {}
+    conversation_cache = {}
+    processed = 0
+    try:
+        while True:
+            try:
+                raw = socket.recv()
+            except Exception as exc:
+                if once:
+                    _events_log(account, preset, f"once timeout/no event: {exc}")
+                    return processed
+                raise
+            if not raw:
+                continue
+            try:
+                envelope = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            envelope_type = envelope.get("type")
+            if envelope_type == "hello":
+                _events_log(account, preset, "socket connected")
+                continue
+            if envelope_type == "disconnect":
+                _events_log(account, preset, f"socket disconnect: {envelope.get('reason') or '-'}")
+                return processed
+            if "envelope_id" in envelope:
+                _ack_socket_envelope(socket, envelope)
+            if envelope_type != "events_api":
+                continue
+            payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+            if _event_cache_store_socket_payload(account, preset, payload, token, self_user_id, user_cache, conversation_cache):
+                processed += 1
+            if once and processed:
+                return processed
+    finally:
+        try:
+            socket.close()
+        except Exception:
+            pass
+
+
+def events_once(account, preset):
+    processed = _events_socket_loop(account, preset, once=True)
+    print(f"events_once processed={processed}")
+    return 0
+
+
+def _events_log(account, preset, message):
+    paths = _event_cache_paths(account, preset)
+    paths["log_file"].parent.mkdir(parents=True, exist_ok=True)
+    with paths["log_file"].open("a", encoding="utf-8") as handle:
+        handle.write(f"{datetime.now().astimezone().isoformat()} {message}\n")
+
+
+def _events_sync_loop(account, preset, stop_event):
+    interval = max(60, _account_int(account, "events_sync_seconds", 600))
+    while not stop_event.is_set():
+        try:
+            events_sync_once(account, preset, quiet=True)
+            _events_log(account, preset, "sync complete")
+        except SystemExit as exc:
+            _events_log(account, preset, f"sync error: {exc}")
+        except Exception as exc:
+            _events_log(account, preset, f"sync error: {exc}")
+        stop_event.wait(interval)
+
+
+def events_service(account, preset):
+    account = dict(account)
+    account["_preset"] = preset
+    _events_log(account, preset, "service started")
+    stop_event = threading.Event()
+    syncer = threading.Thread(target=_events_sync_loop, args=(account, preset, stop_event), daemon=True)
+    syncer.start()
+    while True:
+        try:
+            _events_socket_loop(account, preset, once=False)
+        except SystemExit as exc:
+            _events_log(account, preset, f"service error: {exc}")
+            time.sleep(5)
+        except Exception as exc:
+            _events_log(account, preset, f"service error: {exc}")
+            time.sleep(5)
+
+
+def _events_unit_name(preset):
+    return f"slack-events-{_safe_preset_slug(preset)}"
+
+
+def _events_unit_path(preset):
+    return _systemd_unit_dir() / f"{_events_unit_name(preset)}.service"
+
+
+def write_events_unit(preset):
+    unit_path = _events_unit_path(preset)
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                f"Description=Slack preset {preset} realtime DM/GDM event cache",
+                "After=network-online.target",
+                "",
+                "[Service]",
+                "Type=simple",
+                "Environment=PYTHONUNBUFFERED=1",
+                f"ExecStart=%h/.local/bin/slack {preset} events service",
+                "Restart=always",
+                "RestartSec=5",
+                "Nice=5",
+                "",
+                "[Install]",
+                "WantedBy=default.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    if shutil.which("systemd-analyze") is not None:
+        result = subprocess.run(
+            ["systemd-analyze", "--user", "verify", str(unit_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise SystemExit(f"systemd unit validation failed: {detail}")
+    return unit_path
+
+
+def events_install_service(preset):
+    write_events_unit(preset)
+    unit = f"{_events_unit_name(preset)}.service"
+    _systemctl_user("daemon-reload")
+    _systemctl_user("enable", "--now", unit)
+    _systemctl_user("restart", unit)
+    print(f"service enabled: {unit}")
+    return 0
+
+
+def events_disable_service(preset):
+    write_events_unit(preset)
+    unit = f"{_events_unit_name(preset)}.service"
+    _systemctl_user("disable", "--now", unit, check=False)
+    _systemctl_user("daemon-reload")
+    print(f"service disabled: {unit}")
+    return 0
+
+
+def events_service_status(preset):
+    result = subprocess.run(
+        ["systemctl", "--user", "status", f"{_events_unit_name(preset)}.service", "--no-pager"],
+        check=False,
+        text=True,
+    )
+    return result.returncode
+
+
+def events_service_logs(preset, lines=80):
+    result = subprocess.run(
+        ["journalctl", "--user", "-u", f"{_events_unit_name(preset)}.service", "-n", str(lines), "--no-pager"],
+        check=False,
+        text=True,
+    )
+    return result.returncode
+
+
+def events_status(account, preset):
+    paths = _event_cache_paths(account, preset)
+    state = {
+        "cache": str(paths["db_file"]),
+        "log": str(paths["log_file"]),
+        "exists": paths["db_file"].exists(),
+        "has_app_token": bool(_has_token(account, "app") or _read_token_file(DEFAULT_APP_TOKEN_FILE)),
+        "has_user_token": bool(_has_token(account, "user") or _read_token_file(DEFAULT_USER_TOKEN_FILE)),
+    }
+    if paths["db_file"].exists():
+        with _event_cache_connect(paths["db_file"]) as conn:
+            state.update(
+                {
+                    "conversations": conn.execute("SELECT COUNT(*) AS count FROM conversations").fetchone()["count"],
+                    "messages": conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()["count"],
+                    "processed_events": _event_cache_get_state(conn, "processed_events", "0"),
+                    "last_event_at": _event_cache_get_state(conn, "last_event_at", ""),
+                    "last_sync_at": _event_cache_get_state(conn, "last_sync_at", ""),
+                    "last_channel": _event_cache_get_state(conn, "last_channel", ""),
+                    "last_message_ts": _event_cache_get_state(conn, "last_message_ts", ""),
+                }
+            )
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
+def events_reset_cache(account, preset):
+    paths = _event_cache_paths(account, preset)
+    for path in (paths["db_file"], Path(str(paths["db_file"]) + "-wal"), Path(str(paths["db_file"]) + "-shm")):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    _events_log(account, preset, "cache reset")
+    print(f"cache reset: {paths['db_file']}")
+    return 0
+
+
+def print_events_help():
+    print(
+        """Usage:
+  slack <preset> events sync
+  slack <preset> events once
+  slack <preset> events service
+  slack <preset> events ti
+  slack <preset> events td
+  slack <preset> events st
+  slack <preset> events logs [lines]
+  slack <preset> events status
+  slack <preset> events reset-cache"""
+    )
+    return 0
 
 
 def _event_query(event_info):
@@ -5408,6 +6420,31 @@ def _dispatch(argv: list[str]) -> int:
             return codex_reset_state(account, preset)
         raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
 
+    if args["command"] == "events":
+        action = args["events_action"]
+        if action == "help":
+            return print_events_help()
+        if action == "sync":
+            events_sync_once(account, preset)
+            return 0
+        if action == "once":
+            return events_once(account, preset)
+        if action == "service":
+            return events_service(account, preset)
+        if action == "ti":
+            return events_install_service(preset)
+        if action == "td":
+            return events_disable_service(preset)
+        if action == "st":
+            return events_service_status(preset)
+        if action == "logs":
+            return events_service_logs(preset, args["events_lines"])
+        if action == "status":
+            return events_status(account, preset)
+        if action == "reset-cache":
+            return events_reset_cache(account, preset)
+        raise SystemExit("Use: slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache")
+
     if args["command"] == "ls" and args["ls_registry"]:
         list_registered_contacts(contacts)
         return 0
@@ -5435,6 +6472,7 @@ def _dispatch(argv: list[str]) -> int:
             sender_filter=args["ls_from"],
             contains_filter=args["ls_contains"],
             time_limit=args["ls_time_limit"],
+            cache_path=_event_cache_db_path(account, preset),
         )
         return 0
 
@@ -5444,7 +6482,7 @@ def _dispatch(argv: list[str]) -> int:
         self_user_id = auth_data.get("user_id")
         if not self_user_id:
             raise SystemExit("Unable to determine the current Slack user.")
-        run_slack_tui(token, self_user_id)
+        run_slack_tui(token, self_user_id, cache_path=_event_cache_db_path(account, preset))
         return 0
 
     token = resolve_token(account)
