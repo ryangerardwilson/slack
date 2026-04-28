@@ -250,8 +250,11 @@ slack 1 events logs 80
 DM/GDM conversations. `events ti` installs a user systemd service that uses the
 same Slack Socket Mode credentials to acknowledge `message.im` and
 `message.mpim` events as they arrive, while periodically reconciling recent
-history through the user token. `slack 1 ls` and `slack 1 tui` read this cache
-first, then fall back to Slack API reads when the cache is empty.
+history through the user token. If the matching `slack-codex-<preset>` service
+is already active, the events service stays sync-only to avoid opening a second
+Socket Mode connection for the same Slack app; the Codex socket service writes
+the same cache while handling Slack events. `slack 1 ls` and `slack 1 tui` read
+this cache first, then fall back to Slack API reads when the cache is empty.
 
 `slack 1 ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,

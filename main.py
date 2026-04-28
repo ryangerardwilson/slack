@@ -59,6 +59,7 @@ DEFAULT_CODEX_ARGS = ["--skip-git-repo-check", "--full-auto"]
 EVENT_CACHE_SCHEMA_VERSION = 1
 EVENT_SYNC_CONVERSATION_LIMIT = 20
 EVENT_SOCKET_TIMEOUT_SECONDS = 70
+EVENT_SYNC_SECONDS = 120
 _RELATIVE_TIME_RE = re.compile(r"^(?P<amount>\d+)(?P<unit>[dwmy])$", re.IGNORECASE)
 _ISO_MONTH_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})$")
 _ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$")
@@ -5460,6 +5461,51 @@ def _event_cache_store_socket_payload(account, preset, payload, token, self_user
     return stored
 
 
+def _event_cache_socket_context(account, preset, log_func=None):
+    if account.get("events_cache_from_socket") is False:
+        return None
+    try:
+        token = resolve_list_token(account)
+        auth_data = auth_test(token)
+    except SystemExit as exc:
+        if log_func:
+            log_func(account, preset, f"event cache disabled: {exc}")
+        return None
+    self_user_id = auth_data.get("user_id")
+    if not self_user_id:
+        if log_func:
+            log_func(account, preset, "event cache disabled: missing Slack user id")
+        return None
+    return {
+        "token": token,
+        "self_user_id": self_user_id,
+        "user_cache": {},
+        "conversation_cache": {},
+    }
+
+
+def _event_cache_store_socket_payload_from_context(account, preset, payload, context, log_func=None):
+    if not context:
+        return False
+    try:
+        return _event_cache_store_socket_payload(
+            account,
+            preset,
+            payload,
+            context["token"],
+            context["self_user_id"],
+            context["user_cache"],
+            context["conversation_cache"],
+        )
+    except SystemExit as exc:
+        if log_func:
+            log_func(account, preset, f"event cache error: {exc}")
+    except Exception as exc:
+        if log_func:
+            log_func(account, preset, f"event cache error: {exc}")
+    return False
+
+
 def events_sync_once(account, preset, *, quiet=False):
     token = resolve_list_token(account)
     auth_data = auth_test(token)
@@ -5551,7 +5597,7 @@ def _events_log(account, preset, message):
 
 
 def _events_sync_loop(account, preset, stop_event):
-    interval = max(60, _account_int(account, "events_sync_seconds", 600))
+    interval = max(60, _account_int(account, "events_sync_seconds", EVENT_SYNC_SECONDS))
     while not stop_event.is_set():
         try:
             events_sync_once(account, preset, quiet=True)
@@ -5570,9 +5616,15 @@ def events_service(account, preset):
     stop_event = threading.Event()
     syncer = threading.Thread(target=_events_sync_loop, args=(account, preset, stop_event), daemon=True)
     syncer.start()
+    codex_unit = f"{_codex_unit_name(preset)}.service"
+    if _systemd_user_service_active(codex_unit):
+        _events_log(account, preset, f"socket skipped: {codex_unit} active; using sync-only cache service")
+        while True:
+            stop_event.wait(3600)
     while True:
         try:
             _events_socket_loop(account, preset, once=False)
+            time.sleep(5)
         except SystemExit as exc:
             _events_log(account, preset, f"service error: {exc}")
             time.sleep(5)
@@ -5992,7 +6044,12 @@ def user_dm_scan_once(account, preset, *, unread_only=True):
                     self_user_id,
                 )
             )
-    return _process_user_dm_entries(account, preset, entries[:limit])
+    selected_entries = entries[:limit]
+    try:
+        _event_cache_store_entries(_event_cache_db_path(account, preset), selected_entries)
+    except Exception as exc:
+        _codex_log(account, preset, f"event cache scan error: {exc}")
+    return _process_user_dm_entries(account, preset, selected_entries)
 
 
 def _state_float(state, key, default=0.0):
@@ -6118,6 +6175,7 @@ def _socket_loop(account, preset, *, once=False):
     bot_token = resolve_token(account)
     auth_data = auth_test(bot_token)
     bot_user_id = auth_data.get("user_id") or ""
+    event_cache_context = _event_cache_socket_context(account, preset, _codex_log)
     socket = _open_socket_mode_connection(app_token)
     timeout_seconds = _account_int(account, "socket_timeout_seconds", 70)
     socket.settimeout(timeout_seconds)
@@ -6149,6 +6207,13 @@ def _socket_loop(account, preset, *, once=False):
             if envelope_type != "events_api":
                 continue
             payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+            _event_cache_store_socket_payload_from_context(
+                account,
+                preset,
+                payload,
+                event_cache_context,
+                _codex_log,
+            )
             event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
             event_info = _eligible_slack_event(event, bot_user_id)
             if not event_info:
@@ -6253,6 +6318,11 @@ def _systemctl_user(*args, check=True):
         detail = (result.stderr or result.stdout).strip()
         raise SystemExit(f"systemctl --user {' '.join(args)} failed: {detail}")
     return result
+
+
+def _systemd_user_service_active(unit):
+    result = _systemctl_user("is-active", unit, check=False)
+    return result.returncode == 0 and (result.stdout or "").strip() == "active"
 
 
 def write_codex_unit(preset):
