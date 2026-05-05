@@ -1080,12 +1080,100 @@ class CliContractTests(unittest.TestCase):
 
             with mock.patch.object(module, "slack_request", side_effect=AssertionError("network not expected")):
                 rows = module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path)
-                messages = module._tui_load_messages(rows[0], "xoxp-token", "U1", force=True, cache_path=cache_path)
+                messages = module._tui_load_messages(rows[0], "xoxp-token", "U1", cache_path=cache_path)
 
         self.assertEqual(rows[0]["info"]["channel_id"], "D1")
         self.assertTrue(rows[0]["history_loaded"])
         self.assertEqual(messages[0]["message"]["text"], "cached dm")
         self.assertTrue(messages[0]["unread"])
+
+    def test_tui_force_open_refreshes_latest_before_marking_read(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "events.db"
+            module._event_cache_store_entries(
+                cache_path,
+                [
+                    {
+                        "sort_ts": 100.000100,
+                        "email": "-",
+                        "dm_id": "D1",
+                        "channel_id": "D1",
+                        "surface": "dm",
+                        "conversation": "Maanas",
+                        "members": "-",
+                        "message": {"ts": "100.000100", "user": "U2", "text": "cached dm"},
+                        "sender": {"id": "-", "name": "Maanas", "email": "-", "label": "Maanas"},
+                        "unread": True,
+                    }
+                ],
+                history_loaded=True,
+            )
+            calls = []
+
+            def fake_slack_request(method, payload, token, **kwargs):
+                calls.append((method, dict(payload), kwargs))
+                if method == "conversations.history":
+                    return {
+                        "ok": True,
+                        "messages": [
+                            {"ts": "101.000100", "user": "U2", "text": "fresh latest"},
+                            {"ts": "100.000100", "user": "U2", "text": "cached dm"},
+                        ],
+                    }
+                if method == "conversations.mark":
+                    return {"ok": True}
+                self.fail(f"unexpected method {method}")
+
+            state = {
+                "mode": "conversations",
+                "conversation_index": 0,
+                "conversations": module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path),
+            }
+
+            with mock.patch.object(module, "slack_request", side_effect=fake_slack_request):
+                with mock.patch.object(
+                    module,
+                    "_sender_info",
+                    return_value={"id": "U2", "name": "Maanas", "email": "-", "label": "Maanas"},
+                ):
+                    module._tui_open_selected_conversation(state, "xoxp-token", "U1", cache_path=cache_path)
+
+            mark_call = next(call for call in calls if call[0] == "conversations.mark")
+            reloaded_rows = module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path)
+            reloaded_messages = module._event_cache_load_channel_entries(cache_path, "D1", "U1")
+
+        self.assertEqual(mark_call[1], {"channel": "D1", "ts": "101.000100"})
+        self.assertEqual(reloaded_rows[0]["unread_ts"], 0)
+        self.assertFalse(any(entry["unread"] for entry in reloaded_messages))
+        self.assertEqual(reloaded_messages[-1]["message"]["text"], "fresh latest")
+
+    def test_cache_read_marker_prevents_stale_unread_resurrection(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "events.db"
+            stale_entry = {
+                "sort_ts": 100.000100,
+                "email": "maanas@example.com",
+                "dm_id": "D1",
+                "channel_id": "D1",
+                "surface": "dm",
+                "conversation": "Maanas",
+                "members": "-",
+                "message": {"ts": "100.000100", "user": "U2", "text": "cached dm"},
+                "sender": {"id": "U2", "name": "Maanas", "email": "maanas@example.com", "label": "Maanas"},
+                "unread": True,
+            }
+            module._event_cache_store_entries(cache_path, [stale_entry], history_loaded=True)
+            module._event_cache_mark_read(cache_path, "D1", "100.000100")
+            module._event_cache_store_entries(cache_path, [stale_entry], history_loaded=True)
+            rows = module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path)
+            messages = module._event_cache_load_channel_entries(cache_path, "D1", "U1")
+
+        self.assertEqual(rows[0]["unread_ts"], 0)
+        self.assertFalse(messages[0]["unread"])
 
     def test_ls_uses_event_cache_before_searching_slack(self):
         module = load_main_module()

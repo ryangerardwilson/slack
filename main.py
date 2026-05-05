@@ -3053,7 +3053,7 @@ def _tui_load_messages(conversation_row, token=None, self_user_id=None, limit=No
     if not conversation_row:
         return []
     cache_channel_id = ((conversation_row.get("info") or {}).get("channel_id") or "")
-    if cache_path and cache_channel_id and conversation_row.get("history_loaded"):
+    if cache_path and cache_channel_id and conversation_row.get("history_loaded") and not force:
         cached_entries = _event_cache_load_channel_entries(
             cache_path,
             cache_channel_id,
@@ -3234,7 +3234,7 @@ def _event_cache_upsert_conversation(conn, info, *, latest_ts=0.0, unread_ts=0.0
     info = dict(info or {})
     channel_id = info.get("channel_id") or info.get("id")
     if not channel_id:
-        return
+        return 0.0
     existing_row = conn.execute(
         "SELECT * FROM conversations WHERE channel_id = ?",
         (channel_id,),
@@ -3247,11 +3247,22 @@ def _event_cache_upsert_conversation(conn, info, *, latest_ts=0.0, unread_ts=0.0
     email = info.get("email") or "-"
     members = str(info.get("members") or "-")
     user_id = info.get("user_id") or "-"
-    last_read = str(info.get("last_read") or (info.get("info") or {}).get("last_read") or "0")
+    last_read_value = max(
+        _ts_float(info.get("last_read")),
+        _ts_float((info.get("info") or {}).get("last_read") if isinstance(info.get("info"), dict) else 0),
+        _ts_float(existing_row["last_read"] if existing_row else 0),
+    )
+    last_read = f"{last_read_value:.6f}" if last_read_value else "0"
+    info["last_read"] = last_read
+    nested = dict(info.get("info") or {})
+    nested["last_read"] = last_read
+    info["info"] = nested
     if existing_row:
         latest_ts = max(float(existing_row["latest_ts"] or 0), float(latest_ts or 0))
         unread_ts = max(float(existing_row["unread_ts"] or 0), float(unread_ts or 0))
         history_loaded = bool(history_loaded or existing_row["history_loaded"])
+    if unread_ts and float(unread_ts or 0) <= last_read_value:
+        unread_ts = 0.0
     conn.execute(
         """
         INSERT OR REPLACE INTO conversations(
@@ -3276,6 +3287,7 @@ def _event_cache_upsert_conversation(conn, info, *, latest_ts=0.0, unread_ts=0.0
             _event_cache_now(),
         ),
     )
+    return last_read_value
 
 
 def _event_cache_upsert_entry(conn, entry, *, event_id=None, history_loaded=False):
@@ -3289,13 +3301,14 @@ def _event_cache_upsert_entry(conn, entry, *, event_id=None, history_loaded=Fals
         return False
     unread_ts = sort_ts if entry.get("unread") else 0.0
     info = _event_cache_conversation_info_from_entry(entry)
-    _event_cache_upsert_conversation(
+    last_read_value = _event_cache_upsert_conversation(
         conn,
         info,
         latest_ts=sort_ts,
         unread_ts=unread_ts,
         history_loaded=history_loaded,
     )
+    unread = bool(entry.get("unread") and sort_ts > last_read_value)
     sender = entry.get("sender") or {}
     conn.execute(
         """
@@ -3312,7 +3325,7 @@ def _event_cache_upsert_entry(conn, entry, *, event_id=None, history_loaded=Fals
             sort_ts,
             str(message.get("user") or sender.get("id") or "-"),
             message_text(message),
-            1 if entry.get("unread") else 0,
+            1 if unread else 0,
             _json_dumps(sender),
             _json_dumps(message),
             event_id or "",
@@ -3372,6 +3385,8 @@ def _event_cache_entry_from_row(row, self_user_id=None):
     message = _json_loads(row["message_json"], {})
     sender = _json_loads(row["sender_json"], {})
     unread = bool(row["unread"])
+    if _ts_float(row["sort_ts"]) <= _ts_float(row["conversation_last_read"]):
+        unread = False
     if self_user_id and message.get("user") == self_user_id:
         unread = False
     return {
@@ -3400,7 +3415,8 @@ def _event_cache_load_entries(cache_path, self_user_id=None, limit=100, channel_
                conversations.name AS conversation_name,
                conversations.email AS conversation_email,
                conversations.members AS conversation_members,
-               conversations.user_id AS conversation_user_id
+               conversations.user_id AS conversation_user_id,
+               conversations.last_read AS conversation_last_read
         FROM messages
         JOIN conversations ON conversations.channel_id = messages.channel_id
     """
@@ -3446,9 +3462,18 @@ def _event_cache_mark_read(cache_path, channel_id, latest_ts):
     if not cache_path or not channel_id or not latest_ts:
         return
     with _event_cache_connect(cache_path) as conn:
+        row = conn.execute(
+            "SELECT info_json FROM conversations WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        info = _json_loads(row["info_json"], {}) if row else {}
+        info["last_read"] = str(latest_ts)
+        nested = dict(info.get("info") or {})
+        nested["last_read"] = str(latest_ts)
+        info["info"] = nested
         conn.execute(
-            "UPDATE conversations SET unread_ts = 0, last_read = ?, updated_at = ? WHERE channel_id = ?",
-            (str(latest_ts), _event_cache_now(), channel_id),
+            "UPDATE conversations SET unread_ts = 0, last_read = ?, info_json = ?, updated_at = ? WHERE channel_id = ?",
+            (str(latest_ts), _json_dumps(info), _event_cache_now(), channel_id),
         )
         conn.execute(
             "UPDATE messages SET unread = 0, updated_at = ? WHERE channel_id = ? AND sort_ts <= ?",
