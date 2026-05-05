@@ -202,7 +202,9 @@ When the installed Erza runtime is available, `slack tui` uses `erza.chat` for
 the shared conversation-list, boxed transcript, composer, and file-picker
 interaction model, including the Erza matrix loading overlay for slow message
 loads and sends. The older local curses loop remains as a fallback for older
-installs or packaging environments without Erza on disk.
+installs or packaging environments without Erza on disk, and uses the same
+matrix-style loading overlay for conversation loads, refreshes, sends, and
+back-to-list transitions.
 
 Clear stale conversations and bot-like conversations:
 

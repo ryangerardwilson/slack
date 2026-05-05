@@ -2549,6 +2549,15 @@ def list_dms(
 TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
 TUI_LATEST_MESSAGE_CURSOR = -1
+TUI_LOADING_FRAME_INTERVAL_MS = 90
+TUI_LOADING_MIN_VISIBLE_SECONDS = 0.24
+TUI_LOADING_MODAL_MAX_WIDTH = 28
+TUI_LOADING_MATRIX_ROWS = 4
+TUI_LOADING_MATRIX_MIN_WIDTH = 14
+TUI_LOADING_MATRIX_MAX_WIDTH = 18
+TUI_LOADING_MATRIX_HEADS = "01+x"
+TUI_LOADING_MATRIX_TRAILS = ":."
+TUI_LOADING_MATRIX_NOISE = ".'"
 ERZA_CHAT_SOURCE_PATHS = (
     "~/.erza/app/src",
     "~/Infra/erza/app/src",
@@ -3978,8 +3987,124 @@ def _tui_draw_file_modal(stdscr, state):
     )
 
 
+def _tui_loading_overlay_lines(frame_index, inner_width):
+    matrix_width = max(min(inner_width, TUI_LOADING_MATRIX_MAX_WIDTH), TUI_LOADING_MATRIX_MIN_WIDTH)
+    rows = [[" "] * matrix_width for _ in range(TUI_LOADING_MATRIX_ROWS)]
+    column_count = 4 if matrix_width < 18 else 5
+    positions = [
+        max(
+            1,
+            min(
+                matrix_width - 2,
+                round((matrix_width - 1) * (index + 1) / (column_count + 1)),
+            ),
+        )
+        for index in range(column_count)
+    ]
+    for column_index, position in enumerate(positions):
+        cycle = TUI_LOADING_MATRIX_ROWS + 4 + (column_index % 2)
+        head_row = ((frame_index + column_index * 2) % cycle) - 2
+        head_char = TUI_LOADING_MATRIX_HEADS[
+            (frame_index + column_index * 3) % len(TUI_LOADING_MATRIX_HEADS)
+        ]
+        if 0 <= head_row < TUI_LOADING_MATRIX_ROWS:
+            rows[head_row][position] = head_char
+        for trail_index, trail_char in enumerate(TUI_LOADING_MATRIX_TRAILS, start=1):
+            trail_row = head_row - trail_index
+            if 0 <= trail_row < TUI_LOADING_MATRIX_ROWS and rows[trail_row][position] == " ":
+                rows[trail_row][position] = trail_char
+    for noise_index in range(2):
+        x = (frame_index * (3 + noise_index) + noise_index * 5) % matrix_width
+        y = ((frame_index // 2) + noise_index * 2) % TUI_LOADING_MATRIX_ROWS
+        if rows[y][x] == " ":
+            rows[y][x] = TUI_LOADING_MATRIX_NOISE[
+                (frame_index + noise_index) % len(TUI_LOADING_MATRIX_NOISE)
+            ]
+    for row_index, row in enumerate(rows):
+        if all(char == " " for char in row):
+            x = (frame_index * 2 + row_index * 3) % matrix_width
+            row[x] = TUI_LOADING_MATRIX_TRAILS[row_index % len(TUI_LOADING_MATRIX_TRAILS)]
+    return ["".join(row) for row in rows]
+
+
+def _tui_draw_loading_overlay(stdscr, frame_index=0):
+    height, width = stdscr.getmaxyx()
+    inner_width = min(TUI_LOADING_MODAL_MAX_WIDTH - 4, max(width - 10, TUI_LOADING_MATRIX_MIN_WIDTH))
+    inner_width = min(inner_width, TUI_LOADING_MATRIX_MAX_WIDTH)
+    box_width = inner_width + 4
+    modal_x = max((width - box_width) // 2, 0)
+    lines = _tui_loading_overlay_lines(frame_index, inner_width)
+    modal_height = len(lines) + 2
+    top_y = max((height - modal_height) // 2, 0)
+    border = "+" + "-" * max(box_width - 2, 0) + "+"
+    _safe_addstr(stdscr, top_y, modal_x, border)
+    for index, line in enumerate(lines, start=1):
+        row_y = top_y + index
+        if row_y >= height:
+            break
+        _safe_addstr(stdscr, row_y, modal_x, "| " + " " * inner_width + " |")
+        _safe_addstr(stdscr, row_y, modal_x + 2 + max((inner_width - len(line)) // 2, 0), line)
+    bottom_y = top_y + modal_height - 1
+    if bottom_y < height:
+        _safe_addstr(stdscr, bottom_y, modal_x, border)
+    stdscr.refresh()
+
+
+def _tui_draw_loading_frame(stdscr, state, message="Loading", frame_index=0):
+    previous_message = state.get("loading_message")
+    state["loading_message"] = message
+    try:
+        _tui_draw(stdscr, state)
+        _tui_draw_loading_overlay(stdscr, frame_index=frame_index)
+    finally:
+        if previous_message is None:
+            state.pop("loading_message", None)
+        else:
+            state["loading_message"] = previous_message
+
+
+def _tui_run_with_loading(stdscr, state, operation, message="Loading"):
+    if stdscr is None:
+        return operation()
+    outcome = {}
+    finished = threading.Event()
+
+    def worker():
+        try:
+            outcome["result"] = operation()
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    frame_index = 0
+    minimum_visible_until = time.monotonic() + TUI_LOADING_MIN_VISIBLE_SECONDS
+    _tui_draw_loading_frame(stdscr, state, message=message, frame_index=frame_index)
+    while True:
+        now = time.monotonic()
+        if finished.is_set() and now >= minimum_visible_until:
+            break
+        if finished.is_set():
+            wait_seconds = min(TUI_LOADING_FRAME_INTERVAL_MS / 1000, max(0.0, minimum_visible_until - now))
+        else:
+            wait_seconds = TUI_LOADING_FRAME_INTERVAL_MS / 1000
+        if wait_seconds > 0:
+            finished.wait(wait_seconds)
+        frame_index += 1
+        _tui_draw_loading_frame(stdscr, state, message=message, frame_index=frame_index)
+
+    thread.join()
+    error = outcome.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    return outcome.get("result")
+
+
 def _tui_draw_conversations(stdscr, state, height, width):
-    title = f"slack tui  conversations  {state.get('status') or ''}".strip()
+    status = "" if state.get("loading_message") else state.get("status") or ""
+    title = f"slack tui  conversations  {status}".strip()
     _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
     _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
     conversations = state.get("conversations") or []
@@ -4008,10 +4133,10 @@ def _tui_draw_conversations(stdscr, state, height, width):
 def _tui_draw_conversation(stdscr, state, height, width):
     selected_conv = _tui_selected_conversation(state)
     label = _tui_conversation_label(selected_conv)
-    status = state.get("status") or ""
+    status = "" if state.get("loading_message") else state.get("status") or ""
     messages = state.get("messages") or []
     input_active = bool(state.get("input_active", False))
-    rendered = _tui_render_message_rows(messages, width - 3)
+    rendered = [] if state.get("loading_message") and not messages else _tui_render_message_rows(messages, width - 3)
     message_height = max(1, height - 4)
     state["message_view_height"] = message_height
     state["rendered_rows"] = rendered
@@ -4042,7 +4167,7 @@ def _tui_draw_conversation(stdscr, state, height, width):
         scroll = max(0, min(int(state.get("message_scroll") or 0), max_scroll))
     state["message_scroll"] = scroll
     state["rendered_line_count"] = len(rendered)
-    transcript_status = _tui_transcript_status(messages, len(rendered), message_height, scroll)
+    transcript_status = "" if state.get("loading_message") else _tui_transcript_status(messages, len(rendered), message_height, scroll)
     title = f"slack tui  {label}  {transcript_status}  {status}".strip()
     _safe_addstr(stdscr, 0, 0, _clip(title, width - 1))
     _safe_addstr(stdscr, 1, 0, "-" * max(0, width - 1))
@@ -4770,8 +4895,12 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
         "leader_buffer": "",
         "status": "loading...",
     }
-    _tui_draw(stdscr, state)
-    _tui_refresh(state, token, self_user_id, cache_path=cache_path)
+    _tui_run_with_loading(
+        stdscr,
+        state,
+        lambda: _tui_refresh(state, token, self_user_id, cache_path=cache_path),
+        message="Loading conversations",
+    )
     while True:
         _tui_draw(stdscr, state)
         key = stdscr.getch()
@@ -4808,9 +4937,12 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
             if key in (ord("q"), 27):
                 return
             if key in (ord("r"),):
-                state["status"] = "loading..."
-                _tui_draw(stdscr, state)
-                _tui_refresh(state, token, self_user_id, cache_path=cache_path)
+                _tui_run_with_loading(
+                    stdscr,
+                    state,
+                    lambda: _tui_refresh(state, token, self_user_id, cache_path=cache_path),
+                    message="Loading conversations",
+                )
                 continue
             if key in (ord("g"),):
                 state["conversation_index"] = 0
@@ -4826,10 +4958,12 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
                 state["conversation_index"] = max(0, int(state.get("conversation_index") or 0) - 1)
                 continue
             if key in (ord("l"), ord("\n"), curses.KEY_ENTER, 10, 13):
-                state["mode"] = "conversation"
-                state["status"] = "loading..."
-                _tui_draw(stdscr, state)
-                _tui_open_selected_conversation(state, token, self_user_id, cache_path=cache_path)
+                _tui_run_with_loading(
+                    stdscr,
+                    state,
+                    lambda: _tui_open_selected_conversation(state, token, self_user_id, cache_path=cache_path),
+                    message="Loading messages",
+                )
                 continue
             continue
 
@@ -4843,10 +4977,13 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
             if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
                 composer = state.get("composer") or ""
                 if composer.strip():
-                    state["status"] = "sending..."
-                    _tui_draw(stdscr, state)
                     try:
-                        _tui_send_composer_message(state, token, self_user_id, cache_path=cache_path)
+                        _tui_run_with_loading(
+                            stdscr,
+                            state,
+                            lambda: _tui_send_composer_message(state, token, self_user_id, cache_path=cache_path),
+                            message="Sending message",
+                        )
                     except SystemExit as exc:
                         state["status"] = str(exc)
                 continue
@@ -4860,19 +4997,21 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
             continue
         if key in (ord("h"),):
             _tui_close_conversation(state)
+            _tui_run_with_loading(stdscr, state, lambda: None, message="Loading conversations")
             continue
         if key in (ord("i"),):
             state["input_active"] = True
             state["stick_bottom"] = True
             continue
         if key in (ord("r"),):
-            state["status"] = "loading..."
-            _tui_draw(stdscr, state)
-            _tui_refresh_messages(state, token, self_user_id, force=True, cache_path=cache_path)
-            state["input_active"] = False
-            state["stick_bottom"] = False
-            _tui_focus_latest_message(state)
-            state["status"] = f"{len(state.get('messages') or [])} messages"
+            def refresh_messages():
+                _tui_refresh_messages(state, token, self_user_id, force=True, cache_path=cache_path)
+                state["input_active"] = False
+                state["stick_bottom"] = False
+                _tui_focus_latest_message(state)
+                state["status"] = f"{len(state.get('messages') or [])} messages"
+
+            _tui_run_with_loading(stdscr, state, refresh_messages, message="Loading messages")
             continue
         if key in (ord("j"), curses.KEY_DOWN):
             _tui_move_cursor_row(state, 1)

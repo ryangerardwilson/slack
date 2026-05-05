@@ -1997,6 +1997,89 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(any(x == 0 and text == ">" for _, x, text, _ in added))
         self.assertFalse(any(attr for *_, attr in added))
 
+    def test_tui_fallback_loading_frame_uses_matrix_overlay(self):
+        module = load_main_module()
+        added = []
+
+        class FakeWindow:
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getmaxyx(self):
+                return (14, 80)
+
+            def addnstr(self, y, x, text, limit, attr=0):
+                added.append((y, x, text[:limit], attr))
+
+            def move(self, y, x):
+                pass
+
+        state = {
+            "mode": "conversation",
+            "conversations": [
+                {"info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"}}
+            ],
+            "conversation_index": 0,
+            "messages": [],
+            "input_active": False,
+            "cursor_row": module.TUI_LATEST_MESSAGE_CURSOR,
+            "message_scroll": 0,
+            "stick_bottom": False,
+            "composer": "",
+            "status": "loading...",
+        }
+
+        module._tui_draw_loading_frame(FakeWindow(), state, message="Loading messages", frame_index=3)
+
+        rendered = "\n".join(item[2] for item in added)
+        self.assertIn("+", rendered)
+        self.assertTrue(any(char in rendered for char in "01+x:."))
+        self.assertNotIn("No messages.", rendered)
+        self.assertNotIn("loading...", rendered.lower())
+        self.assertNotIn("loading_message", state)
+
+    def test_tui_fallback_loading_runner_keeps_overlay_visible(self):
+        module = load_main_module()
+        frames = []
+
+        class FakeWindow:
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getmaxyx(self):
+                return (14, 80)
+
+            def addnstr(self, y, x, text, limit, attr=0):
+                pass
+
+            def move(self, y, x):
+                pass
+
+        state = {"mode": "conversations", "conversations": [], "status": "loading..."}
+
+        def fake_frame(_stdscr, _state, message="Loading", frame_index=0):
+            frames.append((message, frame_index))
+
+        with mock.patch.object(module, "TUI_LOADING_MIN_VISIBLE_SECONDS", 0.08):
+            with mock.patch.object(module, "TUI_LOADING_FRAME_INTERVAL_MS", 40):
+                with mock.patch.object(module, "_tui_draw_loading_frame", side_effect=fake_frame):
+                    result = module._tui_run_with_loading(
+                        FakeWindow(),
+                        state,
+                        lambda: "ok",
+                        message="Loading messages",
+                    )
+
+        self.assertEqual(result, "ok")
+        self.assertGreaterEqual(len(frames), 2)
+        self.assertEqual(frames[0], ("Loading messages", 0))
+
     def test_tui_curses_setup_uses_transparent_default_background(self):
         module = load_main_module()
         calls = []
