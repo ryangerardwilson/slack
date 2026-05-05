@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zipfile
@@ -2041,9 +2042,10 @@ class CliContractTests(unittest.TestCase):
         self.assertNotIn("loading...", rendered.lower())
         self.assertNotIn("loading_message", state)
 
-    def test_tui_fallback_loading_runner_keeps_overlay_visible(self):
+    def test_tui_fallback_loading_runner_clears_overlay_when_done(self):
         module = load_main_module()
         frames = []
+        final_draws = []
 
         class FakeWindow:
             def erase(self):
@@ -2066,9 +2068,49 @@ class CliContractTests(unittest.TestCase):
         def fake_frame(_stdscr, _state, message="Loading", frame_index=0):
             frames.append((message, frame_index))
 
-        with mock.patch.object(module, "TUI_LOADING_MIN_VISIBLE_SECONDS", 0.08):
-            with mock.patch.object(module, "TUI_LOADING_FRAME_INTERVAL_MS", 40):
-                with mock.patch.object(module, "_tui_draw_loading_frame", side_effect=fake_frame):
+        def slow_operation():
+            time.sleep(0.05)
+            return "ok"
+
+        with mock.patch.object(module, "TUI_LOADING_FRAME_INTERVAL_MS", 20):
+            with mock.patch.object(module, "_tui_draw_loading_frame", side_effect=fake_frame):
+                with mock.patch.object(module, "_tui_draw", side_effect=lambda *_args: final_draws.append(True)):
+                    result = module._tui_run_with_loading(
+                        FakeWindow(),
+                        state,
+                        slow_operation,
+                        message="Loading messages",
+                    )
+
+        self.assertEqual(result, "ok")
+        self.assertTrue(frames)
+        self.assertEqual(frames[0], ("Loading messages", 0))
+        self.assertEqual(final_draws, [True])
+
+    def test_tui_fallback_loading_runner_does_not_animate_completed_work(self):
+        module = load_main_module()
+        frames = []
+        final_draws = []
+
+        class FakeWindow:
+            def getmaxyx(self):
+                return (14, 80)
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+            def join(self):
+                pass
+
+        state = {"mode": "conversations", "conversations": [], "status": "ready"}
+
+        with mock.patch.object(module.threading, "Thread", ImmediateThread):
+            with mock.patch.object(module, "_tui_draw_loading_frame", side_effect=lambda *_args, **_kwargs: frames.append(True)):
+                with mock.patch.object(module, "_tui_draw", side_effect=lambda *_args: final_draws.append(True)):
                     result = module._tui_run_with_loading(
                         FakeWindow(),
                         state,
@@ -2077,8 +2119,8 @@ class CliContractTests(unittest.TestCase):
                     )
 
         self.assertEqual(result, "ok")
-        self.assertGreaterEqual(len(frames), 2)
-        self.assertEqual(frames[0], ("Loading messages", 0))
+        self.assertEqual(frames, [])
+        self.assertEqual(final_draws, [True])
 
     def test_tui_curses_setup_uses_transparent_default_background(self):
         module = load_main_module()

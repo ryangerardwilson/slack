@@ -2550,7 +2550,6 @@ TUI_RECENT_MESSAGE_LIMIT = 100
 TUI_HYDRATE_WORKERS = 8
 TUI_LATEST_MESSAGE_CURSOR = -1
 TUI_LOADING_FRAME_INTERVAL_MS = 90
-TUI_LOADING_MIN_VISIBLE_SECONDS = 0.24
 TUI_LOADING_MODAL_MAX_WIDTH = 28
 TUI_LOADING_MATRIX_ROWS = 4
 TUI_LOADING_MATRIX_MIN_WIDTH = 14
@@ -4080,23 +4079,16 @@ def _tui_run_with_loading(stdscr, state, operation, message="Loading"):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     frame_index = 0
-    minimum_visible_until = time.monotonic() + TUI_LOADING_MIN_VISIBLE_SECONDS
-    _tui_draw_loading_frame(stdscr, state, message=message, frame_index=frame_index)
-    while True:
-        now = time.monotonic()
-        if finished.is_set() and now >= minimum_visible_until:
-            break
-        if finished.is_set():
-            wait_seconds = min(TUI_LOADING_FRAME_INTERVAL_MS / 1000, max(0.0, minimum_visible_until - now))
-        else:
-            wait_seconds = TUI_LOADING_FRAME_INTERVAL_MS / 1000
-        if wait_seconds > 0:
-            finished.wait(wait_seconds)
+
+    if not finished.is_set():
+        _tui_draw_loading_frame(stdscr, state, message=message, frame_index=frame_index)
+    while not finished.wait(TUI_LOADING_FRAME_INTERVAL_MS / 1000):
         frame_index += 1
         _tui_draw_loading_frame(stdscr, state, message=message, frame_index=frame_index)
 
     thread.join()
     error = outcome.get("error")
+    _tui_draw(stdscr, state)
     if isinstance(error, BaseException):
         raise error
     return outcome.get("result")
@@ -4997,7 +4989,6 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
             continue
         if key in (ord("h"),):
             _tui_close_conversation(state)
-            _tui_run_with_loading(stdscr, state, lambda: None, message="Loading conversations")
             continue
         if key in (ord("i"),):
             state["input_active"] = True
