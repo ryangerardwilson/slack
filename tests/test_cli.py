@@ -1076,12 +1076,25 @@ class CliContractTests(unittest.TestCase):
                 "sender": {"id": "U2", "name": "Maanas", "email": "maanas@example.com", "label": "Maanas"},
                 "unread": True,
             }
-            module._event_cache_store_entries(cache_path, [entry], history_loaded=True)
+            channel_entry = {
+                "sort_ts": 101.000100,
+                "email": "-",
+                "dm_id": "C1",
+                "channel_id": "C1",
+                "surface": "private_channel",
+                "conversation": "#not-a-dm",
+                "members": "-",
+                "message": {"ts": "101.000100", "user": "U2", "text": "cached channel"},
+                "sender": {"id": "U2", "name": "Maanas", "email": "-", "label": "Maanas"},
+                "unread": True,
+            }
+            module._event_cache_store_entries(cache_path, [entry, channel_entry], history_loaded=True)
 
             with mock.patch.object(module, "slack_request", side_effect=AssertionError("network not expected")):
                 rows = module._tui_load_conversations("xoxp-token", "U1", cache_path=cache_path)
                 messages = module._tui_load_messages(rows[0], "xoxp-token", "U1", cache_path=cache_path)
 
+        self.assertEqual([row["info"]["surface"] for row in rows], ["dm"])
         self.assertEqual(rows[0]["info"]["channel_id"], "D1")
         self.assertTrue(rows[0]["history_loaded"])
         self.assertEqual(messages[0]["message"]["text"], "cached dm")

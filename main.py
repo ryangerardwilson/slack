@@ -3447,6 +3447,11 @@ def _event_cache_load_conversation_rows(cache_path, self_user_id, limit=TUI_RECE
     if not entries:
         return []
     rows = _tui_conversation_rows_from_entries(entries, history_loaded=False)
+    rows = [
+        row
+        for row in rows
+        if ((row.get("info") or {}).get("surface") or row.get("surface")) in {"dm", "group_dm"}
+    ]
     history_loaded = _event_cache_history_loaded_map(cache_path)
     for row in rows:
         channel_id = (row.get("info") or {}).get("channel_id")
@@ -4172,13 +4177,13 @@ def _tui_mark_conversation_row_read(conversation_row, token, cache_path=None):
     return True, ""
 
 
-def _tui_mark_selected_conversation_read(state, token):
+def _tui_mark_selected_conversation_read(state, token, cache_path=None):
     selected = _tui_selected_conversation(state)
     messages = state.get("messages") or []
     if not selected:
         return False
     selected["messages"] = messages
-    marked, _error = _tui_mark_conversation_row_read(selected, token)
+    marked, _error = _tui_mark_conversation_row_read(selected, token, cache_path=cache_path)
     return marked
 
 
@@ -4298,13 +4303,7 @@ def _tui_open_selected_conversation(state, token, self_user_id, cache_path=None)
     state["stick_bottom"] = False
     _tui_focus_latest_message(state)
     selected = _tui_selected_conversation(state)
-    marked_read = _tui_mark_selected_conversation_read(state, token)
-    if marked_read and selected:
-        _event_cache_mark_read(
-            cache_path,
-            (selected.get("info") or {}).get("channel_id"),
-            _tui_latest_message_ts(state.get("messages") or []),
-        )
+    marked_read = _tui_mark_selected_conversation_read(state, token, cache_path=cache_path)
     message_count = len(state.get("messages") or [])
     mark_error = (selected or {}).get("mark_read_error")
     if mark_error:
