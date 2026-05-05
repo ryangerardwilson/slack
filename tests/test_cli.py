@@ -179,20 +179,11 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(prefixed["auth_preset"], "2")
         self.assertTrue(prefixed["auth_import"])
 
-    def test_codex_command_parses_event_service_actions(self):
+    def test_codex_command_is_not_registered(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["1", "codex", "service"])
-
-        self.assertEqual(parsed["preset"], "1")
-        self.assertEqual(parsed["command"], "codex")
-        self.assertEqual(parsed["codex_action"], "service")
-
-        logs = module.parse_args(["1", "codex", "logs", "120"])
-        self.assertEqual(logs["codex_action"], "logs")
-        self.assertEqual(logs["codex_lines"], 120)
-        scan = module.parse_args(["1", "codex", "scan"])
-        self.assertEqual(scan["codex_action"], "scan")
+        with self.assertRaises(SystemExit):
+            module.parse_args(["1", "codex", "service"])
 
     def test_events_command_parses_cache_service_actions(self):
         module = load_main_module()
@@ -1379,8 +1370,8 @@ class CliContractTests(unittest.TestCase):
                 {
                     "info": {"channel_id": "D1", "surface": "dm", "conversation": "Maanas"},
                     "latest": {"message": {"ts": "100.000100"}},
-                    "messages": [{"message": {"ts": "100.000100"}, "sort_ts": 100.000100, "unread": True}],
-                    "unread_ts": 100.000100,
+                    "messages": [{"message": {"ts": "100.000100"}, "sort_ts": 100.000100, "unread": False}],
+                    "unread_ts": 0,
                 },
                 {
                     "info": {"channel_id": "G1", "surface": "group_dm", "conversation": "A, B"},
@@ -1592,13 +1583,24 @@ class CliContractTests(unittest.TestCase):
 
         with mock.patch.object(module, "_tui_load_conversations", return_value=[row]):
             with mock.patch.object(module, "_tui_load_messages", return_value=[entry]):
-                callbacks = module._build_erza_chat_callbacks("xoxp-token", "U1", chat_api)
-                conversations = callbacks.load_conversations()
-                messages = callbacks.load_messages(conversations[0])
+                with mock.patch.object(module, "slack_request", return_value={"ok": True}) as load_mark:
+                    callbacks = module._build_erza_chat_callbacks("xoxp-token", "U1", chat_api)
+                    conversations = callbacks.load_conversations()
+                    self.assertTrue(conversations[0].unread)
+                    messages = callbacks.load_messages(conversations[0])
+
+        load_mark.assert_called_once_with(
+            "conversations.mark",
+            {"channel": "D1", "ts": "100.000100"},
+            "xoxp-token",
+            use_form=True,
+            allow_error=True,
+        )
+        self.assertFalse(conversations[0].unread)
+        self.assertEqual(row["unread_ts"], 0)
 
         self.assertEqual(conversations[0].conversation_id, "D1")
         self.assertEqual(conversations[0].label, "Maanas")
-        self.assertTrue(conversations[0].unread)
         self.assertEqual(messages[0].message_id, "D1:100.000100")
         self.assertEqual(messages[0].sender, "maanas")
         self.assertEqual(messages[0].files[0].name, "note.txt")
@@ -1608,6 +1610,9 @@ class CliContractTests(unittest.TestCase):
             callbacks.send_message(conversations[0], "hello")
         send_post.assert_called_once_with("xoxp-token", "D1", "hello")
 
+        row["unread_ts"] = 100.000100
+        messages[0].unread = True
+        conversations[0].unread = True
         with mock.patch.object(module, "slack_request", return_value={"ok": True}) as slack_request:
             self.assertTrue(callbacks.mark_read(conversations[0], messages))
         slack_request.assert_called_once_with(
@@ -2159,249 +2164,6 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("message_id: C123:100.000100", output)
         self.assertIn("surface     : channel", output)
         self.assertIn("channel_id  : C123", output)
-
-    def test_slack_event_filter_accepts_dm_and_mentions_only(self):
-        module = load_main_module()
-
-        dm = module._eligible_slack_event(
-            {
-                "type": "message",
-                "channel": "D123",
-                "channel_type": "im",
-                "user": "U222",
-                "text": "hello",
-                "ts": "100.000100",
-            },
-            "UAPP",
-        )
-        mention = module._eligible_slack_event(
-            {
-                "type": "app_mention",
-                "channel": "C123",
-                "user": "U222",
-                "text": "<@UAPP> hello",
-                "ts": "100.000100",
-            },
-            "UAPP",
-        )
-        channel_message = module._eligible_slack_event(
-            {
-                "type": "message",
-                "channel": "C123",
-                "channel_type": "channel",
-                "user": "U222",
-                "text": "hello channel",
-                "ts": "100.000100",
-            },
-            "UAPP",
-        )
-
-        self.assertEqual(dm["kind"], "direct_message")
-        self.assertEqual(mention["kind"], "app_mention")
-        self.assertEqual(mention["text"], "hello")
-        self.assertIsNone(channel_message)
-
-    def test_codex_resume_for_slack_calls_current_session(self):
-        module = load_main_module()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir) / "workspace"
-            workspace.mkdir()
-            state_file = Path(temp_dir) / "state.json"
-            captured = {}
-
-            def fake_run(command, **kwargs):
-                captured["command"] = command
-                captured["cwd"] = kwargs["cwd"]
-                captured["input"] = kwargs["input"]
-                output_path = Path(command[command.index("--output-last-message") + 1])
-                output_path.write_text("slack reply\n", encoding="utf-8")
-
-                class Result:
-                    returncode = 0
-                    stdout = ""
-                    stderr = ""
-
-                return Result()
-
-            account = {
-                "codex_session_id": "session-1",
-                "codex_workspace": str(workspace),
-                "codex_state_file": str(state_file),
-                "codex_args": ["--skip-git-repo-check", "--full-auto"],
-                "codex_timeout_seconds": 1,
-            }
-            event = {
-                "kind": "direct_message",
-                "channel_id": "D123",
-                "user_id": "U222",
-                "text": "hello codex",
-                "ts": "100.000100",
-            }
-
-            with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
-                reply = module.codex_resume_for_slack(account, event)
-
-        self.assertEqual(reply, "slack reply")
-        self.assertEqual(captured["command"][:4], ["codex", "exec", "resume", "session-1"])
-        self.assertIn("--full-auto", captured["command"])
-        self.assertEqual(captured["cwd"], workspace)
-        self.assertIn("hello codex", captured["input"])
-
-    def test_codex_prompt_template_uses_config_wrapper(self):
-        module = load_main_module()
-
-        account = {
-            "codex_prompt": (
-                'Respond to the user query. Query: {}; Instructions: return '
-                '{respond:1,response:"your_response"} or {respond:0,response:""}.'
-            )
-        }
-        event = {
-            "kind": "direct_message",
-            "channel_id": "D123",
-            "user_id": "U222",
-            "text": "fetch genie revenue",
-            "ts": "100.000100",
-        }
-
-        prompt = module._codex_prompt_for_slack(account, event)
-
-        self.assertIn("Query: fetch genie revenue", prompt)
-        self.assertIn('{respond:1,response:"your_response"}', prompt)
-
-    def test_send_codex_reply_respects_structured_no_response(self):
-        module = load_main_module()
-
-        account = {"token": {"bot": "xoxb-bot", "user": "xoxp-user"}}
-        event = {
-            "kind": "user_direct_message",
-            "channel_id": "D123",
-            "thread_ts": None,
-        }
-        with mock.patch.object(module, "send_post") as send_post:
-            result = module._send_codex_reply(account, event, '{respond:0, response:""}')
-
-        self.assertIsNone(result)
-        send_post.assert_not_called()
-
-    def test_send_codex_reply_sends_structured_response_text(self):
-        module = load_main_module()
-
-        account = {"token": {"bot": "xoxb-bot", "user": "xoxp-user"}}
-        event = {
-            "kind": "user_direct_message",
-            "channel_id": "D123",
-            "thread_ts": None,
-        }
-        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
-            result = module._send_codex_reply(
-                account,
-                event,
-                '{respond:1,response:"Here is the Genie data."}',
-            )
-
-        self.assertEqual(result, "200.000100")
-        send_post.assert_called_once_with(
-            "xoxp-user",
-            "D123",
-            "Here is the Genie data.",
-            thread_ts=None,
-        )
-
-    def test_send_codex_reply_requires_structured_response_with_wrapper(self):
-        module = load_main_module()
-
-        account = {
-            "token": {"bot": "xoxb-bot", "user": "xoxp-user"},
-            "codex_prompt": (
-                'Query: {}; Instructions: respond as {respond:1,response:"text"} '
-                'or {respond:0,response:""}.'
-            ),
-        }
-        event = {
-            "kind": "user_direct_message",
-            "channel_id": "D123",
-            "thread_ts": None,
-        }
-        with mock.patch.object(module, "send_post") as send_post:
-            result = module._send_codex_reply(
-                account,
-                event,
-                "Ask tomorrow. Today it may look impulsive.",
-            )
-
-        self.assertIsNone(result)
-        send_post.assert_not_called()
-
-    def test_user_dm_entries_use_user_token_for_reply(self):
-        module = load_main_module()
-
-        entry = {
-            "sort_ts": 100.000100,
-            "surface": "dm",
-            "channel_id": "D123",
-            "dm_id": "D123",
-            "sender": {"id": "U222"},
-            "message": {"ts": "100.000100", "user": "U222", "text": "hello"},
-        }
-        event_info = module._event_info_from_dm_entry(entry)
-
-        self.assertEqual(event_info["kind"], "user_direct_message")
-        self.assertEqual(event_info["channel_id"], "D123")
-        self.assertEqual(event_info["text"], "hello")
-
-        account = {"bot_token": "xoxb-bot", "user_token": "xoxp-user"}
-        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
-            module._send_codex_reply(account, event_info, "reply")
-
-        send_post.assert_called_once_with("xoxp-user", "D123", "reply", thread_ts=None)
-
-        mention = {"kind": "user_mention", "channel_id": "C123", "thread_ts": "100.000100"}
-        with mock.patch.object(module, "send_post", return_value="200.000100") as send_post:
-            module._send_codex_reply(account, mention, "thread reply")
-
-        send_post.assert_called_once_with(
-            "xoxp-user",
-            "C123",
-            "thread reply",
-            thread_ts="100.000100",
-        )
-
-    def test_user_dm_entry_skips_group_dm(self):
-        module = load_main_module()
-
-        event_info = module._event_info_from_dm_entry(
-            {
-                "surface": "group_dm",
-                "channel_id": "G123",
-                "sender": {"id": "U222"},
-                "message": {"ts": "100.000100", "user": "U222", "text": "hello"},
-            }
-        )
-
-        self.assertIsNone(event_info)
-
-    def test_user_mention_match_replies_in_thread(self):
-        module = load_main_module()
-
-        match = {
-            "channel": {"id": "C123"},
-            "ts": "100.000100",
-            "user": "U222",
-            "text": "hi <@U111>",
-        }
-        with mock.patch.object(
-            module,
-            "_hydrate_message",
-            return_value={"ts": "100.000100", "user": "U222", "text": "hi <@U111>"},
-        ):
-            event_info = module._user_mention_event_from_match(match, "token", "U111")
-
-        self.assertEqual(event_info["kind"], "user_mention")
-        self.assertEqual(event_info["channel_id"], "C123")
-        self.assertEqual(event_info["thread_ts"], "100.000100")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,9 +12,7 @@ import textwrap
 import threading
 import time
 import zipfile
-import fcntl
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -34,7 +32,6 @@ CONVERSATION_ID_RE = re.compile(r"^[CDG][A-Z0-9]+$")
 COMMANDS = {
     "ac",
     "auth",
-    "codex",
     "cfg",
     "conf",
     "df",
@@ -55,7 +52,6 @@ DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
 DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
 DEFAULT_APP_TOKEN_FILE = "~/.openclaw/credentials/slack-app-token"
 DEFAULT_LIST_LIMIT = 10
-DEFAULT_CODEX_ARGS = ["--skip-git-repo-check", "--full-auto"]
 EVENT_CACHE_SCHEMA_VERSION = 1
 EVENT_SYNC_CONVERSATION_LIMIT = 20
 EVENT_SOCKET_TIMEOUT_SECONDS = 70
@@ -120,12 +116,6 @@ features:
   slack auth
   slack auth 1 -i
   slack auth 2 -bt xoxb-... -ut xoxp-... -at xapp-... -n work
-
-  run the event-based Slack to Codex bridge
-  # slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state
-  slack 1 codex ti
-  slack 1 codex status
-  slack 1 codex logs 80
 
   keep a local realtime DM/GDM event cache for faster ls/tui loads
   # slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache
@@ -327,7 +317,6 @@ def _top_level_usage():
     return (
         "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>] [-at <app_token>]] | "
         "slack <preset> ac <label> <email> | slack <preset> su <query> | slack conf | "
-        "slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state | "
         "slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache | "
         "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
         "slack <preset> reply <message_id> <message> [path...] | "
@@ -375,8 +364,6 @@ def parse_args(argv):
         "auth_name": None,
         "auth_import": False,
         "auth_list": False,
-        "codex_action": None,
-        "codex_lines": 80,
         "events_action": None,
         "events_lines": 80,
         "config": None,
@@ -467,25 +454,6 @@ def parse_args(argv):
                     continue
                 raise SystemExit(f"Unknown auth option: {item}")
             return args
-        if token == "codex":
-            if not remaining or remaining[0] in {"help", "-h"}:
-                args["codex_action"] = "help"
-                return args
-            action = remaining[0]
-            rest = remaining[1:]
-            if action in {"once", "scan", "service", "ti", "td", "st", "status", "reset-state"}:
-                if rest:
-                    raise SystemExit(f"Use: slack <preset> codex {action}")
-                args["codex_action"] = action
-                return args
-            if action == "logs":
-                if len(rest) > 1:
-                    raise SystemExit("Use: slack <preset> codex logs [lines]")
-                if rest:
-                    args["codex_lines"] = _parse_positive_int(rest[0], "codex logs lines")
-                args["codex_action"] = action
-                return args
-            raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
         if token in {"events", "event"}:
             args["command"] = "events"
             if not remaining or remaining[0] in {"help", "-h"}:
@@ -1031,10 +999,6 @@ def auth_test(token):
     return data
 
 
-def _token_bool(value):
-    return "yes" if isinstance(value, str) and value.strip() else "no"
-
-
 def list_account_presets(config):
     accounts = _accounts(config)
     if not accounts:
@@ -1051,7 +1015,6 @@ def list_account_presets(config):
                 ("bot_token", "yes" if _has_token(account, "bot") else "no"),
                 ("user_token", "yes" if _has_token(account, "user") else "no"),
                 ("app_token", "yes" if _has_token(account, "app") else "no"),
-                ("codex", _token_bool(account.get("codex_session_id"))),
                 ("contacts", str(len(normalize_contacts(account)))),
             ]
         )
@@ -4199,7 +4162,7 @@ def _tui_mark_all_conversations_read(state, token, cache_path=None):
     marked = 0
     failed = []
     for row in conversations:
-        if not bool(row.get("unread_ts")):
+        if not _tui_conversation_latest_ts(row):
             continue
         marked_read, error = _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
         if marked_read:
@@ -4649,6 +4612,8 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=None):
             return []
         _tui_hydrate_selected_conversation_label(row, token)
         entries = _tui_load_messages(row, token, self_user_id, force=True, cache_path=cache_path)
+        row["messages"] = entries
+        _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
         conversation.label = _tui_conversation_label(row)
         conversation.date = _erza_conversation_date(row)
         conversation.unread = bool(row.get("unread_ts"))
@@ -4690,7 +4655,7 @@ def _build_erza_chat_callbacks(token, self_user_id, chat_api, cache_path=None):
             row = _erza_row_for_conversation(conversation) or row_cache.get(conversation.conversation_id)
             if not row:
                 continue
-            if not bool(row.get("unread_ts")) and not bool(getattr(conversation, "unread", False)):
+            if not _tui_conversation_latest_ts(row):
                 continue
             marked_read, error = _tui_mark_conversation_row_read(row, token, cache_path=cache_path)
             if marked_read:
@@ -4814,6 +4779,8 @@ def _run_tui(stdscr, token, self_user_id, cache_path=None):
                 continue
             continue
         if state.get("mode") == "conversations":
+            if _tui_apply_leader_key(state, key, token, cache_path=cache_path):
+                continue
             if key in (ord("q"), 27):
                 return
             if key in (ord("r"),):
@@ -5300,131 +5267,11 @@ def _expand_path(value):
     return Path(os.path.expandvars(str(value))).expanduser()
 
 
-def _account_string(account, key, default="", required=False):
-    value = account.get(key, default)
-    if value is None:
-        value = default
-    if not isinstance(value, str):
-        raise SystemExit(f"config key must be a string: {key}")
-    value = value.strip()
-    if required and not value:
-        raise SystemExit(f"missing required config key: {key}")
-    return value
-
-
 def _account_int(account, key, default):
     value = account.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise SystemExit(f"config key must be an integer: {key}")
     return value
-
-
-def _account_string_list(account, key, default=None):
-    value = account.get(key, default if default is not None else [])
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise SystemExit(f"config key must be a list of strings: {key}")
-    return [item for item in value if item]
-
-
-def _codex_state_paths(account, preset):
-    slug = _safe_preset_slug(preset)
-    base = _state_base_dir()
-    return {
-        "state_file": _expand_path(account.get("codex_state_file") or str(base / f"codex-{slug}.json")),
-        "log_file": _expand_path(account.get("codex_log_file") or str(base / f"codex-{slug}.log")),
-        "lock_file": _expand_path(account.get("codex_lock_file") or str(base / f"codex-{slug}.lock")),
-    }
-
-
-def _read_state(state_file):
-    if not state_file.exists():
-        return {}
-    try:
-        payload = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _write_state(state_file, payload):
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _state_recent_keys(state):
-    keys = state.get("recent_event_keys")
-    if not isinstance(keys, list):
-        return []
-    return [str(item) for item in keys[-100:]]
-
-
-def _event_key(event):
-    return ":".join(
-        str(item or "")
-        for item in (
-            event.get("type"),
-            event.get("channel"),
-            event.get("user"),
-            event.get("thread_ts") or event.get("ts") or event.get("event_ts"),
-        )
-    )
-
-
-def _claim_event(account, preset, event):
-    paths = _codex_state_paths(account, preset)
-    state = _read_state(paths["state_file"])
-    key = _event_key(event)
-    recent = _state_recent_keys(state)
-    if key and key in recent:
-        return False
-    if key:
-        recent.append(key)
-        state["recent_event_keys"] = recent[-100:]
-    state["last_event_key"] = key
-    state["last_event_at"] = datetime.now().astimezone().isoformat()
-    _write_state(paths["state_file"], state)
-    return True
-
-
-def _mark_codex_processed(account, preset, event, reply_ts=None):
-    paths = _codex_state_paths(account, preset)
-    state = _read_state(paths["state_file"])
-    state["processed"] = int(state.get("processed") or 0) + 1
-    state["last_processed_at"] = datetime.now().astimezone().isoformat()
-    state["last_channel"] = event.get("channel") or ""
-    state["last_message_ts"] = event.get("ts") or event.get("event_ts") or ""
-    if reply_ts:
-        state["last_reply_ts"] = reply_ts
-    state["last_error"] = ""
-    _write_state(paths["state_file"], state)
-
-
-def _mark_codex_error(account, preset, message):
-    paths = _codex_state_paths(account, preset)
-    state = _read_state(paths["state_file"])
-    state["last_error"] = str(message)
-    state["last_error_at"] = datetime.now().astimezone().isoformat()
-    _write_state(paths["state_file"], state)
-
-
-def _codex_log(account, preset, message):
-    paths = _codex_state_paths(account, preset)
-    paths["log_file"].parent.mkdir(parents=True, exist_ok=True)
-    with paths["log_file"].open("a", encoding="utf-8") as handle:
-        handle.write(f"{datetime.now().astimezone().isoformat()} {message}\n")
-
-
-@contextmanager
-def _codex_lock(account, preset):
-    paths = _codex_state_paths(account, preset)
-    paths["lock_file"].parent.mkdir(parents=True, exist_ok=True)
-    with paths["lock_file"].open("w", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        yield True
 
 
 def _websocket_module():
@@ -5449,52 +5296,6 @@ def _ack_socket_envelope(socket, envelope):
     if not envelope_id:
         return
     socket.send(json.dumps({"envelope_id": envelope_id}))
-
-
-def _strip_bot_mention(text, bot_user_id):
-    if not bot_user_id:
-        return text.strip()
-    return re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text or "").strip()
-
-
-def _eligible_slack_event(event, bot_user_id):
-    if not isinstance(event, dict):
-        return None
-    event_type = event.get("type")
-    user_id = event.get("user")
-    if not user_id or user_id == bot_user_id:
-        return None
-    if event.get("bot_id") or event.get("bot_profile"):
-        return None
-
-    channel_id = event.get("channel") or ""
-    text = (event.get("text") or "").strip()
-    if event_type == "app_mention":
-        return {
-            "kind": "app_mention",
-            "channel_id": channel_id,
-            "user_id": user_id,
-            "text": _strip_bot_mention(text, bot_user_id),
-            "thread_ts": event.get("thread_ts") or event.get("ts"),
-            "ts": event.get("ts") or event.get("event_ts"),
-            "raw": event,
-        }
-    if event_type == "message":
-        if event.get("subtype"):
-            return None
-        channel_type = event.get("channel_type") or ""
-        if channel_type != "im" and not str(channel_id).startswith("D"):
-            return None
-        return {
-            "kind": "direct_message",
-            "channel_id": channel_id,
-            "user_id": user_id,
-            "text": text,
-            "thread_ts": event.get("thread_ts"),
-            "ts": event.get("ts") or event.get("event_ts"),
-            "raw": event,
-        }
-    return None
 
 
 def _event_cache_eligible_message(event):
@@ -5717,11 +5518,6 @@ def events_service(account, preset):
     stop_event = threading.Event()
     syncer = threading.Thread(target=_events_sync_loop, args=(account, preset, stop_event), daemon=True)
     syncer.start()
-    codex_unit = f"{_codex_unit_name(preset)}.service"
-    if _systemd_user_service_active(codex_unit):
-        _events_log(account, preset, f"socket skipped: {codex_unit} active; using sync-only cache service")
-        while True:
-            stop_event.wait(3600)
     while True:
         try:
             _events_socket_loop(account, preset, once=False)
@@ -5871,541 +5667,8 @@ def print_events_help():
     return 0
 
 
-def _event_query(event_info):
-    return event_info.get("text") or ""
-
-
-def _render_codex_prompt_template(template, event_info):
-    rendered = str(template)
-    replacements = {
-        "{}": _event_query(event_info),
-        "{query}": _event_query(event_info),
-        "{text}": _event_query(event_info),
-        "{kind}": event_info.get("kind") or "",
-        "{channel_id}": event_info.get("channel_id") or "",
-        "{user_id}": event_info.get("user_id") or "",
-        "{message_ts}": event_info.get("ts") or "",
-        "{thread_ts}": event_info.get("thread_ts") or "",
-    }
-    for placeholder, value in replacements.items():
-        rendered = rendered.replace(placeholder, str(value))
-    return rendered
-
-
-def _codex_prompt_for_slack(account, event_info):
-    template = account.get("codex_prompt") or account.get("codex_wrapper_prompt")
-    if isinstance(template, str) and template.strip():
-        return _render_codex_prompt_template(template, event_info)
-    thread = event_info.get("thread_ts") or "-"
-    return f"""Slack message for Ryan.
-
-You are replying through Ryan's local Slack event service. Produce only the Slack reply text.
-If you cannot complete the request safely from the available context, say what is missing.
-
-Slack event:
-- kind: {event_info.get("kind")}
-- channel_id: {event_info.get("channel_id")}
-- user_id: {event_info.get("user_id")}
-- message_ts: {event_info.get("ts")}
-- thread_ts: {thread}
-
-Message:
-{event_info.get("text") or ""}
-"""
-
-
-def _strip_code_fence(text):
-    stripped = text.strip()
-    if not stripped.startswith("```") or not stripped.endswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) < 2:
-        return stripped
-    return "\n".join(lines[1:-1]).strip()
-
-
-def _parse_codex_reply_directive(reply, require_directive=False):
-    text = _strip_code_fence(reply)
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        normalized = re.sub(r'([{,]\s*)(respond|response)\s*:', r'\1"\2":', text)
-        try:
-            payload = json.loads(normalized)
-        except json.JSONDecodeError:
-            return (False, "") if require_directive else (True, reply)
-    if not isinstance(payload, dict) or "respond" not in payload:
-        return (False, "") if require_directive else (True, reply)
-    respond = payload.get("respond")
-    should_respond = respond is True or respond == 1 or str(respond).strip().lower() in {"1", "true", "yes"}
-    response = payload.get("response") or ""
-    return should_respond and bool(str(response).strip()), str(response).strip()
-
-
-def _codex_requires_structured_reply(account):
-    for key in ("codex_prompt", "codex_wrapper_prompt"):
-        value = account.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
-
-
-def codex_resume_for_slack(account, event_info):
-    session_id = _account_string(account, "codex_session_id", required=True)
-    workspace = _expand_path(_account_string(account, "codex_workspace", "~"))
-    if not workspace.exists():
-        raise SystemExit(f"codex_workspace does not exist: {workspace}")
-    paths = _codex_state_paths(account, account.get("_preset") or "default")
-    paths["state_file"].parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    home = str(Path.home())
-    env["PATH"] = f"{home}/.local/bin:{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"
-    codex_args = _account_string_list(account, "codex_args", DEFAULT_CODEX_ARGS)
-    prompt = _codex_prompt_for_slack(account, event_info)
-    completed = None
-    try:
-        with tempfile.TemporaryDirectory(prefix="codex-", dir=str(paths["state_file"].parent)) as tmp_dir:
-            output_path = Path(tmp_dir) / "last-message.txt"
-            command = [
-                "codex",
-                "exec",
-                "resume",
-                session_id,
-                *codex_args,
-                "--output-last-message",
-                str(output_path),
-                "-",
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=workspace,
-                env=env,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=_account_int(account, "codex_timeout_seconds", 900) + 60,
-                check=False,
-            )
-            reply = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SystemExit("codex exec resume failed") from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise SystemExit(f"codex exec resume failed: {detail or completed.returncode}")
-    if not reply:
-        reply = (completed.stdout or "").strip()
-    if not reply:
-        raise SystemExit("codex exec resume returned empty reply")
-    return reply
-
-
-def _truncate_for_slack(text, account):
-    max_chars = _account_int(account, "slack_reply_max_chars", 39000)
-    if len(text) <= max_chars:
-        return text
-    suffix = "\n\n[truncated]"
-    return text[: max(1, max_chars - len(suffix))].rstrip() + suffix
-
-
-def _mark_event_read(account, event_info):
-    token = _direct_token(account, ("user_token", "bot_token"))
-    if not isinstance(token, str) or not token.strip():
-        return
-    channel_id = event_info.get("channel_id")
-    ts = event_info.get("ts")
-    if not channel_id or not ts:
-        return
-    slack_request(
-        "conversations.mark",
-        {"channel": channel_id, "ts": ts},
-        token.strip(),
-        use_form=True,
-        allow_error=True,
-    )
-
-
-def _send_codex_reply(account, event_info, reply):
-    should_respond, reply_text = _parse_codex_reply_directive(
-        reply,
-        require_directive=_codex_requires_structured_reply(account),
-    )
-    if not should_respond:
-        return None
-    token = (
-        _direct_token(account, ("user_token",))
-        if event_info.get("kind") in {"user_direct_message", "user_mention"}
-        else None
-    )
-    if not isinstance(token, str) or not token.strip():
-        token = resolve_token(account)
-    else:
-        token = token.strip()
-    thread_ts = event_info.get("thread_ts")
-    text = _truncate_for_slack(reply_text, account)
-    return send_post(token, event_info["channel_id"], text, thread_ts=thread_ts)
-
-
-def _handle_socket_event(account, preset, event_info):
-    raw_event = event_info.get("raw") or {}
-    with _codex_lock(account, preset) as acquired:
-        if not acquired:
-            send_post(
-                resolve_token(account),
-                event_info["channel_id"],
-                "Codex is still working on the previous Slack request.",
-                thread_ts=event_info.get("thread_ts"),
-            )
-            return False
-        if not _claim_event(account, preset, raw_event):
-            return False
-        try:
-            reply = codex_resume_for_slack(account, event_info)
-            reply_ts = _send_codex_reply(account, event_info, reply)
-            _mark_event_read(account, event_info)
-            _mark_codex_processed(account, preset, raw_event, reply_ts)
-            _codex_log(account, preset, f"processed channel={event_info['channel_id']} ts={event_info.get('ts')}")
-            return True
-        except SystemExit as exc:
-            message = f"Codex run failed: {exc}"
-            _mark_codex_error(account, preset, str(exc))
-            _codex_log(account, preset, message)
-            send_post(
-                resolve_token(account),
-                event_info["channel_id"],
-                message,
-                thread_ts=event_info.get("thread_ts"),
-            )
-            return False
-
-
-def _event_info_from_dm_entry(entry):
-    if entry.get("surface") != "dm":
-        return None
-    message = entry.get("message") or {}
-    sender = entry.get("sender") or {}
-    channel_id = entry.get("channel_id") or entry.get("dm_id")
-    ts = message.get("ts")
-    user_id = sender.get("id") or message.get("user")
-    if not channel_id or not ts or not user_id:
-        return None
-    return {
-        "kind": "user_direct_message",
-        "channel_id": channel_id,
-        "user_id": user_id,
-        "text": message_text(message),
-        "thread_ts": message.get("thread_ts"),
-        "ts": ts,
-        "raw": {
-            "type": "message",
-            "channel": channel_id,
-            "user": user_id,
-            "text": message_text(message),
-            "ts": ts,
-            "event_ts": ts,
-        },
-    }
-
-
-def _process_user_dm_entries(account, preset, entries):
-    processed = 0
-    for entry in sorted(entries, key=lambda item: item.get("sort_ts") or 0):
-        event_info = _event_info_from_dm_entry(entry)
-        if not event_info:
-            continue
-        if _handle_socket_event(account, preset, event_info):
-            processed += 1
-    return processed
-
-
-def user_dm_scan_once(account, preset, *, unread_only=True):
-    token = resolve_list_token(account)
-    auth_data = auth_test(token)
-    self_user_id = auth_data.get("user_id")
-    if not self_user_id:
-        raise SystemExit("Unable to determine the current Slack user.")
-    limit = _account_int(account, "codex_user_dm_scan_limit", 10)
-    contacts = contacts_for_account({}, account)
-    entries = search_dms(
-        contacts,
-        token,
-        limit,
-        "unread" if unread_only else "all",
-        self_user_id,
-        False,
-    )
-    if entries is None:
-        entries = []
-        for dm_info in get_all_dm_infos(token):
-            entries.extend(
-                _collect_messages(
-                    dm_info,
-                    token,
-                    limit,
-                    "unread" if unread_only else "all",
-                    self_user_id,
-                )
-            )
-    selected_entries = entries[:limit]
-    try:
-        _event_cache_store_entries(_event_cache_db_path(account, preset), selected_entries)
-    except Exception as exc:
-        _codex_log(account, preset, f"event cache scan error: {exc}")
-    return _process_user_dm_entries(account, preset, selected_entries)
-
-
-def _state_float(state, key, default=0.0):
-    try:
-        return float(state.get(key) or default)
-    except (TypeError, ValueError):
-        return default
-
-
-def _user_mention_event_from_match(match, token, self_user_id):
-    channel = match.get("channel") if isinstance(match.get("channel"), dict) else {}
-    channel_id = channel.get("id") or match.get("channel_id")
-    ts = str(match.get("ts") or "")
-    if not channel_id or not ts:
-        return None
-    try:
-        message = _hydrate_message(channel_id, ts, token)
-    except SystemExit:
-        message = None
-    message = message or {
-        "ts": ts,
-        "user": match.get("user"),
-        "text": match.get("text") or "",
-    }
-    user_id = message.get("user") or match.get("user")
-    if not user_id or user_id == self_user_id:
-        return None
-    if message.get("bot_id") or message.get("bot_profile") or message.get("subtype"):
-        return None
-    text = message_text(message)
-    if self_user_id and f"<@{self_user_id}>" not in text:
-        return None
-    return {
-        "kind": "user_mention",
-        "channel_id": channel_id,
-        "user_id": user_id,
-        "text": text,
-        "thread_ts": message.get("thread_ts") or ts,
-        "ts": ts,
-        "raw": {
-            "type": "message",
-            "channel": channel_id,
-            "user": user_id,
-            "text": text,
-            "ts": ts,
-            "event_ts": ts,
-        },
-    }
-
-
-def user_mention_scan_once(account, preset):
-    token = resolve_list_token(account)
-    auth_data = auth_test(token)
-    self_user_id = auth_data.get("user_id")
-    if not self_user_id:
-        raise SystemExit("Unable to determine the current Slack user.")
-    paths = _codex_state_paths(account, preset)
-    state = _read_state(paths["state_file"])
-    since = _state_float(state, "user_mention_scan_after_ts", time.time())
-    limit = _account_int(account, "codex_user_mention_scan_limit", 20)
-    payload = slack_request(
-        "search.messages",
-        {
-            "query": f"<@{self_user_id}>",
-            "sort": "timestamp",
-            "sort_dir": "desc",
-            "count": str(max(20, min(100, limit))),
-        },
-        token,
-        http_method="GET",
-        allow_error=True,
-    )
-    if payload.get("ok") is not True:
-        error = payload.get("error") or "unknown_error"
-        raise SystemExit(f"Slack API error (search.messages): {error}")
-    matches = (payload.get("messages") or {}).get("matches", []) or []
-    events = []
-    max_seen = since
-    for match in matches:
-        try:
-            ts_value = float(match.get("ts") or 0)
-        except (TypeError, ValueError):
-            continue
-        max_seen = max(max_seen, ts_value)
-        if ts_value <= since:
-            continue
-        event_info = _user_mention_event_from_match(match, token, self_user_id)
-        if event_info:
-            events.append((ts_value, event_info))
-    processed = 0
-    for _, event_info in sorted(events, key=lambda item: item[0]):
-        if _handle_socket_event(account, preset, event_info):
-            processed += 1
-    state = _read_state(paths["state_file"])
-    state["user_mention_scan_after_ts"] = max(max_seen, time.time())
-    _write_state(paths["state_file"], state)
-    return processed
-
-
-def _user_dm_poll_loop(account, preset, stop_event):
-    if account.get("codex_user_dm_watch") is False:
-        _codex_log(account, preset, "user DM watcher disabled")
-        return
-    interval = max(5, _account_int(account, "codex_user_dm_poll_seconds", 10))
-    _codex_log(account, preset, f"user DM watcher started interval={interval}s")
-    while not stop_event.is_set():
-        try:
-            processed = user_dm_scan_once(account, preset, unread_only=True)
-            processed += user_mention_scan_once(account, preset)
-            if processed:
-                _codex_log(account, preset, f"user_scan_processed={processed}")
-        except SystemExit as exc:
-            _mark_codex_error(account, preset, str(exc))
-            _codex_log(account, preset, f"user DM watcher error: {exc}")
-        except Exception as exc:
-            _mark_codex_error(account, preset, str(exc))
-            _codex_log(account, preset, f"user DM watcher error: {exc}")
-        stop_event.wait(interval)
-
-
-def _socket_loop(account, preset, *, once=False):
-    app_token = resolve_app_token(account)
-    bot_token = resolve_token(account)
-    auth_data = auth_test(bot_token)
-    bot_user_id = auth_data.get("user_id") or ""
-    event_cache_context = _event_cache_socket_context(account, preset, _codex_log)
-    socket = _open_socket_mode_connection(app_token)
-    timeout_seconds = _account_int(account, "socket_timeout_seconds", 70)
-    socket.settimeout(timeout_seconds)
-    processed = 0
-    try:
-        while True:
-            try:
-                raw = socket.recv()
-            except Exception as exc:
-                if once:
-                    _codex_log(account, preset, f"once timeout/no event: {exc}")
-                    return processed
-                raise
-            if not raw:
-                continue
-            try:
-                envelope = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            envelope_type = envelope.get("type")
-            if envelope_type == "hello":
-                _codex_log(account, preset, "socket connected")
-                continue
-            if envelope_type == "disconnect":
-                _codex_log(account, preset, f"socket disconnect: {envelope.get('reason') or '-'}")
-                return processed
-            if "envelope_id" in envelope:
-                _ack_socket_envelope(socket, envelope)
-            if envelope_type != "events_api":
-                continue
-            payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-            _event_cache_store_socket_payload_from_context(
-                account,
-                preset,
-                payload,
-                event_cache_context,
-                _codex_log,
-            )
-            event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-            event_info = _eligible_slack_event(event, bot_user_id)
-            if not event_info:
-                continue
-            if _handle_socket_event(account, preset, event_info):
-                processed += 1
-            if once and processed:
-                return processed
-    finally:
-        try:
-            socket.close()
-        except Exception:
-            pass
-
-
-def codex_once(account, preset):
-    account = dict(account)
-    account["_preset"] = preset
-    processed = _socket_loop(account, preset, once=True)
-    print(f"codex_once processed={processed}")
-    return 0
-
-
-def codex_scan(account, preset):
-    account = dict(account)
-    account["_preset"] = preset
-    processed = user_dm_scan_once(account, preset, unread_only=True)
-    print(f"codex_scan processed={processed}")
-    return 0
-
-
-def codex_service(account, preset):
-    account = dict(account)
-    account["_preset"] = preset
-    _codex_log(account, preset, "service started")
-    stop_event = threading.Event()
-    poller = threading.Thread(
-        target=_user_dm_poll_loop,
-        args=(account, preset, stop_event),
-        daemon=True,
-    )
-    poller.start()
-    while True:
-        try:
-            _socket_loop(account, preset, once=False)
-        except SystemExit as exc:
-            _mark_codex_error(account, preset, str(exc))
-            _codex_log(account, preset, f"service error: {exc}")
-            time.sleep(5)
-        except Exception as exc:
-            _mark_codex_error(account, preset, str(exc))
-            _codex_log(account, preset, f"service error: {exc}")
-            time.sleep(5)
-
-
-def codex_status(account, preset):
-    paths = _codex_state_paths(account, preset)
-    state = _read_state(paths["state_file"])
-    state.update(
-        {
-            "config": get_config_path(),
-            "log": str(paths["log_file"]),
-            "state": str(paths["state_file"]),
-            "workspace": _account_string(account, "codex_workspace", "~"),
-            "session_id": _account_string(account, "codex_session_id"),
-            "has_app_token": bool(_has_token(account, "app") or _read_token_file(DEFAULT_APP_TOKEN_FILE)),
-            "has_bot_token": _has_token(account, "bot"),
-        }
-    )
-    print(json.dumps(state, indent=2, sort_keys=True))
-    return 0
-
-
-def codex_reset_state(account, preset):
-    paths = _codex_state_paths(account, preset)
-    _write_state(paths["state_file"], {})
-    _codex_log(account, preset, "state reset")
-    print("state reset")
-    return 0
-
-
-def _codex_unit_name(preset):
-    return f"slack-codex-{_safe_preset_slug(preset)}"
-
-
 def _systemd_unit_dir():
     return Path.home() / ".config" / "systemd" / "user"
-
-
-def _codex_unit_path(preset):
-    return _systemd_unit_dir() / f"{_codex_unit_name(preset)}.service"
 
 
 def _systemctl_user(*args, check=True):
@@ -6419,102 +5682,6 @@ def _systemctl_user(*args, check=True):
         detail = (result.stderr or result.stdout).strip()
         raise SystemExit(f"systemctl --user {' '.join(args)} failed: {detail}")
     return result
-
-
-def _systemd_user_service_active(unit):
-    result = _systemctl_user("is-active", unit, check=False)
-    return result.returncode == 0 and (result.stdout or "").strip() == "active"
-
-
-def write_codex_unit(preset):
-    unit_path = _codex_unit_path(preset)
-    unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(
-        "\n".join(
-            [
-                "[Unit]",
-                f"Description=Slack preset {preset} to Codex event bridge",
-                "After=network-online.target",
-                "",
-                "[Service]",
-                "Type=simple",
-                "Environment=PYTHONUNBUFFERED=1",
-                f"ExecStart=%h/.local/bin/slack {preset} codex service",
-                "Restart=always",
-                "RestartSec=5",
-                "Nice=5",
-                "",
-                "[Install]",
-                "WantedBy=default.target",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    if shutil.which("systemd-analyze") is not None:
-        result = subprocess.run(
-            ["systemd-analyze", "--user", "verify", str(unit_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise SystemExit(f"systemd unit validation failed: {detail}")
-    return unit_path
-
-
-def codex_install_service(preset):
-    write_codex_unit(preset)
-    unit = f"{_codex_unit_name(preset)}.service"
-    _systemctl_user("daemon-reload")
-    _systemctl_user("enable", "--now", unit)
-    _systemctl_user("restart", unit)
-    print(f"service enabled: {unit}")
-    return 0
-
-
-def codex_disable_service(preset):
-    write_codex_unit(preset)
-    unit = f"{_codex_unit_name(preset)}.service"
-    _systemctl_user("disable", "--now", unit, check=False)
-    _systemctl_user("daemon-reload")
-    print(f"service disabled: {unit}")
-    return 0
-
-
-def codex_service_status(preset):
-    result = subprocess.run(
-        ["systemctl", "--user", "status", f"{_codex_unit_name(preset)}.service", "--no-pager"],
-        check=False,
-        text=True,
-    )
-    return result.returncode
-
-
-def codex_service_logs(preset, lines=80):
-    result = subprocess.run(
-        ["journalctl", "--user", "-u", f"{_codex_unit_name(preset)}.service", "-n", str(lines), "--no-pager"],
-        check=False,
-        text=True,
-    )
-    return result.returncode
-
-
-def print_codex_help():
-    print(
-        """Usage:
-  slack <preset> codex once
-  slack <preset> codex scan
-  slack <preset> codex service
-  slack <preset> codex ti
-  slack <preset> codex td
-  slack <preset> codex st
-  slack <preset> codex logs [lines]
-  slack <preset> codex status
-  slack <preset> codex reset-state"""
-    )
-    return 0
 
 
 def _config_path() -> Path:
@@ -6566,30 +5733,6 @@ def _dispatch(argv: list[str]) -> int:
 
     if not args["command"]:
         return 0
-
-    if args["command"] == "codex":
-        action = args["codex_action"]
-        if action == "help":
-            return print_codex_help()
-        if action == "once":
-            return codex_once(account, preset)
-        if action == "scan":
-            return codex_scan(account, preset)
-        if action == "service":
-            return codex_service(account, preset)
-        if action == "ti":
-            return codex_install_service(preset)
-        if action == "td":
-            return codex_disable_service(preset)
-        if action == "st":
-            return codex_service_status(preset)
-        if action == "logs":
-            return codex_service_logs(preset, args["codex_lines"])
-        if action == "status":
-            return codex_status(account, preset)
-        if action == "reset-state":
-            return codex_reset_state(account, preset)
-        raise SystemExit("Use: slack <preset> codex once|scan|service|ti|td|st|logs|status|reset-state")
 
     if args["command"] == "events":
         action = args["events_action"]

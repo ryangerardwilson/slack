@@ -60,7 +60,7 @@ inside each preset and are not shared across accounts.
 
 `slack <preset> ls` prioritizes that preset's `user_token` so it can use Slack's
 `search.messages` fast path across all user-visible conversations, matching
-Lobster's bridge approach. Bot tokens fall back to conversation listing and
+Lobster's search approach. Bot tokens fall back to conversation listing and
 history reads for conversations visible to the bot only.
 
 Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
@@ -79,9 +79,6 @@ Socket Mode with an app-level `xapp-` token that has `connections:write`.
 Subscribe the Slack app to `message.im` and `message.mpim` events. The cache
 uses Socket Mode for new DM/GDM events and the user token for labels, history
 hydration, and periodic reconciliation.
-For event-driven Codex replies, enable Slack Socket Mode, generate an app-level
-`xapp-` token with `connections:write`, and subscribe the app to `app_mention`
-and `message.im` events.
 
 ## Usage
 
@@ -193,10 +190,11 @@ Messages with real Slack files show a nested `<<<X Files>>>` button. In normal
 mode, use `j`/`k` to move line-by-line, Ctrl-N/Ctrl-P to move
 message-by-message, and `g`/`G` to jump through the loaded transcript. `gg`
 works as the same first-message jump. The active line is marked with `>`.
-Use `,mra` in normal mode to mark all loaded DM/GDM conversations read. Press
-`l` on `<<<X Files>>>` to open a file picker modal, then `j`/`k` and `l` inside
-that modal to open the selected file. PDFs default to `zathura`, images default
-to `swayimg`, and other files fall back through `$VISUAL`, `$EDITOR`,
+Use `,mra` from the conversation list or an open conversation in normal mode to
+mark all loaded DM/GDM conversations read. Press `l` on `<<<X Files>>>` to open
+a file picker modal, then `j`/`k` and `l` inside that modal to open the selected
+file. PDFs default to `zathura`, images default to `swayimg`, and other files
+fall back through `$VISUAL`, `$EDITOR`,
 then `vim`. Override viewers with `$SLACK_PDF_VIEWER` or `$SLACK_IMAGE_VIEWER`
 when needed. Press `?` to toggle the shortcuts modal.
 
@@ -220,26 +218,6 @@ Mark all unread DMs as read:
 slack 1 mra
 ```
 
-Run Slack-to-Codex as an event service:
-
-```bash
-slack 1 codex ti
-slack 1 codex status
-slack 1 codex logs 80
-```
-
-The service uses Slack Socket Mode, so it keeps a WebSocket open instead of
-polling once a minute. Direct messages to the app and channel mentions are
-acknowledged immediately, passed into `codex exec resume`, and answered back in
-Slack. Channel mentions are answered in-thread. Personal DMs or mentions of
-your Slack user are not delivered through Socket Mode unless they are sent to
-the app; the service also runs a short-interval user-token scan for unread
-personal DMs and user mentions, then replies from the same Slack CLI service.
-When `codex_prompt` or `codex_wrapper_prompt` is configured, the service only
-sends Codex output that parses as a response directive such as
-`{respond:1,response:"..."}`. `{respond:0,response:""}` and unstructured text
-are treated as no-reply.
-
 Run the realtime DM/GDM cache service:
 
 ```bash
@@ -253,11 +231,8 @@ slack 1 events logs 80
 DM/GDM conversations. `events ti` installs a user systemd service that uses the
 same Slack Socket Mode credentials to acknowledge `message.im` and
 `message.mpim` events as they arrive, while periodically reconciling recent
-history through the user token. If the matching `slack-codex-<preset>` service
-is already active, the events service stays sync-only to avoid opening a second
-Socket Mode connection for the same Slack app; the Codex socket service writes
-the same cache while handling Slack events. `slack 1 ls` and `slack 1 tui` read
-this cache first, then fall back to Slack API reads when the cache is empty.
+history through the user token. `slack 1 ls` and `slack 1 tui` read this cache
+first, then fall back to Slack API reads when the cache is empty.
 
 `slack 1 ls` scans Slack conversations visible to the configured token. Each row
 prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
@@ -293,10 +268,6 @@ Example:
         "bot": "xoxb-...",
         "user": "xoxp-..."
       },
-      "codex_session_id": "019...",
-      "codex_workspace": "/home/ryan",
-      "codex_args": ["--skip-git-repo-check", "--full-auto"],
-      "codex_prompt": "Respond to the user's query below in view of Ryan's instructions. Query: {}; Instructions: Only respond if it is a data retrieval request from genie in the format {respond:1,response:\"your_response\"}, else respond as {respond:0,response:\"\"}.",
       "contacts": {
         "mom": "mom@example.com"
       }
@@ -318,12 +289,6 @@ Example:
 - `auth`: List configured account presets.
 - `auth <preset> -i`: Import legacy OpenClaw token files into a config preset, including `slack-app-token` when present.
 - `auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]`: Create or update an account preset with tokens stored in config under `token`.
-- `codex once`: Connect to Slack Socket Mode and process one eligible event.
-- `codex scan`: Process unread personal DMs once through the user-token watcher.
-- `codex service`: Run the long-lived Slack Socket Mode plus personal-DM watcher to Codex service.
-- `codex ti` / `codex td`: Install or disable the user systemd service for the preset.
-- `codex st` / `codex logs [lines]` / `codex status`: Inspect the event service.
-- `codex reset-state`: Clear the local event-service state file.
 - `events sync`: Warm the local per-preset DM/GDM event cache from recent Slack history.
 - `events once`: Connect to Slack Socket Mode and cache one eligible DM/GDM event.
 - `events service`: Run the long-lived Socket Mode DM/GDM cache with periodic history reconciliation.
@@ -336,7 +301,7 @@ Example:
 - `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
 - `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
 - `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `,mra` to mark all loaded conversations read, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
+- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `,mra` from the conversation list or an open conversation to mark all loaded conversations read, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
 - `ls`: List the latest 10 accessible Slack messages.
 - `ls <number>`: List that many latest accessible Slack messages.
 - `ls <label> <number>`: List that many latest DM messages for one saved label.
