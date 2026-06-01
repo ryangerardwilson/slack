@@ -1,336 +1,71 @@
 # slack
 
-Minimal CLI for Slack message workflows through configured account presets.
+Minimal Slack CLI/TUI for direct-message and adjacent message workflows through configured account presets.
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh | bash
+```sh
+./install.sh -h
+./install.sh -v
+./install.sh -u
 ```
 
-If `~/.local/bin` is not already on your `PATH`, add it once to `~/.bashrc`
-and reload your shell:
+The installed launcher is written to `~/.local/bin/slack`. `slack -v` prints the runtime version from `_version.py`; source checkouts keep `0.0.0` until release automation stamps an artifact.
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-source ~/.bashrc
-```
+## Commands
 
-Canonical installer commands:
-
-```bash
+```sh
 slack -h
 slack -v
 slack -u
-```
 
-`slack -v` prints the installed app version from `_version.py`. Source checkouts may keep a placeholder value until release automation stamps the shipped artifact.
-
-## Setup
-
-Create a local venv and install dependencies:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Slack account tokens are stored in `~/.config/slack/config.json` as account
-presets, similar to the Gmail CLI:
-
-```bash
-slack auth 1 -bt xoxb-... -ut xoxp-... -at xapp-... -n personal
-slack auth 2 -bt xoxb-... -ut xoxp-... -at xapp-... -n work
+slack config
 slack auth
-```
-
-If you already have the older OpenClaw token files, import them into preset `1`:
-
-```bash
-slack auth 1 -i
-```
-
-Legacy env vars and token files still work as fallback when no account preset is
-configured. Prefer config presets for normal use.
-
-When `accounts` exists in the config, account-scoped commands use an explicit
-numeric preset like `slack 1 ls` or `slack 2 post ...`. Contacts are stored
-inside each preset and are not shared across accounts.
-
-`slack <preset> ls` prioritizes that preset's `user_token` so it can use Slack's
-`search.messages` fast path across all user-visible conversations, matching
-Lobster's search approach. Bot tokens fall back to conversation listing and
-history reads for conversations visible to the bot only.
-
-Required practical bot scopes: `chat:write`, `im:write`, `im:read`,
-`im:history`, `users:read`, `files:write`. Add `users:read.email` to the bot
-token only if it must resolve email contacts without a configured user token.
-Recommended for `df` and `ls -o`: `files:read`.
-For the user-token fast path, use `search:read`, `im:read`, `im:history`,
-`users:read`, `users:read.email`, and `files:read` when attachment reads matter.
-For `tui`, add `search:read`, `users:read`, `im:read`, `im:history`,
-`im:write`, `mpim:read`, `mpim:history`, `mpim:write`, `chat:write`, and
-`files:read` to the user token scopes. `im:write` and `mpim:write` are required
-for opening conversations to mark them read through Slack's `conversations.mark`
-API.
-For the realtime `events` cache, keep those user-token scopes and enable Slack
-Socket Mode with an app-level `xapp-` token that has `connections:write`.
-Subscribe the Slack app to `message.im` and `message.mpim` events. The cache
-uses Socket Mode for new DM/GDM events and the user token for labels, history
-hydration, and periodic reconciliation.
-
-## Usage
-
-Show help:
-
-```bash
-slack -h
-```
-
-Add a contact:
-
-```bash
-slack 1 ac mom mom@example.com
-```
-
-Search saved contacts and Slack workspace users:
-
-```bash
-slack 1 su rohan
-slack 1 su "rohan choudhary"
-```
-
-Open the real config file in your editor:
-
-```bash
-slack cfg
-```
-
-Post to a saved contact label:
-
-```bash
-slack 1 post mom "hello"
-```
-
-Post to an email address:
-
-```bash
-slack 1 post someone@company.com "hello"
-```
-
-Post to a channel or group conversation id:
-
-```bash
-slack 1 post C0AE059EU5T "sharing the update here"
-```
-
-Post to the same conversation as a message id without replying in-thread:
-
-```bash
-slack 1 post C0AE059EU5T:1712764800.000100 "new top-level message in this conversation"
-```
-
-Reply in the thread for a message id:
-
-```bash
-slack 1 reply C0AE059EU5T:1712764800.000100 "replying in thread"
-```
-
-Post with files and directories zipped on the fly:
-
-```bash
-slack 1 post design "assets attached" ~/Downloads/mock.png ~/Projects/site/export ~/Downloads/spec.pdf
-```
-
-List accessible Slack message history, including message ids, conversation
-surface, sender, text, and attachment/embed names:
-
-```bash
-slack 1 ls
-slack 1 ls 10
-slack 1 ls md 10
-slack 1 ls -l 20
-slack 1 ls -f maanas -tl 2w -l 10
-slack 1 ls -c invoice -tl "jan 2025" -l 20
-slack 1 ls -ur 10
-slack 1 ls md -r 10
-slack 1 ls md -o 5
-slack 1 ls rc
-```
-
-Open a conversation or exact message id, mark it read, download every attachment
-on the opened message, show text, and print snippet code blocks:
-
-```bash
-slack 1 o D0466D63H7B
-slack 1 o D0466D63H7B:1712764800.000100
-```
-
-Open the DM/group-DM TUI:
-
-```bash
-slack 1 tui
-```
-
-The TUI starts on a recent-conversations screen derived from the latest 100
-DM/group-DM messages. Use `j`/`k` to move, `l` or Enter to open a conversation.
-Conversations open in normal mode, with the latest message focused. Press `i`
-to enter insert mode, type the message, Enter to send, and Esc to return to
-normal mode. Press `h` in normal mode to return to the conversation list. The
-insert-mode composer uses Erza-style editing: Ctrl-A/Ctrl-E for start/end,
-Ctrl-B/Ctrl-F for character movement, Alt-B/Alt-F for word movement,
-Ctrl-W/Ctrl-H for deleting the previous word/character, and Ctrl-D/Ctrl-K/Ctrl-U
-for deleting the next character/to end/full input. The
-conversation list shows participant names, omits message previews, and sorts
-conversations with the most recent unread message first before normal recency.
-The conversation screen hydrates the latest 100 messages for that DM/GDM,
-renders messages in boxed rows, and shows embeds inline as text in an embed box.
-Messages with real Slack files show a nested `<<<X Files>>>` button. In normal
-mode, use `j`/`k` to move line-by-line, Ctrl-N/Ctrl-P to move
-message-by-message, and `g`/`G` to jump through the loaded transcript. `gg`
-works as the same first-message jump. The active line is marked with `>`.
-Use `,mra` from the conversation list or an open conversation in normal mode to
-mark all loaded DM/GDM conversations read. Press `l` on `<<<X Files>>>` to open
-a file picker modal, then `j`/`k` and `l` inside that modal to open the selected
-file. PDFs default to `zathura`, images default to `swayimg`, and other files
-fall back through `$VISUAL`, `$EDITOR`,
-then `vim`. Override viewers with `$SLACK_PDF_VIEWER` or `$SLACK_IMAGE_VIEWER`
-when needed. Press `?` to toggle the shortcuts modal.
-
-When the installed Erza runtime is available, `slack tui` uses `erza.chat` for
-the shared conversation-list, boxed transcript, composer, and file-picker
-interaction model, including the Erza matrix loading overlay for slow message
-loads and sends. The older local curses loop remains as a fallback for older
-installs or packaging environments without Erza on disk, and uses the same
-matrix-style loading overlay for active conversation loads, refreshes, and
-sends.
-
-Clear stale conversations and bot-like conversations:
-
-```bash
-slack 1 sc
-```
-
-`sc` closes DMs whose counterpart has no email or whose latest activity is older than about 6 months. It also leaves joined public channels whose creator has no email or whose channel update time is older than about 6 months. Private channels and group DMs are skipped when the token lacks the required scopes.
-
-Mark all unread DMs as read:
-
-```bash
-slack 1 mra
-```
-
-Run the realtime DM/GDM cache service:
-
-```bash
+slack auth 1 import
+slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
+slack 1 contacts add mom mom@example.com
+slack 1 contacts list
+slack 1 users search rohan
+slack 1 send to mom body "hello"
+slack 1 send to C0AE059EU5T body "group update"
+slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
+slack 1 files download D0466D63H7B F0AH0LD4133
+slack 1 open conversation D0466D63H7B
+slack 1 open message D0466D63H7B:1712764800.000100
+slack 1 open tui
+slack 1 list unread from maanas since 2w limit 10
+slack 1 list containing invoice since "jan 2025" limit 20
+slack 1 conversations clean
+slack 1 mark all read
 slack 1 events sync
-slack 1 events ti
+slack 1 events service
+slack 1 events timer install
+slack 1 events timer disable
 slack 1 events status
 slack 1 events logs 80
+slack 1 events reset cache
 ```
 
-`events sync` warms the local per-preset SQLite cache from the latest visible
-DM/GDM conversations. `events ti` installs a user systemd service that uses the
-same Slack Socket Mode credentials to acknowledge `message.im` and
-`message.mpim` events as they arrive, while periodically reconciling recent
-history through the user token. `slack 1 ls` and `slack 1 tui` read this cache
-first, then fall back to Slack API reads when the cache is empty.
+## Config
 
-`slack 1 ls` scans Slack conversations visible to the configured token. Each row
-prints `surface`, `conversation`, and `channel_id` so individual DMs, group DMs,
-and channels are distinguishable. The `attachments` row shows file and embed
-names only, so `slack 1 o <message_id>` can be used when they need to be opened
-or downloaded. Saved contacts are still used for friendly labels such as
-`slack 1 ls md -l 10`.
-`mra` still operates on contacts you have saved with `ac`.
-
-## Contacts
-
-Account presets, tokens, and contacts are stored in `~/.config/slack/config.json`.
-Use a single `token` object per preset. Legacy flat keys such as `bot_token`,
-`user_token`, and `app_token` are still readable for older configs, but new auth
-writes the compact shape below. Slack team metadata such as `team`, `team_id`,
-`url`, and `user_id` is optional and not required for normal CLI operation.
-
-Open that file directly with:
-
-```bash
-slack cfg
-```
-
-Example:
+`slack config` opens `~/.config/slack/config.json` or `$XDG_CONFIG_HOME/slack/config.json`.
 
 ```json
 {
   "accounts": {
     "1": {
-      "name": "personal",
-      "token": {
-        "app": "xapp-...",
-        "bot": "xoxb-...",
-        "user": "xoxp-..."
-      },
-      "contacts": {
-        "mom": "mom@example.com"
-      }
-    },
-    "2": {
       "name": "work",
       "token": {
         "bot": "xoxb-...",
-        "user": "xoxp-..."
+        "user": "xoxp-...",
+        "app": "xapp-..."
+      },
+      "contacts": {
+        "mom": "mom@example.com"
       }
     }
   }
 }
 ```
 
-## Options
-
-- `ac`: Save a contact label for an email address.
-- `auth`: List configured account presets.
-- `auth <preset> -i`: Import legacy OpenClaw token files into a config preset, including `slack-app-token` when present.
-- `auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]`: Create or update an account preset with tokens stored in config under `token`.
-- `events sync`: Warm the local per-preset DM/GDM event cache from recent Slack history.
-- `events once`: Connect to Slack Socket Mode and cache one eligible DM/GDM event.
-- `events service`: Run the long-lived Socket Mode DM/GDM cache with periodic history reconciliation.
-- `events ti` / `events td`: Install or disable the user systemd service for the preset.
-- `events st` / `events logs [lines]` / `events status`: Inspect the realtime cache service.
-- `events reset-cache`: Clear the local per-preset event cache database.
-- `su <query>`: Search saved contact labels/emails and Slack workspace users.
-- `cfg`: Open the real config file in `$VISUAL`, then `$EDITOR`, then `vim`.
-- `post <target> <message> [path...]`: Post to a saved contact label, email, Slack user id, channel id, or message id. Message ids resolve to their conversation and send a new top-level message. When both tokens are configured, person targets use the user token so saved contacts land in Ryan's actual DMs; explicit channel/message targets use the normal post token path. Files and directories are supported; directories are zipped on the fly.
-- `reply <message_id> <message> [path...]`: Reply in the thread for an exact message id, with optional file or directory attachments.
-- `df <channel_id> <file_id> [output_path]`: Download an attached file from a conversation by its channel id and file id.
-- `o <channel_id|message_id>`: Open a conversation or exact message id, mark it read, print full text, download every attached file/embed, and print snippet code blocks inline. Multiple files/embeds from one message are packaged into one zip.
-- `tui`: Open a curses TUI for recent Slack DM/group-DM conversations only. Use `j`/`k` on the conversation list, `l` or Enter to open one, normal-mode `j`/`k` for line movement, Ctrl-N/Ctrl-P for message movement, `g`/`gg`/`G` for first/latest message, `,mra` from the conversation list or an open conversation to mark all loaded conversations read, `l` on `<<<X Files>>>` to open the file picker, `i` to enter insert mode, Enter to send, Esc back to normal mode, `h` to return, and `?` for shortcuts. Insert mode uses Erza-style editing: Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F, Alt-B/Alt-F, Ctrl-W/Ctrl-H, and Ctrl-D/Ctrl-K/Ctrl-U. Embeds render inline as text boxes instead of file-picker items. PDFs/images use viewer defaults before editor fallback.
-- `ls`: List the latest 10 accessible Slack messages.
-- `ls <number>`: List that many latest accessible Slack messages.
-- `ls <label> <number>`: List that many latest DM messages for one saved label.
-- `ls -l <limit>`: List a specific number of messages.
-- `ls -f <from>`: Filter by sender name, email, user id, or saved contact metadata.
-- `ls -c <contains>`: Filter by message text.
-- `ls -tl <time_limit>`: Filter by time, using shapes such as `2w`, `14d`, `2025-01`, `"jan 2025"`, `2025-01-10`, or `2025-01-10..2025-01-20`.
-- `ls -ur` / `ls -r`: Filter unread or read Slack messages.
-- `ls ... -o ...`: For the selected messages, also print full text, download attachments/embeds, and print full snippet code blocks.
-- `ls rc`: List all registered contact labels and emails from local config.
-- `mra`: Mark all unread saved-contact direct messages as read.
-- `sc`: Close stale DMs and leave stale public channels, with explicit skips for unsupported conversation types.
-- `-v`: Print version and exit.
-- `-u`: Upgrade via the installer script.
-- `-h`: Show help.
-
-## Development
-
-Run from source while developing:
-
-```bash
-python main.py -h
-python main.py -v
-```
-
-The installer downloads the latest release binary into `~/.slack/app`.
-
-## Release workflow
-
-Tags like `v0.1.0` trigger GitHub Actions to build `slack-linux-x64.tar.gz` and publish a release.
+User tokens are preferred for listing and person-targeted DMs. The events service owns the per-preset DM/GDM cache used by `list` and `open tui`.

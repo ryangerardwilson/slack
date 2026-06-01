@@ -113,7 +113,7 @@ class InstallContractTests(unittest.TestCase):
             public_launcher = Path('$HOME/.local/bin'.replace("$HOME", str(home_dir))) / 'slack'
             self.assertTrue(public_launcher.exists())
             public_text = public_launcher.read_text(encoding="utf-8")
-            self.assertIn('# Managed by rgw_cli_contract local-bin launcher', public_text)
+            self.assertIn('# Managed by slack installer local-bin launcher', public_text)
             self.assertIn(f'exec "{internal_launcher}" "$@"', public_text)
             version = subprocess.run(
                 [str(public_launcher), '-v'],

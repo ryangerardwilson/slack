@@ -11,43 +11,19 @@ import tempfile
 import textwrap
 import threading
 import time
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from _version import __version__
-from rgw_cli_contract import (
-    AppSpec,
-    open_config_in_editor,
-    resolve_install_script_path,
-    run_app,
-)
 
 USER_TOKEN_PREFIXES = ("xoxp-", "xoxc-")
 BOT_TOKEN_PREFIX = "xoxb-"
 APP_TOKEN_PREFIX = "xapp-"
 USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
 CONVERSATION_ID_RE = re.compile(r"^[CDG][A-Z0-9]+$")
-COMMANDS = {
-    "ac",
-    "auth",
-    "cfg",
-    "conf",
-    "df",
-    "dm",
-    "event",
-    "events",
-    "ls",
-    "mra",
-    "o",
-    "post",
-    "reply",
-    "sc",
-    "su",
-    "tui",
-    "u",
-}
 DEFAULT_BOT_TOKEN_FILE = "~/.openclaw/credentials/slack-bot-token"
 DEFAULT_USER_TOKEN_FILE = "~/.openclaw/credentials/slack-user-token"
 DEFAULT_APP_TOKEN_FILE = "~/.openclaw/credentials/slack-app-token"
@@ -87,7 +63,9 @@ _MONTH_NAMES = {
     "december": 12,
 }
 _TIME_LIMIT_SHAPE = '2w | 14d | 3m | 1y | 2025-01 | "jan 2025" | 2025-01-10 | 2025-01-10..2025-01-20'
-INSTALL_SCRIPT = resolve_install_script_path(__file__)
+ANSI_GRAY = "\033[38;5;245m"
+ANSI_RESET = "\033[0m"
+INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh"
 CONFIG_BOOTSTRAP_TEXT = '{\n  "accounts": {}\n}\n'
 HELP_TEXT = """Slack CLI
 
@@ -101,80 +79,121 @@ flags:
 
 features:
   save a contact label for a frequently used Slack recipient
-  # slack <preset> ac <label> <email>
-  slack 1 ac mom mom@example.com
-  slack 1 ac boss boss@company.com
+  # <preset> contacts add <label> <email>
+  slack 1 contacts add mom mom@example.com
+  slack 1 contacts add boss boss@company.com
 
   edit the saved-contact config directly in your editor
-  # slack conf
-  slack conf
+  # config
+  slack config
 
   configure Slack account presets with tokens stored in config.json
   # slack auth
-  # slack auth <preset> -i
-  # slack auth <preset> -bt <bot_token> [-ut <user_token>] [-at <app_token>] [-n <name>]
+  # slack auth <preset> import
+  # slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]
   slack auth
-  slack auth 1 -i
-  slack auth 2 -bt xoxb-... -ut xoxp-... -at xapp-... -n work
+  slack auth 1 import
+  slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
 
-  keep a local realtime DM/GDM event cache for faster ls/tui loads
-  # slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache
-  slack 1 events ti
+  keep a local realtime DM/GDM event cache for faster list and TUI loads
+  # <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status
+  slack 1 events timer install
   slack 1 events status
 
-  post a message from a configured Slack account to a contact, channel, or conversation
-  # slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...]
-  slack 1 post mom "hello"
-  slack 1 post boss@company.com "latest draft" ~/Downloads/draft.pdf
-  slack 1 post C0AE059EU5T "group update"
-  slack 1 post C0AE059EU5T:1712764800.000100 "same conversation, new top-level message"
+  send a message from a configured Slack account to a contact, channel, or conversation
+  # <preset> send to <label|email|message_id|channel_id> body <message> [attach <path> ...]
+  slack 1 send to mom body "hello"
+  slack 1 send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
+  slack 1 send to C0AE059EU5T body "group update"
 
   reply in the thread for an exact Slack message id
-  # slack <preset> reply <message_id> <message> [path...]
-  slack 1 reply C0AE059EU5T:1712764800.000100 "reply in thread"
+  # <preset> reply to <message_id> body <message> [attach <path> ...]
+  slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 
   download a file attachment from a conversation by channel_id and file_id
-  # slack <preset> df <channel_id> <file_id> [output_path]
-  slack 1 df D0466D63H7B F0AH0LD4133
+  # <preset> files download <channel_id> <file_id> [to <path>]
+  slack 1 files download D0466D63H7B F0AH0LD4133
 
   open a conversation or exact message id, mark it read, show text, download files, and print code blocks
-  # slack <preset> o <channel_id|message_id>
-  slack 1 o D0466D63H7B
-  slack 1 o D0466D63H7B:1712764800.000100
+  # <preset> open conversation <channel_id> | <preset> open message <message_id>
+  slack 1 open conversation D0466D63H7B
+  slack 1 open message D0466D63H7B:1712764800.000100
 
   open a keyboard-first terminal view for the latest 100 DM/group-DM messages
-  # slack <preset> tui
-  slack 1 tui
+  # <preset> open tui
+  slack 1 open tui
 
   list Slack message history with Gmail-style filters, surface labels, and attachment names
-  # slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]
-  slack 1 ls
-  slack 1 ls 10
-  slack 1 ls md 10
-  slack 1 ls -l 20
-  slack 1 ls -f maanas -tl 2w -l 10
-  slack 1 ls -c invoice -tl "jan 2025" -l 20
-  slack 1 ls -ur 10
-  slack 1 ls md -r 10
-  slack 1 ls md -o 5
+  # <preset> list [unread|read] [from <name>] [containing <text>] [since <window>] [limit <count>] [for <label>] [open]
+  slack 1 list limit 10
+  slack 1 list unread from maanas since 2w limit 10
+  slack 1 list containing invoice since "jan 2025" limit 20
+  slack 1 list for md read open limit 5
 
   list all registered contact labels
-  # slack <preset> ls rc
-  slack 1 ls rc
+  # <preset> contacts list
+  slack 1 contacts list
 
   search saved contacts and Slack workspace users
-  # slack <preset> su <query>
-  slack 1 su rohan
-  slack 1 su "rohan choudhary"
+  # <preset> users search <query>
+  slack 1 users search rohan
+  slack 1 users search "rohan choudhary"
 
   clear stale conversations and bot-like conversations
-  # slack <preset> sc
-  slack 1 sc
+  # <preset> conversations clean
+  slack 1 conversations clean
 
   mark all unread saved-contact direct messages as read
-  # slack <preset> mra
-  slack 1 mra
+  # <preset> mark all read
+  slack 1 mark all read
 """
+
+
+def muted(text):
+    if not sys.stdout.isatty() or "NO_COLOR" in os.environ:
+        return text
+    return f"{ANSI_GRAY}{text}{ANSI_RESET}"
+
+
+def print_help():
+    print(muted(HELP_TEXT.rstrip()))
+
+
+def upgrade_app():
+    with urllib.request.urlopen(INSTALL_SCRIPT_URL) as response:
+        script_body = response.read()
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        handle.write(script_body)
+        script_path = Path(handle.name)
+    try:
+        script_path.chmod(0o700)
+        result = subprocess.run(
+            ["/usr/bin/env", "bash", str(script_path), "-u"],
+            check=False,
+            text=True,
+            env=os.environ.copy(),
+        )
+        return result.returncode
+    finally:
+        script_path.unlink(missing_ok=True)
+
+
+def open_config_in_editor_local(config_path, bootstrap_text):
+    path = Path(config_path).expanduser()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(bootstrap_text, encoding="utf-8")
+    editor_cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vim"
+    editor_parts = shlex.split(editor_cmd)
+    if not editor_parts:
+        raise SystemExit("Editor command is empty. Set VISUAL or EDITOR.")
+    try:
+        result = subprocess.run([*editor_parts, str(path)], check=False)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Editor not found: {editor_cmd}. Set VISUAL or EDITOR.") from exc
+    if result.returncode != 0:
+        raise SystemExit(f"Editor exited with code {result.returncode}")
+    return 0
 
 
 def get_env(name):
@@ -308,22 +327,19 @@ def _requests():
 
 def _ls_usage():
     return (
-        "Use: slack <preset> ls rc | slack <preset> ls [label] [-ur|-r] [-o] "
-        "[-l <limit>] [-f <from>] [-c <contains>] [-tl <time_limit>]"
+        "Use: slack <preset> contacts list | slack <preset> list [unread|read] "
+        "[for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [open]"
     )
 
 
 def _top_level_usage():
     return (
-        "Use: slack auth [<preset> -i|-bt <bot_token> [-ut <user_token>] [-at <app_token>]] | "
-        "slack <preset> ac <label> <email> | slack <preset> su <query> | slack conf | "
-        "slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache | "
-        "slack <preset> post <contact_label|email|message_id|channel_id> <message> [path...] | "
-        "slack <preset> reply <message_id> <message> [path...] | "
-        "slack <preset> df <channel_id> <file_id> [output_path] | "
-        "slack <preset> o <channel_id|message_id> | slack <preset> tui | slack <preset> ls rc | "
-        "slack <preset> ls [label] [-ur|-r] [-o] [-l <limit>] [-f <from>] "
-        "[-c <contains>] [-tl <time_limit>] | slack <preset> sc | slack <preset> mra"
+        "Use: slack auth | slack auth <preset> import | "
+        "slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>] | "
+        "slack config | slack <preset> contacts add <label> <email> | "
+        "slack <preset> send to <target> body <message> [attach <path> ...] | "
+        "slack <preset> reply to <message_id> body <message> [attach <path> ...] | "
+        "slack <preset> list [unread|read] [from <name>] [since <window>] [limit <count>]"
     )
 
 
@@ -367,236 +383,265 @@ def parse_args(argv):
         "events_action": None,
         "events_lines": 80,
         "config": None,
-        "version": False,
-        "upgrade": False,
     }
 
     if not argv:
         return args
+    if argv[0] == "config":
+        if len(argv) != 1:
+            raise SystemExit("Use: slack config")
+        args["command"] = "config"
+        return args
+    if argv[0] == "auth":
+        _parse_auth_args(args, argv[1:])
+        return args
+    if argv[0] in {"cfg", "conf", "ac", "post", "dm", "reply", "df", "o", "ls", "su", "u", "mra", "sc"}:
+        raise SystemExit("Use declarative Slack commands. Run: slack -h")
+    if not argv[0].isdigit():
+        raise SystemExit(_top_level_usage())
+    if len(argv) < 2:
+        raise SystemExit("Use: slack <preset> <command>")
+    args["preset"] = argv[0]
+    command = argv[1]
+    remaining = argv[2:]
+    if command in {"ac", "post", "dm", "df", "o", "ls", "su", "u", "mra", "sc", "tui"}:
+        raise SystemExit("Use declarative Slack commands. Run: slack -h")
+    if command == "contacts":
+        _parse_contacts_args(args, remaining)
+        return args
+    if command == "users":
+        _parse_users_args(args, remaining)
+        return args
+    if command == "events":
+        _parse_events_args(args, remaining)
+        return args
+    if command == "send":
+        _parse_send_args_declarative(args, remaining)
+        return args
+    if command == "reply":
+        _parse_reply_args_declarative(args, remaining)
+        return args
+    if command == "files":
+        _parse_files_args(args, remaining)
+        return args
+    if command == "open":
+        _parse_open_args(args, remaining)
+        return args
+    if command == "list":
+        _parse_list_args_declarative(args, remaining)
+        return args
+    if command == "conversations":
+        if remaining != ["clean"]:
+            raise SystemExit("Use: slack <preset> conversations clean")
+        args["command"] = "sc"
+        return args
+    if command == "mark":
+        if remaining != ["all", "read"]:
+            raise SystemExit("Use: slack <preset> mark all read")
+        args["command"] = "mra"
+        return args
+    raise SystemExit(_top_level_usage())
 
+
+def _parse_auth_args(args, remaining):
+    if not remaining:
+        args["command"] = "auth"
+        args["auth_list"] = True
+        return
+    auth_preset = remaining[0]
+    if not auth_preset or auth_preset.startswith("-"):
+        raise SystemExit("Use: slack auth <preset> import | slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]")
+    args["command"] = "auth"
+    args["auth_preset"] = auth_preset
+    rest = remaining[1:]
+    if rest == ["import"]:
+        args["auth_import"] = True
+        return
     index = 0
-    if len(argv) >= 2 and argv[0].isdigit() and argv[1] in COMMANDS:
-        args["preset"] = argv[0]
-        index = 1
-    while index < len(argv):
-        token = argv[index]
-
-        if token == "-cfg":
-            if index + 1 >= len(argv):
-                raise SystemExit("Use: slack -cfg <config_path>")
-            args["config"] = argv[index + 1]
+    while index < len(rest):
+        token = rest[index]
+        if token in {"bot", "user", "app", "name"}:
+            if index + 1 >= len(rest):
+                raise SystemExit(f"auth {token} requires a value")
+            value = rest[index + 1]
+            if token == "bot":
+                args["auth_bot_token"] = value
+            elif token == "user":
+                args["auth_user_token"] = value
+            elif token == "app":
+                args["auth_app_token"] = value
+            else:
+                args["auth_name"] = value
             index += 2
             continue
-        if token.startswith("-"):
-            raise SystemExit(f"Unknown flag: {token}")
+        raise SystemExit("Use: slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]")
 
-        if args["command"] is not None:
-            raise SystemExit(_top_level_usage())
 
-        args["command"] = token
-        remaining = argv[index + 1 :]
-        if token == "ac":
-            if len(remaining) != 2:
-                raise SystemExit("Use: slack ac <label> <email>")
-            args["label"], args["email"] = remaining
-            return args
-        if token in {"cfg", "conf"}:
-            if remaining:
-                raise SystemExit("Use: slack conf")
-            return args
-        if token == "auth":
-            if not remaining:
-                if args["preset"]:
-                    args["auth_preset"] = args["preset"]
-                    return args
-                args["auth_list"] = True
-                return args
-            if args["preset"] and remaining[0].startswith("-"):
-                auth_preset = args["preset"]
-                i = 0
-            else:
-                auth_preset = remaining[0]
-                i = 1
-            if not auth_preset or auth_preset.startswith("-"):
-                raise SystemExit(
-                    "Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-at <app_token>] [-n <name>]"
-                )
-            args["auth_preset"] = auth_preset
-            while i < len(remaining):
-                item = remaining[i]
-                if item == "-i":
-                    args["auth_import"] = True
-                    i += 1
-                    continue
-                if item == "-bt":
-                    if i + 1 >= len(remaining):
-                        raise SystemExit("auth -bt requires: <bot_token>")
-                    args["auth_bot_token"] = remaining[i + 1]
-                    i += 2
-                    continue
-                if item == "-ut":
-                    if i + 1 >= len(remaining):
-                        raise SystemExit("auth -ut requires: <user_token>")
-                    args["auth_user_token"] = remaining[i + 1]
-                    i += 2
-                    continue
-                if item == "-at":
-                    if i + 1 >= len(remaining):
-                        raise SystemExit("auth -at requires: <app_token>")
-                    args["auth_app_token"] = remaining[i + 1]
-                    i += 2
-                    continue
-                if item == "-n":
-                    if i + 1 >= len(remaining):
-                        raise SystemExit("auth -n requires: <name>")
-                    args["auth_name"] = remaining[i + 1]
-                    i += 2
-                    continue
-                raise SystemExit(f"Unknown auth option: {item}")
-            return args
-        if token in {"events", "event"}:
-            args["command"] = "events"
-            if not remaining or remaining[0] in {"help", "-h"}:
-                args["events_action"] = "help"
-                return args
-            action = remaining[0]
-            rest = remaining[1:]
-            if action in {"once", "sync", "service", "ti", "td", "st", "status", "reset-cache"}:
-                if rest:
-                    raise SystemExit(f"Use: slack <preset> events {action}")
-                args["events_action"] = action
-                return args
-            if action == "logs":
-                if len(rest) > 1:
-                    raise SystemExit("Use: slack <preset> events logs [lines]")
-                if rest:
-                    args["events_lines"] = _parse_positive_int(rest[0], "events logs lines")
-                args["events_action"] = action
-                return args
-            raise SystemExit("Use: slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache")
-        if token in {"post", "dm"}:
-            if len(remaining) < 2:
-                raise SystemExit(
-                    "Use: slack post <contact_label|email|message_id|channel_id> <message> [path...]"
-                )
-            args["command"] = "post"
-            args["recipient"] = remaining[0]
-            args["message"] = remaining[1]
-            args["paths"] = remaining[2:]
-            return args
-        if token == "reply":
-            if len(remaining) < 2:
-                raise SystemExit("Use: slack reply <message_id> <message> [path...]")
-            if not parse_message_id(remaining[0]):
-                raise SystemExit("Use: slack reply <message_id> <message> [path...]")
-            args["recipient"] = remaining[0]
-            args["message"] = remaining[1]
-            args["paths"] = remaining[2:]
-            return args
-        if token == "df":
-            if len(remaining) < 2 or len(remaining) > 3:
-                raise SystemExit("Use: slack df <channel_id> <file_id> [output_path]")
-            args["recipient"] = remaining[0]
-            args["file_id"] = remaining[1]
-            if len(remaining) == 3:
-                args["output_path"] = remaining[2]
-            return args
-        if token == "o":
-            if len(remaining) != 1:
-                raise SystemExit("Use: slack o <channel_id|message_id>")
-            args["recipient"] = remaining[0]
-            args["open_mode"] = True
-            return args
-        if token == "tui":
-            if remaining:
-                raise SystemExit("Use: slack <preset> tui")
-            return args
-        if token == "ls":
-            if remaining == ["rc"]:
-                args["ls_registry"] = True
-                return args
-            parts = list(remaining)
-            positionals = []
-            saw_limit = False
-            i = 0
-            while i < len(parts):
-                item = parts[i]
-                if item == "-o":
-                    args["open_mode"] = True
-                    i += 1
-                    continue
-                if item in ("-ur", "-r"):
-                    if args["ls_filter"] != "all":
-                        raise SystemExit(_ls_usage())
-                    args["ls_filter"] = "unread" if item == "-ur" else "read"
-                    i += 1
-                    continue
-                if item == "-l":
-                    if i + 1 >= len(parts):
-                        raise SystemExit("ls -l requires: <limit>")
-                    if saw_limit:
-                        raise SystemExit("ls accepts only one -l <limit>")
-                    args["ls_limit"] = _parse_positive_int(parts[i + 1], "ls -l limit")
-                    saw_limit = True
-                    i += 2
-                    continue
-                if item == "-f":
-                    if i + 1 >= len(parts):
-                        raise SystemExit("ls -f requires: <from>")
-                    args["ls_from"] = parts[i + 1]
-                    i += 2
-                    continue
-                if item == "-c":
-                    if i + 1 >= len(parts):
-                        raise SystemExit("ls -c requires: <contains>")
-                    args["ls_contains"] = parts[i + 1]
-                    i += 2
-                    continue
-                if item == "-tl":
-                    if i + 1 >= len(parts):
-                        raise SystemExit("ls -tl requires: <time_limit>")
-                    args["ls_time_limit"] = parts[i + 1]
-                    i += 2
-                    continue
-                if item.startswith("-"):
-                    raise SystemExit(f"Unknown ls option: {item}")
-                positionals.append(item)
-                i += 1
+def _parse_contacts_args(args, remaining):
+    if remaining == ["list"]:
+        args["command"] = "ls"
+        args["ls_registry"] = True
+        return
+    if len(remaining) == 3 and remaining[0] == "add":
+        args["command"] = "ac"
+        args["label"] = remaining[1]
+        args["email"] = remaining[2]
+        return
+    raise SystemExit("Use: slack <preset> contacts list|add <label> <email>")
 
-            if len(positionals) > 2:
+
+def _parse_users_args(args, remaining):
+    if len(remaining) < 2 or remaining[0] != "search":
+        raise SystemExit("Use: slack <preset> users search <query>")
+    query = " ".join(remaining[1:]).strip()
+    if not query:
+        raise SystemExit("Use: slack <preset> users search <query>")
+    args["command"] = "su"
+    args["query"] = query
+
+
+def _parse_events_args(args, remaining):
+    args["command"] = "events"
+    if not remaining:
+        args["events_action"] = "help"
+        return
+    if remaining[:1] == ["timer"]:
+        if len(remaining) != 2 or remaining[1] not in {"install", "disable", "status"}:
+            raise SystemExit("Use: slack <preset> events timer install|disable|status")
+        args["events_action"] = {"install": "ti", "disable": "td", "status": "st"}[remaining[1]]
+        return
+    if remaining == ["reset", "cache"]:
+        args["events_action"] = "reset-cache"
+        return
+    action = remaining[0]
+    rest = remaining[1:]
+    if action in {"once", "sync", "service", "status"}:
+        if rest:
+            raise SystemExit(f"Use: slack <preset> events {action}")
+        args["events_action"] = action
+        return
+    if action == "logs":
+        if len(rest) > 1:
+            raise SystemExit("Use: slack <preset> events logs [lines]")
+        if rest:
+            args["events_lines"] = _parse_positive_int(rest[0], "events logs lines")
+        args["events_action"] = action
+        return
+    raise SystemExit("Use: slack <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status")
+
+
+def _parse_message_body_and_paths(remaining, shape):
+    if len(remaining) < 2 or remaining[0] != "body":
+        raise SystemExit(shape)
+    message = remaining[1]
+    paths = []
+    index = 2
+    while index < len(remaining):
+        if remaining[index] != "attach":
+            raise SystemExit(shape)
+        index += 1
+        if index >= len(remaining):
+            raise SystemExit("attach requires at least one path")
+        while index < len(remaining) and remaining[index] != "attach":
+            paths.append(remaining[index])
+            index += 1
+    return message, paths
+
+
+def _parse_send_args_declarative(args, remaining):
+    shape = "Use: slack <preset> send to <target> body <message> [attach <path> ...]"
+    if len(remaining) < 4 or remaining[0] != "to":
+        raise SystemExit(shape)
+    message, paths = _parse_message_body_and_paths(remaining[2:], shape)
+    args["command"] = "post"
+    args["recipient"] = remaining[1]
+    args["message"] = message
+    args["paths"] = paths
+
+
+def _parse_reply_args_declarative(args, remaining):
+    shape = "Use: slack <preset> reply to <message_id> body <message> [attach <path> ...]"
+    if len(remaining) < 4 or remaining[0] != "to":
+        raise SystemExit(shape)
+    if not parse_message_id(remaining[1]):
+        raise SystemExit(shape)
+    message, paths = _parse_message_body_and_paths(remaining[2:], shape)
+    args["command"] = "reply"
+    args["recipient"] = remaining[1]
+    args["message"] = message
+    args["paths"] = paths
+
+
+def _parse_files_args(args, remaining):
+    shape = "Use: slack <preset> files download <channel_id> <file_id> [to <path>]"
+    if len(remaining) not in {3, 5} or remaining[:1] != ["download"]:
+        raise SystemExit(shape)
+    args["command"] = "df"
+    args["recipient"] = remaining[1]
+    args["file_id"] = remaining[2]
+    if len(remaining) == 5:
+        if remaining[3] != "to":
+            raise SystemExit(shape)
+        args["output_path"] = remaining[4]
+
+
+def _parse_open_args(args, remaining):
+    if remaining == ["tui"]:
+        args["command"] = "tui"
+        return
+    if len(remaining) != 2 or remaining[0] not in {"conversation", "message"}:
+        raise SystemExit("Use: slack <preset> open conversation <channel_id> | open message <message_id> | open tui")
+    args["command"] = "o"
+    args["recipient"] = remaining[1]
+    args["open_mode"] = True
+
+
+def _parse_list_args_declarative(args, remaining):
+    args["command"] = "ls"
+    index = 0
+    while index < len(remaining):
+        token = remaining[index]
+        if token in {"unread", "read"}:
+            if args["ls_filter"] != "all":
                 raise SystemExit(_ls_usage())
-            if len(positionals) == 2:
-                if saw_limit:
-                    raise SystemExit(_ls_usage())
-                args["ls_label"] = positionals[0]
-                args["ls_limit"] = _parse_positive_int(positionals[1], "ls limit")
-            elif len(positionals) == 1:
-                if positionals[0].isdigit():
-                    if saw_limit:
-                        raise SystemExit("ls accepts only one limit")
-                    args["ls_limit"] = _parse_positive_int(positionals[0], "ls limit")
-                else:
-                    args["ls_label"] = positionals[0]
-            return args
-        if token in {"su", "u"}:
-            if not remaining:
-                raise SystemExit("Use: slack su <query>")
-            query = " ".join(remaining).strip()
-            if not query:
-                raise SystemExit("Use: slack su <query>")
-            args["query"] = query
-            return args
-        if token == "mra":
-            if remaining:
-                raise SystemExit("Use: slack mra")
-            return args
-        if token == "sc":
-            if remaining:
-                raise SystemExit("Use: slack sc")
-            return args
-        raise SystemExit(_top_level_usage())
-
-    return args
+            args["ls_filter"] = token
+            index += 1
+            continue
+        if token == "for":
+            if index + 1 >= len(remaining):
+                raise SystemExit("for requires: <label>")
+            args["ls_label"] = remaining[index + 1]
+            index += 2
+            continue
+        if token == "from":
+            if index + 1 >= len(remaining):
+                raise SystemExit("from requires: <name>")
+            args["ls_from"] = remaining[index + 1]
+            index += 2
+            continue
+        if token == "containing":
+            if index + 1 >= len(remaining):
+                raise SystemExit("containing requires: <text>")
+            args["ls_contains"] = remaining[index + 1]
+            index += 2
+            continue
+        if token == "since":
+            if index + 1 >= len(remaining):
+                raise SystemExit("since requires: <window>")
+            args["ls_time_limit"] = remaining[index + 1]
+            index += 2
+            continue
+        if token == "limit":
+            if index + 1 >= len(remaining):
+                raise SystemExit("limit requires: <count>")
+            args["ls_limit"] = _parse_positive_int(remaining[index + 1], "list limit")
+            index += 2
+            continue
+        if token == "open":
+            args["open_mode"] = True
+            index += 1
+            continue
+        raise SystemExit("Use: slack <preset> list [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [open]")
 
 
 def list_registered_contacts(contacts):
@@ -861,7 +906,7 @@ def resolve_token(config=None):
     if not token:
         token = _read_token_file(DEFAULT_USER_TOKEN_FILE)
     if not token:
-        raise SystemExit("Missing Slack token. Set SLACK_BOT_TOKEN or add bot_token_file to slack conf.")
+        raise SystemExit("Missing Slack token. Set SLACK_BOT_TOKEN or add a token in slack config.")
     if _token_kind(token) == "unknown":
         raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
     return token
@@ -884,7 +929,7 @@ def resolve_list_token(config=None):
         token = _read_token_file(DEFAULT_BOT_TOKEN_FILE)
     if not token:
         raise SystemExit(
-            "Missing Slack token. For all-contact ls, add ~/.openclaw/credentials/slack-user-token or set SLACK_TOKEN."
+            "Missing Slack token. For message listing, add a user token in slack config or set SLACK_TOKEN."
         )
     if _token_kind(token) == "unknown":
         raise SystemExit("Slack token must be a bot token (xoxb-) or user token (xoxp-/xoxc-).")
@@ -923,7 +968,7 @@ def resolve_app_token(config=None):
     if not token:
         raise SystemExit(
             "Missing Slack app token. Add accounts.<preset>.app_token with an xapp- token, "
-            "or import ~/.openclaw/credentials/slack-app-token with slack auth <preset> -i."
+            "or import ~/.openclaw/credentials/slack-app-token with slack auth <preset> import."
         )
     if _token_kind(token) != "app":
         raise SystemExit("Slack app token must be an app-level token (xapp-).")
@@ -1067,7 +1112,7 @@ def _import_app_token(config):
 def configure_account(config_path, config, preset, bot_token, user_token, app_token, name, import_tokens):
     if not preset:
         raise SystemExit(
-            "Use: slack auth <preset> [-i]|[-bt <bot_token>] [-ut <user_token>] [-at <app_token>] [-n <name>]"
+            "Use: slack auth <preset> import | slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]"
         )
     if import_tokens:
         bot_token = bot_token or _import_bot_token(config)
@@ -1092,9 +1137,9 @@ def configure_account(config_path, config, preset, bot_token, user_token, app_to
     effective_user = user_token or existing_tokens.get("user")
     effective_app = app_token or existing_tokens.get("app")
     if not effective_bot and not effective_user and not effective_app:
-        raise SystemExit("Provide -bt, -ut, -at, or -i to store at least one Slack token.")
+        raise SystemExit("Provide bot, user, app, or import to store at least one Slack token.")
     if not effective_bot and not effective_user:
-        raise SystemExit("Provide -bt, -ut, or -i with a bot/user token so Slack auth can be verified.")
+        raise SystemExit("Provide bot, user, or import with a bot/user token so Slack auth can be verified.")
 
     auth_data = auth_test(user_token or bot_token or effective_user or effective_bot)
     if name:
@@ -5811,12 +5856,12 @@ def print_events_help():
   slack <preset> events sync
   slack <preset> events once
   slack <preset> events service
-  slack <preset> events ti
-  slack <preset> events td
-  slack <preset> events st
+  slack <preset> events timer install
+  slack <preset> events timer disable
+  slack <preset> events timer status
   slack <preset> events logs [lines]
   slack <preset> events status
-  slack <preset> events reset-cache"""
+  slack <preset> events reset cache"""
     )
     return 0
 
@@ -5846,11 +5891,8 @@ def _dispatch(argv: list[str]) -> int:
     args = parse_args(argv)
     config_path = get_config_path(args["config"])
 
-    if args["command"] in {"cfg", "conf"}:
-        return open_config_in_editor(
-            lambda: Path(config_path),
-            bootstrap_text=CONFIG_BOOTSTRAP_TEXT,
-        )
+    if args["command"] == "config":
+        return open_config_in_editor_local(config_path, CONFIG_BOOTSTRAP_TEXT)
 
     config = load_config(config_path)
 
@@ -5879,7 +5921,7 @@ def _dispatch(argv: list[str]) -> int:
         if not label:
             raise SystemExit("Label cannot be empty.")
         if "@" not in email:
-            raise SystemExit("Use: slack ac <label> <email>")
+            raise SystemExit("Use: slack <preset> contacts add <label> <email>")
         save_contact(config, preset, label, email)
         save_config(config_path, config)
         print(f"Saved contact '{label}' -> {email}")
@@ -5911,7 +5953,7 @@ def _dispatch(argv: list[str]) -> int:
             return events_status(account, preset)
         if action == "reset-cache":
             return events_reset_cache(account, preset)
-        raise SystemExit("Use: slack <preset> events sync|once|service|ti|td|st|logs|status|reset-cache")
+        raise SystemExit("Use: slack <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status")
 
     if args["command"] == "ls" and args["ls_registry"]:
         list_registered_contacts(contacts)
@@ -6017,20 +6059,22 @@ def _dispatch(argv: list[str]) -> int:
     raise SystemExit(_top_level_usage())
 
 
-APP_SPEC = AppSpec(
-    app_name="slack",
-    version=__version__,
-    help_text=HELP_TEXT,
-    install_script_path=INSTALL_SCRIPT,
-    no_args_mode="help",
-    config_path_factory=_config_path,
-    config_bootstrap_text=CONFIG_BOOTSTRAP_TEXT,
-)
-
-
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    return run_app(APP_SPEC, args, _dispatch)
+    if not args:
+        print_help()
+        return 0
+    if args == ["-h"]:
+        print_help()
+        return 0
+    if args == ["-v"]:
+        print(__version__)
+        return 0
+    if args == ["-u"]:
+        return upgrade_app()
+    if args[0] in {"-h", "-v", "-u"}:
+        raise SystemExit(f"Use: slack {args[0]}")
+    return _dispatch(args)
 
 
 if __name__ == "__main__":

@@ -16,10 +16,8 @@ from unittest import mock
 APP_DIR = Path(__file__).resolve().parents[1]
 MAIN_PATH = APP_DIR / "main.py"
 VERSION_PATH = APP_DIR / "_version.py"
-CONTRACT_SRC = APP_DIR.parent / "rgw_cli_contract" / "src"
 
 sys.path.insert(0, str(APP_DIR))
-sys.path.insert(0, str(CONTRACT_SRC))
 
 
 def load_main_module():
@@ -38,19 +36,12 @@ def load_version():
 
 class CliContractTests(unittest.TestCase):
     def run_cli(self, *args):
-        env = os.environ.copy()
-        existing = env.get("PYTHONPATH")
-        parts = [str(CONTRACT_SRC)]
-        if existing:
-            parts.append(existing)
-        env["PYTHONPATH"] = os.pathsep.join(parts)
         return subprocess.run(
             [sys.executable, str(MAIN_PATH), *args],
             cwd=APP_DIR,
             check=False,
             capture_output=True,
             text=True,
-            env=env,
         )
 
     def test_no_args_matches_help(self):
@@ -75,15 +66,12 @@ class CliContractTests(unittest.TestCase):
 
         self.assertNotIn('__version__ = "0.0.0"', source)
 
-    def test_main_delegates_upgrade_to_contract_runtime(self):
+    def test_main_delegates_upgrade_to_local_installer(self):
         module = load_main_module()
-        with mock.patch.object(module, "run_app", return_value=0) as run_app:
+        with mock.patch.object(module, "upgrade_app", return_value=0) as upgrade_app:
             rc = module.main(["-u"])
         self.assertEqual(rc, 0)
-        run_app.assert_called_once()
-        self.assertEqual(run_app.call_args.args[0], module.APP_SPEC)
-        self.assertEqual(run_app.call_args.args[1], ["-u"])
-        self.assertIs(run_app.call_args.args[2], module._dispatch)
+        upgrade_app.assert_called_once_with()
 
     def test_cfg_opens_real_config_file_with_editor_resolution_order(self):
         module = load_main_module()
@@ -109,7 +97,7 @@ class CliContractTests(unittest.TestCase):
             ):
                 with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
                     with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                        module.main(["cfg"])
+                        module.main(["config"])
 
             self.assertTrue(config_path.exists())
             self.assertEqual(
@@ -125,9 +113,13 @@ class CliContractTests(unittest.TestCase):
 
         parsed = module.parse_args(
             [
-                "post",
+                "1",
+                "send",
+                "to",
                 "ar",
+                "body",
                 "hello",
+                "attach",
                 "/tmp/file1.csv",
                 "/tmp/folder",
                 "/tmp/file2.csv",
@@ -145,27 +137,24 @@ class CliContractTests(unittest.TestCase):
     def test_preset_prefix_parses_command(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["2", "post", "C123", "hello"])
+        parsed = module.parse_args(["2", "send", "to", "C123", "body", "hello"])
 
         self.assertEqual(parsed["preset"], "2")
         self.assertEqual(parsed["command"], "post")
         self.assertEqual(parsed["recipient"], "C123")
         self.assertEqual(parsed["message"], "hello")
 
-    def test_dm_alias_parses_as_post(self):
+    def test_dm_alias_is_rejected(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["dm", "ar", "hello"])
-
-        self.assertEqual(parsed["command"], "post")
-        self.assertEqual(parsed["recipient"], "ar")
-        self.assertEqual(parsed["message"], "hello")
+        with self.assertRaises(SystemExit):
+            module.parse_args(["dm", "ar", "hello"])
 
     def test_auth_parses_token_storage_flags(self):
         module = load_main_module()
 
         parsed = module.parse_args(
-            ["auth", "2", "-bt", "xoxb-bot", "-ut", "xoxp-user", "-at", "xapp-app", "-n", "work"]
+            ["auth", "2", "bot", "xoxb-bot", "user", "xoxp-user", "app", "xapp-app", "name", "work"]
         )
 
         self.assertEqual(parsed["command"], "auth")
@@ -175,7 +164,7 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(parsed["auth_app_token"], "xapp-app")
         self.assertEqual(parsed["auth_name"], "work")
 
-        prefixed = module.parse_args(["2", "auth", "-i"])
+        prefixed = module.parse_args(["auth", "2", "import"])
         self.assertEqual(prefixed["command"], "auth")
         self.assertEqual(prefixed["auth_preset"], "2")
         self.assertTrue(prefixed["auth_import"])
@@ -199,20 +188,20 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(logs["events_action"], "logs")
         self.assertEqual(logs["events_lines"], 120)
 
-        alias = module.parse_args(["1", "event", "sync"])
-        self.assertEqual(alias["preset"], "1")
-        self.assertEqual(alias["command"], "events")
-        self.assertEqual(alias["events_action"], "sync")
+        timer = module.parse_args(["1", "events", "timer", "install"])
+        self.assertEqual(timer["preset"], "1")
+        self.assertEqual(timer["command"], "events")
+        self.assertEqual(timer["events_action"], "ti")
 
     def test_tui_command_parses_with_preset(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["1", "tui"])
+        parsed = module.parse_args(["1", "open", "tui"])
 
         self.assertEqual(parsed["preset"], "1")
         self.assertEqual(parsed["command"], "tui")
         with self.assertRaises(SystemExit):
-            module.parse_args(["1", "tui", "extra"])
+            module.parse_args(["1", "open", "tui", "extra"])
 
     def test_select_account_requires_preset_when_accounts_exist(self):
         module = load_main_module()
@@ -270,13 +259,13 @@ class CliContractTests(unittest.TestCase):
     def test_reply_requires_message_id_target(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["reply", "C123:100.000100", "hello"])
+        parsed = module.parse_args(["1", "reply", "to", "C123:100.000100", "body", "hello"])
 
         self.assertEqual(parsed["command"], "reply")
         self.assertEqual(parsed["recipient"], "C123:100.000100")
         self.assertEqual(parsed["message"], "hello")
         with self.assertRaises(SystemExit):
-            module.parse_args(["reply", "C123", "hello"])
+            module.parse_args(["1", "reply", "to", "C123", "body", "hello"])
 
     def test_resolve_post_target_accepts_channel_and_message_ids(self):
         module = load_main_module()
@@ -367,7 +356,7 @@ class CliContractTests(unittest.TestCase):
             config_path.parent.mkdir(parents=True)
             token_path.write_text("xoxb-token\n", encoding="utf-8")
             config_path.write_text(
-                '{"bot_token_file": "' + str(token_path) + '"}\n',
+                '{"accounts": {"1": {"bot_token_file": "' + str(token_path) + '"}}}\n',
                 encoding="utf-8",
             )
 
@@ -384,7 +373,7 @@ class CliContractTests(unittest.TestCase):
                             return_value=["report.csv"],
                         ) as send_attachments:
                             with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                                rc = module.main(["post", "C123", "hello", "/tmp/report.csv"])
+                                rc = module.main(["1", "send", "to", "C123", "body", "hello", "attach", "/tmp/report.csv"])
 
         self.assertEqual(rc, 0)
         send_post.assert_called_once_with("xoxb-token", "C123", "hello")
@@ -438,7 +427,7 @@ class CliContractTests(unittest.TestCase):
                                     module, "send_attachments", return_value=[]
                                 ) as send_attachments:
                                     with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                                        rc = module.main(["1", "post", "md", "hello"])
+                                        rc = module.main(["1", "send", "to", "md", "body", "hello"])
 
         self.assertEqual(rc, 0)
         lookup.assert_called_once_with("maanas.dwivedi@example.com", "xoxp-token")
@@ -475,7 +464,7 @@ class CliContractTests(unittest.TestCase):
             ):
                 with mock.patch.object(module, "auth_test", return_value={"ok": True, "user_id": "U1"}):
                     with mock.patch.object(module, "run_slack_tui", return_value=None) as tui:
-                        rc = module.main(["1", "tui"])
+                        rc = module.main(["1", "open", "tui"])
 
         self.assertEqual(rc, 0)
         tui.assert_called_once()
@@ -505,13 +494,13 @@ class CliContractTests(unittest.TestCase):
                             [
                                 "auth",
                                 "1",
-                                "-bt",
+                                "bot",
                                 "xoxb-token",
-                                "-ut",
+                                "user",
                                 "xoxp-token",
-                                "-at",
+                                "app",
                                 "xapp-token",
-                                "-n",
+                                "name",
                                 "work",
                             ]
                         )
@@ -558,7 +547,7 @@ class CliContractTests(unittest.TestCase):
                         with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(user_path)):
                             with mock.patch.object(module, "DEFAULT_APP_TOKEN_FILE", str(app_path)):
                                 with mock.patch.object(module, "auth_test", return_value={"ok": True}):
-                                    rc = module.main(["auth", "1", "-i"])
+                                    rc = module.main(["auth", "1", "import"])
 
             config_path = config_home / "slack" / "config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -579,7 +568,7 @@ class CliContractTests(unittest.TestCase):
             config_path.parent.mkdir(parents=True)
             token_path.write_text("xoxb-token\n", encoding="utf-8")
             config_path.write_text(
-                '{"bot_token_file": "' + str(token_path) + '"}\n',
+                '{"accounts": {"1": {"bot_token_file": "' + str(token_path) + '"}}}\n',
                 encoding="utf-8",
             )
 
@@ -599,10 +588,10 @@ class CliContractTests(unittest.TestCase):
                                 module,
                                 "send_attachments",
                                 return_value=[],
-                            ) as send_attachments:
-                                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                                    rc = module.main(
-                                        ["reply", "C123:100.000100", "hello"]
+                                ) as send_attachments:
+                                    with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                                        rc = module.main(
+                                        ["1", "reply", "to", "C123:100.000100", "body", "hello"]
                                     )
 
         self.assertEqual(rc, 0)
@@ -682,7 +671,7 @@ class CliContractTests(unittest.TestCase):
         module = load_main_module()
 
         parsed = module.parse_args(
-            ["ls", "-f", "maanas", "-c", "invoice", "-tl", "2w", "-l", "20", "-o"]
+            ["1", "list", "from", "maanas", "containing", "invoice", "since", "2w", "limit", "20", "open"]
         )
 
         self.assertEqual(parsed["command"], "ls")
@@ -695,7 +684,7 @@ class CliContractTests(unittest.TestCase):
     def test_su_accepts_query(self):
         module = load_main_module()
 
-        parsed = module.parse_args(["su", "rohan", "choudhary"])
+        parsed = module.parse_args(["1", "users", "search", "rohan", "choudhary"])
 
         self.assertEqual(parsed["command"], "su")
         self.assertEqual(parsed["query"], "rohan choudhary")
@@ -737,23 +726,23 @@ class CliContractTests(unittest.TestCase):
             config_home = Path(temp_dir) / "cfg-home"
             config_path = config_home / "slack" / "config.json"
             config_path.parent.mkdir(parents=True)
-            config_path.write_text('{"contacts": {"md": "md@example.com"}}\n', encoding="utf-8")
-            token_path = Path(temp_dir) / "user-token"
-            token_path.write_text("xoxp-token\n", encoding="utf-8")
+            config_path.write_text(
+                '{"accounts": {"1": {"token": {"user": "xoxp-token"}, "contacts": {"md": "md@example.com"}}}}\n',
+                encoding="utf-8",
+            )
 
             with mock.patch.dict(
                 module.os.environ,
                 {"XDG_CONFIG_HOME": str(config_home)},
                 clear=True,
             ):
-                with mock.patch.object(module, "DEFAULT_USER_TOKEN_FILE", str(token_path)):
-                    with mock.patch.object(
-                        module,
-                        "auth_test",
-                        return_value={"ok": True, "user_id": "U123"},
-                    ):
-                        with mock.patch.object(module, "list_dms", side_effect=fake_list_dms):
-                            rc = module.main(["ls", "-ur", "-f", "maanas", "-l", "5"])
+                with mock.patch.object(
+                    module,
+                    "auth_test",
+                    return_value={"ok": True, "user_id": "U123"},
+                ):
+                    with mock.patch.object(module, "list_dms", side_effect=fake_list_dms):
+                        rc = module.main(["1", "list", "unread", "from", "maanas", "limit", "5"])
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls["contacts"], {"md": "md@example.com"})
@@ -764,7 +753,7 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse(calls["open_mode"])
         self.assertIsNone(calls["label"])
         self.assertEqual(calls["sender_filter"], "maanas")
-        self.assertTrue(str(calls["cache_path"]).endswith("events-default.db"))
+        self.assertTrue(str(calls["cache_path"]).endswith("events-1.db"))
 
     def test_search_dms_uses_user_token_fast_path(self):
         module = load_main_module()

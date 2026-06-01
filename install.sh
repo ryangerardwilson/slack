@@ -122,6 +122,11 @@ get_latest_version() {
   printf '%s\n' "$latest_version_cache"
 }
 
+existing_public_launcher_is_managed() {
+  [[ -f "$PUBLIC_LAUNCHER" ]] || return 1
+  grep -Fq "exec \"${INSTALL_DIR}/${APP}\" \"\$@\"" "$PUBLIC_LAUNCHER" 2>/dev/null && return 0
+  return 1
+}
 
 write_public_launcher() {
   if [[ -e "$PUBLIC_LAUNCHER" && ! -L "$PUBLIC_LAUNCHER" && ! -f "$PUBLIC_LAUNCHER" ]]; then
@@ -134,14 +139,14 @@ write_public_launcher() {
     if [[ "$resolved" != "${INSTALL_DIR}/${APP}" ]]; then
       die "Refusing to overwrite existing symlink launcher: $PUBLIC_LAUNCHER"
     fi
-  elif [[ -f "$PUBLIC_LAUNCHER" ]] && ! grep -Fq '# Managed by rgw_cli_contract local-bin launcher' "$PUBLIC_LAUNCHER" 2>/dev/null; then
+  elif [[ -f "$PUBLIC_LAUNCHER" ]] && ! existing_public_launcher_is_managed; then
     die "Refusing to overwrite existing launcher: $PUBLIC_LAUNCHER"
   fi
 
   mkdir -p "$PUBLIC_BIN_DIR"
   cat > "${PUBLIC_LAUNCHER}" <<EOF
 #!/usr/bin/env bash
-# Managed by rgw_cli_contract local-bin launcher
+# Managed by ${APP} installer local-bin launcher
 set -euo pipefail
 exec "${INSTALL_DIR}/${APP}" "\$@"
 EOF
