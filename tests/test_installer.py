@@ -30,7 +30,7 @@ class InstallerContractTests(unittest.TestCase):
             env=env,
         )
 
-    def test_dash_v_without_argument_prints_latest_release_version(self):
+    def test_version_without_argument_prints_latest_release_version(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_home = Path(temp_dir) / "home"
             fake_bin = Path(temp_dir) / "bin"
@@ -52,12 +52,12 @@ class InstallerContractTests(unittest.TestCase):
                 ),
             )
 
-            result = self.run_installer(temp_home, fake_bin, "-v")
+            result = self.run_installer(temp_home, fake_bin, "version")
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertEqual(result.stdout.strip(), "9.8.7")
 
-    def test_same_version_check_uses_app_dash_v(self):
+    def test_same_version_check_uses_app_version(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_home = Path(temp_dir) / "home"
             fake_bin = Path(temp_dir) / "bin"
@@ -86,7 +86,7 @@ class InstallerContractTests(unittest.TestCase):
                     f"""\
                     #!/usr/bin/env bash
                     printf '%s\n' "$*" >> "{log_path}"
-                    if [[ "$1" == "-v" ]]; then
+                    if [[ "$1" == "version" ]]; then
                       printf '0.1.29\n'
                       exit 0
                     fi
@@ -95,11 +95,11 @@ class InstallerContractTests(unittest.TestCase):
                 ),
             )
 
-            result = self.run_installer(temp_home, fake_bin, "-v", "0.1.29", "--no-modify-path")
+            result = self.run_installer(temp_home, fake_bin, "version", "0.1.29")
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("already installed", result.stdout)
-            self.assertEqual(log_path.read_text(encoding="utf-8").strip(), "-v")
+            self.assertEqual(log_path.read_text(encoding="utf-8").strip(), "version")
 
     def test_upgrade_rejects_binary_combination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -108,10 +108,10 @@ class InstallerContractTests(unittest.TestCase):
             temp_home.mkdir()
             fake_bin.mkdir()
 
-            result = self.run_installer(temp_home, fake_bin, "-u", "-b", "/tmp/slack", "--no-modify-path")
+            result = self.run_installer(temp_home, fake_bin, "upgrade", "from", "/tmp/slack")
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("-u cannot be used with -b", result.stdout)
+            self.assertIn("upgrade cannot be used with from", result.stdout)
 
 
 if __name__ == "__main__":

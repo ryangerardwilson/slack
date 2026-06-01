@@ -69,12 +69,12 @@ INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/ryangerardwilson/slack/m
 CONFIG_BOOTSTRAP_TEXT = '{\n  "accounts": {}\n}\n'
 HELP_TEXT = """Slack CLI
 
-flags:
-  slack -h
+global actions:
+  slack help
     show this help
-  slack -v
+  slack version
     print the installed version
-  slack -u
+  slack upgrade
     upgrade to the latest release
 
 features:
@@ -168,7 +168,7 @@ def upgrade_app():
     try:
         script_path.chmod(0o700)
         result = subprocess.run(
-            ["/usr/bin/env", "bash", str(script_path), "-u"],
+            ["/usr/bin/env", "bash", str(script_path), "upgrade"],
             check=False,
             text=True,
             env=os.environ.copy(),
@@ -396,7 +396,7 @@ def parse_args(argv):
         _parse_auth_args(args, argv[1:])
         return args
     if argv[0] in {"cfg", "conf", "ac", "post", "dm", "reply", "df", "o", "ls", "su", "u", "mra", "sc"}:
-        raise SystemExit("Use declarative Slack commands. Run: slack -h")
+        raise SystemExit("Use declarative Slack commands. Run: slack help")
     if not argv[0].isdigit():
         raise SystemExit(_top_level_usage())
     if len(argv) < 2:
@@ -405,7 +405,7 @@ def parse_args(argv):
     command = argv[1]
     remaining = argv[2:]
     if command in {"ac", "post", "dm", "df", "o", "ls", "su", "u", "mra", "sc", "tui"}:
-        raise SystemExit("Use declarative Slack commands. Run: slack -h")
+        raise SystemExit("Use declarative Slack commands. Run: slack help")
     if command == "contacts":
         _parse_contacts_args(args, remaining)
         return args
@@ -6064,15 +6064,15 @@ def main(argv=None):
     if not args:
         print_help()
         return 0
-    if args == ["-h"]:
+    if args == ["help"]:
         print_help()
         return 0
-    if args == ["-v"]:
+    if args == ["version"]:
         print(__version__)
         return 0
-    if args == ["-u"]:
+    if args == ["upgrade"]:
         return upgrade_app()
-    if args[0] in {"-h", "-v", "-u"}:
+    if args[0] in {"help", "version", "upgrade"}:
         raise SystemExit(f"Use: slack {args[0]}")
     return _dispatch(args)
 

@@ -46,7 +46,7 @@ class CliContractTests(unittest.TestCase):
 
     def test_no_args_matches_help(self):
         bare = self.run_cli()
-        help_run = self.run_cli("-h")
+        help_run = self.run_cli("help")
 
         self.assertEqual(bare.returncode, 0)
         self.assertEqual(help_run.returncode, 0)
@@ -55,7 +55,7 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("features:", bare.stdout)
 
     def test_version_comes_from_single_release_source(self):
-        result = self.run_cli("-v")
+        result = self.run_cli("version")
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, load_version() + "\n")
@@ -69,7 +69,7 @@ class CliContractTests(unittest.TestCase):
     def test_main_delegates_upgrade_to_local_installer(self):
         module = load_main_module()
         with mock.patch.object(module, "upgrade_app", return_value=0) as upgrade_app:
-            rc = module.main(["-u"])
+            rc = module.main(["upgrade"])
         self.assertEqual(rc, 0)
         upgrade_app.assert_called_once_with()
 

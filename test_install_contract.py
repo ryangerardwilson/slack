@@ -28,7 +28,7 @@ class InstallContractTests(unittest.TestCase):
             check=True,
         )
 
-    def test_dash_v_without_argument_prints_latest_release(self):
+    def test_version_without_argument_prints_latest_release(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             bin_dir = tmp_path / "bin"
@@ -47,11 +47,11 @@ class InstallContractTests(unittest.TestCase):
                 "exit 1\n",
             )
 
-            result = self._run_installer(home_dir, "-v", path_prefix=bin_dir)
+            result = self._run_installer(home_dir, "version", path_prefix=bin_dir)
 
             self.assertEqual(result.stdout.strip(), "0.1.21")
 
-    def test_upgrade_same_version_uses_dash_v(self):
+    def test_upgrade_same_version_uses_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             bin_dir = tmp_path / "bin"
@@ -72,7 +72,7 @@ class InstallContractTests(unittest.TestCase):
             self._write_executable(
                 bin_dir / "slack",
                 "#!/usr/bin/bash\n"
-                "if [[ \"$1\" == \"-v\" ]]; then\n"
+                "if [[ \"$1\" == \"version\" ]]; then\n"
                 "  printf '0.1.21\\n'\n"
                 "  exit 0\n"
                 "fi\n"
@@ -80,7 +80,7 @@ class InstallContractTests(unittest.TestCase):
                 "exit 1\n",
             )
 
-            result = self._run_installer(home_dir, "-u", path_prefix=bin_dir)
+            result = self._run_installer(home_dir, "upgrade", path_prefix=bin_dir)
 
             self.assertIn("already installed", result.stdout)
             self.assertTrue((Path('$HOME/.local/bin'.replace("$HOME", str(home_dir))) / 'slack').exists())
@@ -94,7 +94,7 @@ class InstallContractTests(unittest.TestCase):
             self._write_executable(
                 source_binary,
                 "#!/usr/bin/env bash\n"
-                "if [[ \"${1:-}\" == \"-v\" ]]; then\n"
+                "if [[ \"${1:-}\" == \"version\" ]]; then\n"
                 "  printf '0.0.0\\n'\n"
                 "  exit 0\n"
                 "fi\n"
@@ -102,7 +102,7 @@ class InstallContractTests(unittest.TestCase):
                 "exit 0\n",
             )
 
-            result = self._run_installer(home_dir, "-b", str(source_binary), "-n")
+            result = self._run_installer(home_dir, "from", str(source_binary))
 
             internal_launcher = home_dir / ".slack" / "bin" / 'slack'
             self.assertTrue(internal_launcher.exists())
@@ -116,7 +116,7 @@ class InstallContractTests(unittest.TestCase):
             self.assertIn('# Managed by slack installer local-bin launcher', public_text)
             self.assertIn(f'exec "{internal_launcher}" "$@"', public_text)
             version = subprocess.run(
-                [str(public_launcher), '-v'],
+                [str(public_launcher), "version"],
                 capture_output=True,
                 text=True,
                 env={**os.environ, 'HOME': str(home_dir)},

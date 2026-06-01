@@ -1,7 +1,7 @@
 ## Workspace Defaults
 
 - Follow `/home/ryan/Subagents/cpo/CLI_TUI_STYLE_GUIDE.md` for CLI/TUI taste and help shape.
-- Follow `/home/ryan/Subagents/cto/CANONICAL_REFERENCE_IMPLEMENTATION_FOR_CLI_AND_TUI_APPS.md` for executable contract details such as `-h`, `-v`, `-u`, installer behavior, release workflow expectations, and regression expectations.
+- Follow `/home/ryan/Subagents/cto/CANONICAL_REFERENCE_IMPLEMENTATION_FOR_CLI_AND_TUI_APPS.md` for executable contract details such as `help`, `version`, `upgrade`, installer behavior, release workflow expectations, and regression expectations.
 - This file only records `slack`-specific constraints or durable deviations.
 
 ## Product Boundaries
@@ -26,10 +26,10 @@
 
 - Keep the top-level interface flat and declarative: `slack auth`, `slack auth <preset> import`, `slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]`, `slack config`, `slack <preset> contacts add <label> <email>`, `slack <preset> users search <query>`, `slack <preset> events sync|once|service|timer install|timer disable|status|logs|reset cache`, `slack <preset> send to <target> body <message> [attach <path> ...]`, `slack <preset> reply to <message_id> body <message> [attach <path> ...]`, `slack <preset> files download <channel_id> <file_id> [to <path>]`, `slack <preset> open conversation <channel_id>`, `slack <preset> open message <message_id>`, `slack <preset> open tui`, `slack <preset> list ...`, `slack <preset> conversations clean`, and `slack <preset> mark all read`.
 - `send` is for a new message in the resolved conversation. `reply` is only for message ids and posts into that message's thread.
-- Only `-h`, `-v`, and `-u` remain as global launcher flags for help, version, and upgrade.
-- `slack` with no args must print the same help as `slack -h`.
+- Only `help`, `version`, and `upgrade` remain as global launcher actions for help, version, and upgrade.
+- `slack` with no args must print the same help as `slack help`.
 - Help output must stay human-written, compact, and printed with terminal-default styling.
-- Do not expose config paths, token internals, or environment-variable inventories in `-h`.
+- Do not expose config paths, token internals, or environment-variable inventories in `help`.
 - Do not reintroduce the retired shared CLI contract package, its TOML file, or old compressed commands.
 
 ## Architecture Guardrails

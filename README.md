@@ -5,19 +5,19 @@ Minimal Slack CLI/TUI for direct-message and adjacent message workflows through 
 ## Install
 
 ```sh
-./install.sh -h
-./install.sh -v
-./install.sh -u
+./install.sh help
+./install.sh version
+./install.sh upgrade
 ```
 
-The installed launcher is written to `~/.local/bin/slack`. `slack -v` prints the runtime version from `_version.py`; source checkouts keep `0.0.0` until release automation stamps an artifact.
+The installed launcher is written to `~/.local/bin/slack`. `slack version` prints the runtime version from `_version.py`; source checkouts keep `0.0.0` until release automation stamps an artifact.
 
 ## Commands
 
 ```sh
-slack -h
-slack -v
-slack -u
+slack help
+slack version
+slack upgrade
 
 slack config
 slack auth

@@ -148,7 +148,7 @@ install_requested_release() {
   local attempt
   local rc
   for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt += 1)); do
-    if bash ./install.sh -v "$version"; then
+    if bash ./install.sh version "$version"; then
       return 0
     fi
     rc=$?
@@ -165,9 +165,9 @@ verify_installed_version() {
   local app_cmd="$HOME/.${APP}/bin/${APP}"
   local installed=""
   if [[ -x "$app_cmd" ]]; then
-    installed="$("$app_cmd" -v 2>/dev/null || true)"
+    installed="$("$app_cmd" version 2>/dev/null || true)"
   elif command -v "$APP" >/dev/null 2>&1; then
-    installed="$("$APP" -v 2>/dev/null || true)"
+    installed="$("$APP" version 2>/dev/null || true)"
   else
     return 0
   fi
@@ -180,11 +180,11 @@ verify_upgrade_command() {
   if [[ ! -x "$app_cmd" ]]; then
     return 0
   fi
-  "$app_cmd" -u >/dev/null
+  "$app_cmd" upgrade >/dev/null
 }
 
 main() {
-  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  if [[ "${1:-}" == "help" ]]; then
     usage
     exit 0
   fi

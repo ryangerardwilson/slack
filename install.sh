@@ -6,6 +6,8 @@ REPO="ryangerardwilson/slack"
 APP_HOME="$HOME/.${APP}"
 INSTALL_DIR="$APP_HOME/bin"
 APP_DIR="$APP_HOME/app"
+SOURCE_DIR="$APP_DIR/source"
+VENV_DIR="$APP_HOME/venv"
 FILENAME="slack-linux-x64.tar.gz"
 PUBLIC_BIN_DIR="$HOME/.local/bin"
 PUBLIC_LAUNCHER="$PUBLIC_BIN_DIR/${APP}"
@@ -15,20 +17,14 @@ usage() {
   cat <<EOF
 ${APP} Installer
 
-Usage: install.sh [options]
+Usage: install.sh <command>
 
-Options:
-  -h                         Show this help and exit
-  -v [<version>]             Print the latest release version, or install a specific one
-  -u                         Upgrade to the latest release only when newer
-  -b <path>                  Install from a local binary instead of downloading
-  -n                         Do not modify shell config to add to PATH
+Commands:
+  help                       Show this help and exit
+  version [<version>]        Print the latest release version, or install a specific one
+  upgrade                    Upgrade to the latest release only when newer
+  from <path>                Install from a local binary or source checkout
 
-      --help                 Compatibility alias for -h
-      --version [<version>]  Compatibility alias for -v
-      --upgrade              Compatibility alias for -u
-      --binary <path>        Compatibility alias for -b
-      --no-modify-path       Compatibility alias for -n
 EOF
 }
 
@@ -41,11 +37,11 @@ latest_version_cache=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)
+    help)
       usage
       exit 0
       ;;
-    -v|--version)
+    version)
       if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
         requested_version="${2#v}"
         shift 2
@@ -54,22 +50,18 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
-    -u|--upgrade)
+    upgrade)
       upgrade=true
       shift
       ;;
-    -b|--binary)
-      [[ -n "${2:-}" ]] || { echo "Error: -b requires a path"; exit 1; }
+    from)
+      [[ -n "${2:-}" ]] || { echo "Error: from requires a path"; exit 1; }
       binary_path="$2"
       shift 2
       ;;
-    -n|--no-modify-path)
-      no_modify_path=true
-      shift
-      ;;
     *)
-      echo "Warning: Unknown option '$1'" >&2
-      shift
+      echo "unknown installer command: $1" >&2
+      exit 1
       ;;
   esac
 done
@@ -84,6 +76,60 @@ die() {
   print_message error "$1"
   exit 1
 }
+
+extract_source() {
+  local src_path="$1"
+  local out_dir="$2"
+
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
+
+  if [[ -d "$src_path" ]]; then
+    cp -R "$src_path"/. "$out_dir"/
+  else
+    command -v tar >/dev/null 2>&1 || die "'tar' is required but not installed."
+    tar -xzf "$src_path" -C "$tmp_dir"
+    local extracted
+    extracted="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    [[ -n "$extracted" ]] || die "Failed to extract source bundle"
+    cp -R "$extracted"/. "$out_dir"/
+  fi
+
+  rm -rf "$out_dir/.git" "$out_dir/.ruff_cache" "$out_dir/.pytest_cache" "$out_dir/.venv" "$out_dir/venv"
+  find "$out_dir" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+}
+
+install_from_source() {
+  local src_path="$1"
+
+  command -v python3 >/dev/null 2>&1 || die "'python3' is required but not installed."
+  extract_source "$src_path" "$SOURCE_DIR"
+  rm -rf "$VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+
+  if [[ -f "$SOURCE_DIR/pyproject.toml" ]]; then
+    "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check "$SOURCE_DIR"
+  elif [[ -s "$SOURCE_DIR/requirements.txt" ]]; then
+    "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check -r "$SOURCE_DIR/requirements.txt"
+  fi
+
+  if [[ -x "$VENV_DIR/bin/$APP" ]]; then
+    cat > "${INSTALL_DIR}/${APP}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${VENV_DIR}/bin/${APP}" "\$@"
+EOF
+  else
+    [[ -f "$SOURCE_DIR/main.py" ]] || die "local source must contain main.py or a pyproject script named ${APP}"
+    cat > "${INSTALL_DIR}/${APP}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${VENV_DIR}/bin/python" "${SOURCE_DIR}/main.py" "\$@"
+EOF
+  fi
+  chmod 755 "${INSTALL_DIR}/${APP}"
+}
+
 
 installed_command_path() {
   if command -v "${APP}" >/dev/null 2>&1; then
@@ -104,7 +150,7 @@ installed_command_path() {
 read_installed_version() {
   local installed_cmd
   installed_cmd="$(installed_command_path)" || return 0
-  "$installed_cmd" -v 2>/dev/null || true
+  "$installed_cmd" version 2>/dev/null || true
 }
 
 get_latest_version() {
@@ -170,14 +216,14 @@ print_manual_shell_steps() {
 
 if $show_latest; then
   [[ "$upgrade" == false && -z "$binary_path" && -z "$requested_version" ]] || \
-    die "-v (no arg) cannot be combined with other options"
+    die "version cannot be combined with other installer commands"
   get_latest_version
   exit 0
 fi
 
 if $upgrade; then
-  [[ -z "$binary_path" ]] || die "-u cannot be used with -b"
-  [[ -z "$requested_version" ]] || die "-u cannot be combined with -v <version>"
+  [[ -z "$binary_path" ]] || die "upgrade cannot be used with from"
+  [[ -z "$requested_version" ]] || die "upgrade cannot be combined with version <version>"
   requested_version="$(get_latest_version)"
   installed_version="$(read_installed_version)"
   installed_version="${installed_version#v}"
@@ -190,12 +236,21 @@ if $upgrade; then
 fi
 
 mkdir -p "$INSTALL_DIR"
+tmp_dir="${TMPDIR:-/tmp}/${APP}_install_$$"
+rm -rf "$tmp_dir"
+mkdir -p "$tmp_dir"
+trap 'rm -rf "$tmp_dir"' EXIT
 
 if [[ -n "$binary_path" ]]; then
-  [[ -f "$binary_path" ]] || { print_message error "Binary not found: $binary_path"; exit 1; }
-  print_message info "\nInstalling ${APP} from local binary: ${binary_path}"
-  cp "$binary_path" "${INSTALL_DIR}/${APP}"
-  chmod 755 "${INSTALL_DIR}/${APP}"
+  [[ -e "$binary_path" ]] || { print_message error "Local path not found: $binary_path"; exit 1; }
+  print_message info "\nInstalling ${APP} from local path: ${binary_path}"
+  if [[ -d "$binary_path" || "$binary_path" == *.tar.gz || "$binary_path" == *.tgz ]]; then
+    mkdir -p "$tmp_dir"
+    install_from_source "$binary_path"
+  else
+    cp "$binary_path" "${INSTALL_DIR}/${APP}"
+    chmod 755 "${INSTALL_DIR}/${APP}"
+  fi
   specific_version="local"
 else
   raw_os=$(uname -s)
@@ -271,4 +326,4 @@ fi
 finalize_install
 
 print_manual_shell_steps
-print_message info "Run: ${APP} -h"
+print_message info "Run: ${APP} help"
