@@ -20,20 +20,27 @@ slack version
 slack upgrade
 
 slack config
+slack accounts list
+slack setup check
 slack auth
 slack auth 1 import
 slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
 slack 1 contacts add mom mom@example.com
 slack 1 contacts list
 slack 1 users search rohan
+slack 1 preview send to mom body "hello"
 slack 1 send to mom body "hello"
 slack 1 send to C0AE059EU5T body "group update"
+slack 1 preview reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 slack 1 files download D0466D63H7B F0AH0LD4133
+slack 1 inspect conversation D0466D63H7B
+slack 1 inspect message D0466D63H7B:1712764800.000100
 slack 1 open conversation D0466D63H7B
 slack 1 open message D0466D63H7B:1712764800.000100
 slack 1 open tui
 slack 1 list unread from maanas since 2w limit 10
+slack 1 list unread from maanas since 2w limit 10 output json
 slack 1 list containing invoice since "jan 2025" limit 20
 slack 1 conversations clean
 slack 1 mark all read
@@ -69,3 +76,5 @@ slack 1 events reset cache
 ```
 
 User tokens are preferred for listing and person-targeted DMs. The events service owns the per-preset DM/GDM cache used by `list` and `open tui`.
+Use `inspect` before `open` when read-state or downloads matter. Use `preview`
+before sends or replies when an agent should validate intent without posting.

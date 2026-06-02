@@ -53,6 +53,10 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(bare.stdout, help_run.stdout)
         self.assertEqual(bare.stderr, help_run.stderr)
         self.assertIn("features:", bare.stdout)
+        self.assertIn("slack accounts list", bare.stdout)
+        self.assertIn("slack 1 inspect message", bare.stdout)
+        self.assertIn("slack 1 preview send", bare.stdout)
+        self.assertIn("output json", bare.stdout)
 
     def test_version_comes_from_single_release_source(self):
         result = self.run_cli("version")
@@ -133,6 +137,59 @@ class CliContractTests(unittest.TestCase):
             parsed["paths"],
             ["/tmp/file1.csv", "/tmp/folder", "/tmp/file2.csv"],
         )
+
+    def test_preview_send_parses_as_preview_post(self):
+        module = load_main_module()
+
+        parsed = module.parse_args(["1", "preview", "send", "to", "md", "body", "hello"])
+
+        self.assertEqual(parsed["preset"], "1")
+        self.assertEqual(parsed["command"], "preview-post")
+        self.assertEqual(parsed["recipient"], "md")
+        self.assertEqual(parsed["message"], "hello")
+
+    def test_accounts_list_output_json(self):
+        module = load_main_module()
+        config = {
+            "accounts": {
+                "1": {
+                    "name": "default",
+                    "token": {"bot": "xoxb-token", "user": "xoxp-token", "app": "xapp-token"},
+                    "contacts": {"md": "md@example.com"},
+                }
+            }
+        }
+
+        with mock.patch.object(module, "_service_state", return_value="active"), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout:
+            module.list_account_presets(config, output_json=True)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["accounts"][0]["preset"], "1")
+        self.assertEqual(payload["accounts"][0]["user_token"], "present")
+
+    def test_preview_send_does_not_auth_or_post(self):
+        module = load_main_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                '{"accounts": {"1": {"contacts": {"md": "md@example.com"}}}}\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(module.os.environ, {"XDG_CONFIG_HOME": str(config_home)}, clear=True):
+                with mock.patch.object(module, "auth_test") as auth_mock, mock.patch.object(
+                    module, "send_post"
+                ) as send_mock, mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    rc = module.main(["1", "preview", "send", "to", "md", "body", "hello"])
+
+        self.assertEqual(rc, 0)
+        auth_mock.assert_not_called()
+        send_mock.assert_not_called()
+        self.assertIn("preview_send", stdout.getvalue())
 
     def test_preset_prefix_parses_command(self):
         module = load_main_module()
@@ -754,6 +811,43 @@ class CliContractTests(unittest.TestCase):
         self.assertIsNone(calls["label"])
         self.assertEqual(calls["sender_filter"], "maanas")
         self.assertTrue(str(calls["cache_path"]).endswith("events-1.db"))
+
+    def test_ls_output_json_passes_json_mode_to_list_dms(self):
+        module = load_main_module()
+        calls = {}
+
+        def fake_list_dms(
+            contacts,
+            token,
+            limit,
+            filter_mode,
+            self_user_id,
+            open_mode,
+            label=None,
+            sender_filter=None,
+            contains_filter=None,
+            time_limit=None,
+            cache_path=None,
+            output_json=False,
+        ):
+            calls["output_json"] = output_json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_home = Path(temp_dir) / "cfg-home"
+            config_path = config_home / "slack" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                '{"accounts": {"1": {"token": {"user": "xoxp-token"}, "contacts": {"md": "md@example.com"}}}}\n',
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(module.os.environ, {"XDG_CONFIG_HOME": str(config_home)}, clear=True):
+                with mock.patch.object(module, "auth_test", return_value={"ok": True, "user_id": "U123"}):
+                    with mock.patch.object(module, "list_dms", side_effect=fake_list_dms):
+                        rc = module.main(["1", "list", "for", "md", "limit", "5", "output", "json"])
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(calls["output_json"])
 
     def test_search_dms_uses_user_token_fast_path(self):
         module = load_main_module()

@@ -1,7 +1,7 @@
 ## Workspace Defaults
 
-- Follow `/home/ryan/Subagents/cpo/CLI_TUI_STYLE_GUIDE.md` for CLI/TUI taste and help shape.
-- Follow `/home/ryan/Subagents/cto/CANONICAL_REFERENCE_IMPLEMENTATION_FOR_CLI_AND_TUI_APPS.md` for executable contract details such as `help`, `version`, `upgrade`, installer behavior, release workflow expectations, and regression expectations.
+- Follow `/home/ryan/Generalists/ceo/PRODUCT_PURITY.md` for declarative CLI purity.
+- Follow `/home/ryan/Generalists/cto/CANONICAL_REFERENCE_IMPLEMENTATION_FOR_CLI_AND_TUI_APPS.md` for executable contract details such as `help`, `version`, `upgrade`, installer behavior, release workflow expectations, and regression expectations.
 - This file only records `slack`-specific constraints or durable deviations.
 
 ## Product Boundaries
@@ -24,8 +24,13 @@
 
 ## Interface Rules
 
-- Keep the top-level interface flat and declarative: `slack auth`, `slack auth <preset> import`, `slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]`, `slack config`, `slack <preset> contacts add <label> <email>`, `slack <preset> users search <query>`, `slack <preset> events sync|once|service|timer install|timer disable|status|logs|reset cache`, `slack <preset> send to <target> body <message> [attach <path> ...]`, `slack <preset> reply to <message_id> body <message> [attach <path> ...]`, `slack <preset> files download <channel_id> <file_id> [to <path>]`, `slack <preset> open conversation <channel_id>`, `slack <preset> open message <message_id>`, `slack <preset> open tui`, `slack <preset> list ...`, `slack <preset> conversations clean`, and `slack <preset> mark all read`.
+- Keep the top-level interface flat and declarative: `slack accounts list`, `slack setup check`, `slack auth`, `slack auth <preset> import`, `slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]`, `slack config`, `slack <preset> contacts add <label> <email>`, `slack <preset> users search <query>`, `slack <preset> events sync|once|service|timer install|timer disable|status|logs|reset cache`, `slack <preset> preview send to <target> body <message> [attach <path> ...]`, `slack <preset> send to <target> body <message> [attach <path> ...]`, `slack <preset> preview reply to <message_id> body <message> [attach <path> ...]`, `slack <preset> reply to <message_id> body <message> [attach <path> ...]`, `slack <preset> files download <channel_id> <file_id> [to <path>]`, `slack <preset> inspect conversation <channel_id>`, `slack <preset> inspect message <message_id>`, `slack <preset> open conversation <channel_id>`, `slack <preset> open message <message_id>`, `slack <preset> open tui`, `slack <preset> list ... [output json]`, `slack <preset> conversations clean`, and `slack <preset> mark all read`.
 - `send` is for a new message in the resolved conversation. `reply` is only for message ids and posts into that message's thread.
+- `preview` must validate target grammar and attachment paths without resolving
+  Slack tokens, opening DMs, posting, uploading files, or marking read state.
+- `inspect` must read message/conversation metadata without marking read or
+  downloading attachments. `open` remains the deliberate stateful read/download
+  command.
 - Only `help`, `version`, and `upgrade` remain as global launcher actions for help, version, and upgrade.
 - `slack` with no args must print the same help as `slack help`.
 - Help output must stay human-written, compact, and printed with terminal-default styling.

@@ -87,6 +87,11 @@ features:
   # config
   slack config
 
+  list configured accounts and run a redacted setup check for agents
+  # accounts list | setup check
+  slack accounts list
+  slack setup check
+
   configure Slack account presets with tokens stored in config.json
   # slack auth
   # slack auth <preset> import
@@ -102,12 +107,14 @@ features:
 
   send a message from a configured Slack account to a contact, channel, or conversation
   # <preset> send to <label|email|message_id|channel_id> body <message> [attach <path> ...]
+  slack 1 preview send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
   slack 1 send to mom body "hello"
   slack 1 send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
   slack 1 send to C0AE059EU5T body "group update"
 
   reply in the thread for an exact Slack message id
   # <preset> reply to <message_id> body <message> [attach <path> ...]
+  slack 1 preview reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
   slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 
   download a file attachment from a conversation by channel_id and file_id
@@ -115,7 +122,8 @@ features:
   slack 1 files download D0466D63H7B F0AH0LD4133
 
   open a conversation or exact message id, mark it read, show text, download files, and print code blocks
-  # <preset> open conversation <channel_id> | <preset> open message <message_id>
+  # <preset> inspect conversation <channel_id> | inspect message <message_id> | open conversation <channel_id> | open message <message_id>
+  slack 1 inspect message D0466D63H7B:1712764800.000100
   slack 1 open conversation D0466D63H7B
   slack 1 open message D0466D63H7B:1712764800.000100
 
@@ -124,11 +132,12 @@ features:
   slack 1 open tui
 
   list Slack message history with Gmail-style filters, surface labels, and attachment names
-  # <preset> list [unread|read] [from <name>] [containing <text>] [since <window>] [limit <count>] [for <label>] [open]
+  # <preset> list [unread|read] [from <name>] [containing <text>] [since <window>] [limit <count>] [for <label>] [open] [output json]
   slack 1 list limit 10
   slack 1 list unread from maanas since 2w limit 10
   slack 1 list containing invoice since "jan 2025" limit 20
   slack 1 list for md read open limit 5
+  slack 1 list for md limit 5 output json
 
   list all registered contact labels
   # <preset> contacts list
@@ -146,6 +155,11 @@ features:
   mark all unread saved-contact direct messages as read
   # <preset> mark all read
   slack 1 mark all read
+
+agent-safe workflow:
+  list accounts first, inspect before open when read-state or downloads matter,
+  preview before send or reply, and use output json when another agent will
+  parse rows
 """
 
 
@@ -383,9 +397,22 @@ def parse_args(argv):
         "events_action": None,
         "events_lines": 80,
         "config": None,
+        "output_json": False,
     }
 
     if not argv:
+        return args
+    if argv[0] == "accounts":
+        if len(argv) < 2 or argv[1] != "list":
+            raise SystemExit("Use: slack accounts list [output json]")
+        args["command"] = "accounts-list"
+        args["output_json"] = _parse_optional_output_json(argv[2:], "Use: slack accounts list [output json]")
+        return args
+    if argv[0] == "setup":
+        if len(argv) < 2 or argv[1] != "check":
+            raise SystemExit("Use: slack setup check [output json]")
+        args["command"] = "setup-check"
+        args["output_json"] = _parse_optional_output_json(argv[2:], "Use: slack setup check [output json]")
         return args
     if argv[0] == "config":
         if len(argv) != 1:
@@ -415,6 +442,12 @@ def parse_args(argv):
     if command == "events":
         _parse_events_args(args, remaining)
         return args
+    if command == "preview":
+        _parse_preview_args(args, remaining)
+        return args
+    if command == "inspect":
+        _parse_inspect_args(args, remaining)
+        return args
     if command == "send":
         _parse_send_args_declarative(args, remaining)
         return args
@@ -441,6 +474,22 @@ def parse_args(argv):
         args["command"] = "mra"
         return args
     raise SystemExit(_top_level_usage())
+
+
+def _parse_optional_output_json(params, shape):
+    if not params:
+        return False
+    if params == ["output", "json"]:
+        return True
+    raise SystemExit(shape)
+
+
+def _extract_output_json(params, shape):
+    if len(params) >= 2 and params[-2:] == ["output", "json"]:
+        return params[:-2], True
+    if "output" in params:
+        raise SystemExit(shape)
+    return params, False
 
 
 def _parse_auth_args(args, remaining):
@@ -572,6 +621,46 @@ def _parse_reply_args_declarative(args, remaining):
     args["paths"] = paths
 
 
+def _parse_preview_args(args, remaining):
+    if not remaining:
+        raise SystemExit("Use: slack <preset> preview send ... | preview reply ...")
+    action = remaining[0]
+    if action == "send":
+        _parse_send_args_declarative(args, remaining[1:])
+        args["command"] = "preview-post"
+        return
+    if action == "reply":
+        _parse_reply_args_declarative(args, remaining[1:])
+        args["command"] = "preview-reply"
+        return
+    raise SystemExit("Use: slack <preset> preview send ... | preview reply ...")
+
+
+def _parse_inspect_args(args, remaining):
+    shape = "Use: slack <preset> inspect message <message_id> | inspect conversation <channel_id> [limit <count>] [output json]"
+    remaining, output_json = _extract_output_json(remaining, shape)
+    args["output_json"] = output_json
+    if len(remaining) < 2:
+        raise SystemExit(shape)
+    target_kind = remaining[0]
+    if target_kind == "message":
+        if len(remaining) != 2:
+            raise SystemExit(shape)
+        args["command"] = "inspect-message"
+        args["recipient"] = remaining[1]
+        return
+    if target_kind == "conversation":
+        args["command"] = "inspect-conversation"
+        args["recipient"] = remaining[1]
+        rest = remaining[2:]
+        if not rest:
+            return
+        if len(rest) == 2 and rest[0] == "limit":
+            args["ls_limit"] = _parse_positive_int(rest[1], "inspect conversation limit")
+            return
+    raise SystemExit(shape)
+
+
 def _parse_files_args(args, remaining):
     shape = "Use: slack <preset> files download <channel_id> <file_id> [to <path>]"
     if len(remaining) not in {3, 5} or remaining[:1] != ["download"]:
@@ -597,6 +686,12 @@ def _parse_open_args(args, remaining):
 
 
 def _parse_list_args_declarative(args, remaining):
+    remaining, output_json = _extract_output_json(
+        remaining,
+        "Use: slack <preset> list [unread|read] [for <label>] [from <name>] "
+        "[containing <text>] [since <window>] [limit <count>] [open] [output json]",
+    )
+    args["output_json"] = output_json
     args["command"] = "ls"
     index = 0
     while index < len(remaining):
@@ -638,6 +733,8 @@ def _parse_list_args_declarative(args, remaining):
             index += 2
             continue
         if token == "open":
+            if args["output_json"]:
+                raise SystemExit("Use either open or output json, not both")
             args["open_mode"] = True
             index += 1
             continue
@@ -1044,26 +1141,83 @@ def auth_test(token):
     return data
 
 
-def list_account_presets(config):
+def _service_state(unit):
+    try:
+        result = _systemctl_user("is-active", unit, check=False)
+    except Exception:
+        return "unknown"
+    return (result.stdout or result.stderr or "unknown").strip() or "unknown"
+
+
+def _account_rows(config):
     accounts = _accounts(config)
-    if not accounts:
-        print("No account presets configured.")
-        return
     rows = []
     for preset in _sorted_presets(accounts):
         account = accounts.get(preset) or {}
+        cache_path = _event_cache_db_path(account, preset)
         rows.append(
-            [
-                ("preset", preset),
-                ("name", account.get("name") or "-"),
-                ("team", account.get("team") or account.get("team_id") or "-"),
-                ("bot_token", "yes" if _has_token(account, "bot") else "no"),
-                ("user_token", "yes" if _has_token(account, "user") else "no"),
-                ("app_token", "yes" if _has_token(account, "app") else "no"),
-                ("contacts", str(len(normalize_contacts(account)))),
-            ]
+            {
+                "preset": preset,
+                "name": account.get("name") or "-",
+                "team": account.get("team") or account.get("team_id") or "-",
+                "bot_token": "present" if _has_token(account, "bot") else "missing",
+                "user_token": "present" if _has_token(account, "user") else "missing",
+                "app_token": "present" if _has_token(account, "app") else "missing",
+                "contacts": len(normalize_contacts(account)),
+                "event_cache": str(cache_path),
+                "event_cache_exists": cache_path.exists(),
+                "event_service": _service_state(f"{_events_unit_name(preset)}.service"),
+            }
         )
-    print_sections(rows)
+    return rows
+
+
+def list_account_presets(config, output_json=False):
+    rows = _account_rows(config)
+    if output_json:
+        print(json.dumps({"accounts": rows}, indent=2, sort_keys=True))
+        return
+    if not rows:
+        print("No account presets configured.")
+        return
+    print_sections(
+        [
+            [
+                ("preset", row["preset"]),
+                ("name", row["name"]),
+                ("team", row["team"]),
+                ("bot_token", row["bot_token"]),
+                ("user_token", row["user_token"]),
+                ("app_token", row["app_token"]),
+                ("contacts", str(row["contacts"])),
+                ("event_service", row["event_service"]),
+            ]
+            for row in rows
+        ]
+    )
+
+
+def setup_check(config_path, config, output_json=False):
+    payload = {
+        "config": str(config_path),
+        "accounts": _account_rows(config),
+    }
+    if output_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print(f"config={config_path}")
+    for row in payload["accounts"]:
+        print(
+            "account "
+            f"preset={row['preset']} "
+            f"name={row['name']} "
+            f"bot_token={row['bot_token']} "
+            f"user_token={row['user_token']} "
+            f"app_token={row['app_token']} "
+            f"contacts={row['contacts']} "
+            f"event_service={row['event_service']} "
+            f"event_cache_exists={'yes' if row['event_cache_exists'] else 'no'}"
+        )
 
 
 def _validate_token_kind(token, expected_kind, label):
@@ -2494,6 +2648,137 @@ def _list_entry_fields(item):
     return fields
 
 
+def _entry_summary(item):
+    channel_id = item.get("channel_id") or item.get("dm_id")
+    return {
+        "message_id": message_id(channel_id, item["message"].get("ts")),
+        "surface": item.get("surface") or "conversation",
+        "conversation": item.get("conversation") or item.get("email") or channel_id,
+        "channel_id": channel_id,
+        "members": item.get("members") or "-",
+        "thread": _thread_label(item["message"]),
+        "date": format_ts(item["message"].get("ts")),
+        "from": item["sender"]["label"],
+        "text": compact_text(message_text(item["message"])),
+        "attachments": summarize_attachments(item["message"]),
+    }
+
+
+def _print_inspect_entries(entries):
+    print_sections([_list_entry_fields(item) for item in entries])
+    print(f"inspected messages={len(entries)} side_effects=none")
+
+
+def inspect_slack(args, account, preset, token):
+    if args["command"] == "inspect-message":
+        parsed = parse_message_id(args["recipient"])
+        if not parsed:
+            raise SystemExit("Use: slack <preset> inspect message <message_id>")
+        channel_id, message_ts = parsed
+        message = _hydrate_message(channel_id, message_ts, token)
+        if not message:
+            print("No Slack message found.")
+            return 0
+        entry = {
+            "sort_ts": float(message_ts),
+            "email": "-",
+            "dm_id": channel_id,
+            "channel_id": channel_id,
+            "surface": "conversation",
+            "conversation": channel_id,
+            "members": "-",
+            "message": message,
+            "sender": _sender_info(message, token, {}),
+        }
+        if args["output_json"]:
+            print(json.dumps({"message": _entry_summary(entry)}, indent=2, sort_keys=True))
+        else:
+            _print_inspect_entries([entry])
+        return 0
+
+    channel_id = args["recipient"]
+    history = slack_request(
+        "conversations.history",
+        {"channel": channel_id, "limit": str(args["ls_limit"])},
+        token,
+        http_method="GET",
+    )
+    entries = []
+    user_cache = {}
+    for message in history.get("messages") or []:
+        ts = message.get("ts")
+        if not ts:
+            continue
+        entries.append(
+            {
+                "sort_ts": float(ts),
+                "email": "-",
+                "dm_id": channel_id,
+                "channel_id": channel_id,
+                "surface": "conversation",
+                "conversation": channel_id,
+                "members": "-",
+                "message": message,
+                "sender": _sender_info(message, token, user_cache),
+            }
+        )
+    entries.sort(key=lambda item: item["sort_ts"])
+    if args["output_json"]:
+        print(json.dumps({"conversation": channel_id, "messages": [_entry_summary(item) for item in entries]}, indent=2, sort_keys=True))
+    else:
+        _print_inspect_entries(entries)
+    return 0
+
+
+def _validate_preview_paths(paths):
+    out = []
+    for raw_path in paths:
+        expanded = os.path.expanduser(raw_path)
+        if not os.path.exists(expanded):
+            raise SystemExit(f"Attachment path not found: {raw_path}")
+        out.append(expanded)
+    return out
+
+
+def _preview_target_kind(recipient, contacts):
+    if recipient in contacts:
+        return "contact"
+    if parse_message_id(recipient):
+        return "message"
+    if CONVERSATION_ID_RE.match(recipient):
+        return "conversation"
+    if USER_ID_RE.match(recipient):
+        return "user"
+    if "@" in recipient:
+        return "email"
+    return "unknown"
+
+
+def preview_slack_action(args, contacts):
+    paths = _validate_preview_paths(args["paths"])
+    if args["command"] == "preview-post":
+        kind = _preview_target_kind(args["recipient"], contacts)
+        if kind == "unknown":
+            raise SystemExit("Unknown Slack target. Use a saved contact, email, user id, channel id, conversation id, or message id.")
+        print(
+            "preview_send "
+            f"target={args['recipient']} "
+            f"kind={kind} "
+            f"body_chars={len(args['message'] or '')} "
+            f"attachments={','.join(paths) if paths else '-'} "
+            "side_effects=none"
+        )
+        return 0
+    print(
+        "preview_reply "
+        f"message_id={args['recipient']} "
+        f"body_chars={len(args['message'] or '')} "
+        f"attachments={','.join(paths) if paths else '-'} "
+        "side_effects=none"
+    )
+    return 0
+
+
 def list_dms(
     contacts,
     token,
@@ -2506,6 +2791,7 @@ def list_dms(
     contains_filter=None,
     time_limit=None,
     cache_path=None,
+    output_json=False,
 ):
     entries = _event_cache_search_entries(
         cache_path,
@@ -2586,6 +2872,10 @@ def list_dms(
             _event_cache_mark_read(cache_path, channel_id, ts)
             marked += 1
         print(f"ls_opened messages={len(selected)} marked_conversations={marked}")
+        return
+
+    if output_json:
+        print(json.dumps({"messages": [_entry_summary(item) for item in selected]}, indent=2, sort_keys=True))
         return
 
     print_sections([_list_entry_fields(item) for item in selected])
@@ -5896,6 +6186,14 @@ def _dispatch(argv: list[str]) -> int:
 
     config = load_config(config_path)
 
+    if args["command"] == "accounts-list":
+        list_account_presets(config, output_json=args["output_json"])
+        return 0
+
+    if args["command"] == "setup-check":
+        setup_check(config_path, config, output_json=args["output_json"])
+        return 0
+
     if args["command"] == "auth":
         if args["auth_list"]:
             list_account_presets(config)
@@ -5971,6 +6269,15 @@ def _dispatch(argv: list[str]) -> int:
         self_user_id = auth_data.get("user_id")
         if not self_user_id:
             raise SystemExit("Unable to determine the current Slack user.")
+        list_kwargs = {
+            "label": args["ls_label"],
+            "sender_filter": args["ls_from"],
+            "contains_filter": args["ls_contains"],
+            "time_limit": args["ls_time_limit"],
+            "cache_path": _event_cache_db_path(account, preset),
+        }
+        if args["output_json"]:
+            list_kwargs["output_json"] = True
         list_dms(
             contacts,
             token,
@@ -5978,11 +6285,7 @@ def _dispatch(argv: list[str]) -> int:
             args["ls_filter"],
             self_user_id,
             args["open_mode"],
-            label=args["ls_label"],
-            sender_filter=args["ls_from"],
-            contains_filter=args["ls_contains"],
-            time_limit=args["ls_time_limit"],
-            cache_path=_event_cache_db_path(account, preset),
+            **list_kwargs,
         )
         return 0
 
@@ -5995,8 +6298,14 @@ def _dispatch(argv: list[str]) -> int:
         run_slack_tui(token, self_user_id, cache_path=_event_cache_db_path(account, preset))
         return 0
 
+    if args["command"] in {"preview-post", "preview-reply"}:
+        return preview_slack_action(args, contacts)
+
     token = resolve_token(account)
     auth_data = auth_test(token)
+
+    if args["command"] in {"inspect-message", "inspect-conversation"}:
+        return inspect_slack(args, account, preset, token)
 
     if args["command"] == "o":
         self_user_id = auth_data.get("user_id")
