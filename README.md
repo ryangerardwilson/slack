@@ -2,6 +2,8 @@
 
 Minimal Slack CLI/TUI for direct-message and adjacent message workflows through configured account presets.
 
+The runtime is a Go CLI with a Bubble Tea TUI at `slack <preset> open tui`.
+
 ## Install
 
 ```sh
@@ -10,7 +12,7 @@ Minimal Slack CLI/TUI for direct-message and adjacent message workflows through 
 ./install.sh upgrade
 ```
 
-The installed launcher is written to `~/.local/bin/slack`. `slack version` prints the runtime version from `_version.py`; source checkouts keep `0.0.0` until release automation stamps an artifact.
+The installed launcher is written to `~/.local/bin/slack`. `slack version` prints the runtime version stamped into the Go binary; source checkouts keep `0.0.0` until release automation stamps an artifact.
 
 ## Commands
 
@@ -43,6 +45,7 @@ slack 1 list unread from maanas since 2w limit 10
 slack 1 list unread from maanas since 2w limit 10 output json
 slack 1 list containing invoice since "jan 2025" limit 20
 slack 1 conversations clean
+slack mark all read
 slack 1 mark all read
 slack 1 events sync
 slack 1 events service
@@ -75,6 +78,20 @@ slack 1 events reset cache
 }
 ```
 
-User tokens are preferred for listing and person-targeted DMs. The events service owns the per-preset DM/GDM cache used by `list` and `open tui`.
+User tokens are preferred for listing and person-targeted DMs, and required for marking read state. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
 Use `inspect` before `open` when read-state or downloads matter. Use `preview`
 before sends or replies when an agent should validate intent without posting.
+
+## Development
+
+```sh
+go test ./...
+go run ./cmd/slack help
+go run ./cmd/slack version
+```
+
+The installer can build a local checkout with:
+
+```sh
+./install.sh from .
+```

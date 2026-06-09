@@ -15,6 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+
       - name: Set version env
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -22,52 +27,18 @@ jobs:
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
-      - name: Build linux-x64 binary in manylinux2014
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Test
+        run: go test ./...
+
+      - name: Build release bundle
         run: |
           set -euo pipefail
-
-          docker run --rm \
-            -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-            -e VERSION="${VERSION}" \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            quay.io/pypa/manylinux2014_x86_64 \
-            bash -lc '
-              set -euo pipefail
-              yum -y install curl zstd
-              PY_URL=$(/opt/python/cp311-cp311/bin/python .github/scripts/find-python-url.py)
-              test -n "$PY_URL"
-              echo "Using python-build-standalone: $PY_URL"
-              curl -fL "$PY_URL" -o /tmp/python.tar
-              mkdir -p /opt/py
-              case "$PY_URL" in
-                *.tar.zst)
-                  tar --use-compress-program=unzstd -xf /tmp/python.tar -C /opt/py
-                  ;;
-                *.tar.gz)
-                  tar -xzf /tmp/python.tar -C /opt/py
-                  ;;
-                *)
-                  echo "Unknown python archive format: $PY_URL" >&2
-                  exit 1
-                  ;;
-              esac
-
-              PYBIN="/opt/py/python/bin/python3"
-              export LD_LIBRARY_PATH="/opt/py/python/lib:${LD_LIBRARY_PATH:-}"
-              "$PYBIN" -m pip install -U pip
-              "$PYBIN" -m pip install --only-binary=:all: -r requirements.txt
-              "$PYBIN" -m pip install --only-binary=:all: pyinstaller
-              echo "__version__ = \"${VERSION}\"" > _version.py
-              "$PYBIN" -m PyInstaller --clean --onedir --name slack \
-                --hidden-import charset_normalizer \
-                main.py
-              "$PYBIN" .github/scripts/clear-execstack.py dist/slack
-              cp install.sh dist/slack/
-              tar -C dist -czf slack-linux-x64.tar.gz slack
-            '
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-s -w -X github.com/ryangerardwilson/slack/internal/version.Version=${VERSION}" \
+            -o dist/slack ./cmd/slack
+          chmod 755 dist/slack
+          tar -C dist -czf slack-linux-x64.tar.gz slack
 
       - name: Create release and upload asset
         uses: softprops/action-gh-release@v1

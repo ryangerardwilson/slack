@@ -4,31 +4,30 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-APP=""
-REMOTE="origin"
+APP=slack
+REMOTE=origin
 REPO_SLUG=""
-POLL_ATTEMPTS=60
-POLL_INTERVAL_SECONDS=5
-INSTALL_ATTEMPTS=30
-INSTALL_RETRY_INTERVAL_SECONDS=10
+ASSET_NAME="slack-linux-x64.tar.gz"
+TMP_RELEASE_DIR=""
 
 usage() {
   cat <<'EOF'
-Push the current app commit, create the next release tag, wait for the GitHub
-release to publish, then upgrade the installed app.
+Push the current commit, create the next release tag, publish a Linux x64
+release artifact, then upgrade the local install from GitHub.
 
 Usage:
   ./push_release_upgrade.sh
+  ./push_release_upgrade.sh 0.1.0
 EOF
 }
 
 die() {
-  echo "Error: $*" >&2
+  printf 'Error: %s\n' "$*" >&2
   exit 1
 }
 
 info() {
-  echo "$*"
+  printf '%s\n' "$*"
 }
 
 require_command() {
@@ -87,100 +86,17 @@ next_patch_version() {
   echo "${major}.${minor}.$((patch + 1))"
 }
 
-release_is_published() {
+build_release_asset() {
   local version="$1"
-  if command -v gh >/dev/null 2>&1; then
-    gh release view "v${version}" -R "$REPO_SLUG" >/dev/null 2>&1 && return 0
-  fi
-  curl -fsS \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO_SLUG}/releases/tags/v${version}" \
-    >/dev/null 2>&1
-}
+  local out_dir="$2"
+  local binary_path="$out_dir/$APP"
 
-wait_for_release() {
-  local version="$1"
-  local attempt
-  for ((attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1)); do
-    if release_is_published "$version"; then
-      return 0
-    fi
-    sleep "$POLL_INTERVAL_SECONDS"
-  done
-  die "Timed out waiting for GitHub release v${version} to become latest"
-}
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-s -w -X github.com/ryangerardwilson/slack/internal/version.Version=${version}" \
+    -o "$binary_path" ./cmd/slack
 
-run_local_tests() {
-  local test_venv=""
-  local python_cmd="python3"
-  local pip_cmd=()
-  local rc=0
-
-  if [[ -d "tests" || -n "$(compgen -G 'test_*.py' || true)" || -n "$(compgen -G '*_test.py' || true)" ]]; then
-    test_venv="$(mktemp -d "${TMPDIR:-/tmp}/${APP}_release_test_XXXXXX")"
-    python3 -m venv "$test_venv"
-    pip_cmd=("$test_venv/bin/pip" "install" "--disable-pip-version-check")
-    if [[ -s "requirements.txt" ]]; then
-      pip_cmd+=("-r" "requirements.txt")
-    fi
-    pip_cmd+=("pytest")
-    "${pip_cmd[@]}"
-    python_cmd="$test_venv/bin/python"
-  fi
-
-  if [[ -d "tests" ]]; then
-    "$python_cmd" -m pytest tests || rc=$?
-  elif compgen -G 'test_*.py' >/dev/null || compgen -G '*_test.py' >/dev/null; then
-    "$python_cmd" -m pytest || rc=$?
-  else
-    info "No local test targets found; skipping local tests."
-  fi
-
-  if [[ -n "$test_venv" ]]; then
-    rm -rf "$test_venv"
-  fi
-
-  return "$rc"
-}
-
-install_requested_release() {
-  local version="$1"
-  local attempt
-  local rc
-  for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt += 1)); do
-    if bash ./install.sh version "$version"; then
-      return 0
-    fi
-    rc=$?
-    if (( attempt == INSTALL_ATTEMPTS )); then
-      return "$rc"
-    fi
-    info "Install artifact for ${APP} ${version} not ready yet; retrying (${attempt}/${INSTALL_ATTEMPTS})..."
-    sleep "$INSTALL_RETRY_INTERVAL_SECONDS"
-  done
-}
-
-verify_installed_version() {
-  local version="$1"
-  local app_cmd="$HOME/.${APP}/bin/${APP}"
-  local installed=""
-  if [[ -x "$app_cmd" ]]; then
-    installed="$("$app_cmd" version 2>/dev/null || true)"
-  elif command -v "$APP" >/dev/null 2>&1; then
-    installed="$("$APP" version 2>/dev/null || true)"
-  else
-    return 0
-  fi
-  installed="${installed#v}"
-  [[ "$installed" == "$version" ]] || die "Installed ${APP} version is '$installed', expected '$version'"
-}
-
-verify_upgrade_command() {
-  local app_cmd="$HOME/.${APP}/bin/${APP}"
-  if [[ ! -x "$app_cmd" ]]; then
-    return 0
-  fi
-  "$app_cmd" upgrade >/dev/null
+  chmod 755 "$binary_path"
+  tar -C "$out_dir" -czf "$out_dir/$ASSET_NAME" "$APP"
 }
 
 main() {
@@ -188,58 +104,58 @@ main() {
     usage
     exit 0
   fi
-  [[ $# -eq 0 ]] || die "This script does not accept arguments"
+  [[ $# -le 1 ]] || die "Too many arguments"
 
   require_command git
-  require_command bash
-  require_command python3
+  require_command go
+  require_command gh
+  require_command tar
 
-  APP="$(basename "$ROOT_DIR")"
   REPO_SLUG="$(remote_repo_slug)"
-
-  [[ -f "install.sh" ]] || die "install.sh not found in $ROOT_DIR"
-  [[ -f ".github/workflows/release.yml" ]] || die "release workflow not found"
-  [[ -f "_version.py" ]] || die "_version.py not found"
-  grep -qx '__version__ = "0.0.0"' "_version.py" || die "_version.py must remain at 0.0.0 before tagging"
+  require_clean_tree
 
   local branch
   branch="$(current_branch)"
   [[ -n "$branch" ]] || die "Release from a branch, not detached HEAD"
 
-  require_clean_tree
-
-  info "Running local tests..."
-  run_local_tests
+  info "Running tests..."
+  go test ./...
 
   info "Pushing ${branch}..."
   git push "$REMOTE" "HEAD:${branch}"
 
-  local latest_version
-  local next_version
-  local next_tag
-  latest_version="$(latest_remote_version)"
-  next_version="$(next_patch_version "$latest_version")"
-  next_tag="v${next_version}"
+  local version
+  version="${1:-}"
+  if [[ -z "$version" ]]; then
+    version="$(next_patch_version "$(latest_remote_version)")"
+  fi
+  version="${version#v}"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Version must look like 0.1.0"
 
-  git show-ref --verify --quiet "refs/tags/${next_tag}" && die "Local tag ${next_tag} already exists"
-  [[ -z "$(git ls-remote --tags --refs "$REMOTE" "refs/tags/${next_tag}")" ]] \
-    || die "Remote tag ${next_tag} already exists"
+  local tag="v${version}"
+  git show-ref --verify --quiet "refs/tags/${tag}" && die "Local tag ${tag} already exists"
+  [[ -z "$(git ls-remote --tags --refs "$REMOTE" "refs/tags/${tag}")" ]] || die "Remote tag ${tag} already exists"
 
-  info "Creating tag ${next_tag}..."
-  git tag -a "$next_tag" -m "Release ${next_tag}"
+  TMP_RELEASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${APP}_release_XXXXXX")"
+  trap 'rm -rf "${TMP_RELEASE_DIR:-}"' EXIT
 
-  info "Pushing ${next_tag}..."
-  git push "$REMOTE" "$next_tag"
+  info "Building ${ASSET_NAME}..."
+  build_release_asset "$version" "$TMP_RELEASE_DIR"
 
-  info "Waiting for GitHub release ${next_tag}..."
-  wait_for_release "$next_version"
+  info "Creating tag ${tag}..."
+  git tag -a "$tag" -m "Release ${tag}"
+  git push "$REMOTE" "$tag"
 
-  info "Upgrading installed ${APP}..."
-  install_requested_release "$next_version"
-  verify_installed_version "$next_version"
-  verify_upgrade_command
+  info "Publishing GitHub release ${tag}..."
+  gh release create "$tag" "$TMP_RELEASE_DIR/$ASSET_NAME" \
+    --repo "$REPO_SLUG" \
+    --title "$tag" \
+    --notes "Release ${tag}"
 
-  info "Released and upgraded ${APP} ${next_version}"
+  info "Installing ${APP} ${version} from GitHub..."
+  bash ./install.sh version "$version"
+
+  info "Released and installed ${APP} ${version}"
 }
 
 main "$@"
