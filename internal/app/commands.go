@@ -176,6 +176,16 @@ func (rt *Runtime) Run(argv []string) error {
 		return rt.downloadFile(args.Recipient, args.FileID, args.OutputPath, client)
 	case "sc":
 		return rt.clearStaleConversations(client)
+	case "conversations-list":
+		listToken, err := resolveListToken(account)
+		if err != nil {
+			return err
+		}
+		listClient := rt.slackClient(listToken)
+		if _, err := listClient.AuthTest(); err != nil {
+			return err
+		}
+		return rt.listMemberChannelsReport(listClient, args.OutputJSON)
 	case "post":
 		directToken := resolveDirectPostToken(account, token)
 		lookupToken, err := resolveLookupToken(account, directToken)
@@ -192,13 +202,22 @@ func (rt *Runtime) Run(argv []string) error {
 		if target.Kind == "email" || target.Kind == "user" {
 			postClient = directClient
 		}
-		ts, err := sendPost(postClient, target.ChannelID, args.Message, "")
-		if err != nil {
-			return err
+		message := strings.TrimSpace(args.Message)
+		if len(args.Paths) == 0 && message == "" {
+			return UsageError{Message: "Use: slack <preset> send to <target> body <message> [attach <path> ...]"}
 		}
-		uploaded, err := sendAttachments(postClient, target.ChannelID, ts, args.Paths)
-		if err != nil {
-			return err
+		var ts string
+		var uploaded []string
+		if len(args.Paths) > 0 {
+			uploaded, ts, err = completeUploadExternalBatch(postClient, target.ChannelID, "", message, args.Paths)
+			if err != nil {
+				return err
+			}
+		} else {
+			ts, err = sendPost(postClient, target.ChannelID, args.Message, "")
+			if err != nil {
+				return err
+			}
 		}
 		details := []string{"posted", "target=" + args.Recipient, "kind=" + target.Kind, "channel=" + target.ChannelID}
 		if ts != "" {
@@ -463,6 +482,8 @@ func (rt *Runtime) previewSlackAction(args Args, contacts Contacts) error {
 		targetKind = "user"
 	} else if strings.Contains(target, "@") {
 		targetKind = "email"
+	} else if channelNameQuery(target) != "" {
+		targetKind = "channel_name"
 	}
 	rt.printSections([][]kv{{
 		{"action", "send"},

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,6 +42,96 @@ func TestHelpAndParseContract(t *testing.T) {
 	}
 	if _, err := parseArgs([]string{"mark", "read"}); err == nil {
 		t.Fatalf("expected malformed mark to fail")
+	}
+
+	listArgs, err := parseArgs([]string{"2", "conversations", "list"})
+	if err != nil {
+		t.Fatalf("parse conversations list: %v", err)
+	}
+	if listArgs.Command != "conversations-list" || listArgs.Preset != "2" || listArgs.OutputJSON {
+		t.Fatalf("unexpected conversations list parse: %+v", listArgs)
+	}
+	listJSON, err := parseArgs([]string{"2", "conversations", "list", "output", "json"})
+	if err != nil {
+		t.Fatalf("parse conversations list json: %v", err)
+	}
+	if !listJSON.OutputJSON {
+		t.Fatalf("expected output json: %+v", listJSON)
+	}
+	cleanArgs, err := parseArgs([]string{"2", "conversations", "clean"})
+	if err != nil || cleanArgs.Command != "sc" {
+		t.Fatalf("unexpected conversations clean parse: %+v err=%v", cleanArgs, err)
+	}
+}
+
+func TestChannelNameQuery(t *testing.T) {
+	if got := channelNameQuery("#blog"); got != "blog" {
+		t.Fatalf("channelNameQuery(#blog)=%q", got)
+	}
+	if got := channelNameQuery("C0123AB"); got != "" {
+		t.Fatalf("channelNameQuery(channel id)=%q", got)
+	}
+}
+
+func TestPostSendUsesBatchUploadWithoutThread(t *testing.T) {
+	var completePayload map[string]string
+	var uploadURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/files.getUploadURLExternal":
+			_, _ = w.Write([]byte(`{"ok":true,"upload_url":"` + uploadURL + `","file_id":"F1"}`))
+		case "/upload":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`ok`))
+		case "/api/files.completeUploadExternal":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &completePayload)
+			_, _ = w.Write([]byte(`{"ok":true,"files":[{"shares":{"C123":[{"ts":"200.1"}]}}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	uploadURL = server.URL + "/upload"
+
+	attachPath := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(attachPath, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-token"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+
+	err := rt.Run([]string{"1", "send", "to", "C123", "body", "caption", "attach", attachPath})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if completePayload["thread_ts"] != "" {
+		t.Fatalf("expected no thread_ts, got %#v", completePayload)
+	}
+	if completePayload["initial_comment"] != "caption" {
+		t.Fatalf("expected initial_comment, got %#v", completePayload)
+	}
+	if !strings.Contains(stdout.String(), "posted target=C123") {
+		t.Fatalf("stdout: %s", stdout.String())
 	}
 }
 

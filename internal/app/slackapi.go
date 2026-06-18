@@ -294,6 +294,61 @@ func listAPI(client SlackClient, method string, params map[string]string, key st
 	return rows, nil
 }
 
+func channelNameQuery(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "#") {
+		raw = strings.TrimSpace(raw[1:])
+	}
+	if raw == "" || strings.Contains(raw, "@") || strings.Contains(raw, ":") {
+		return ""
+	}
+	if conversationIDRE.MatchString(raw) || userIDRE.MatchString(raw) {
+		return ""
+	}
+	return strings.ToLower(raw)
+}
+
+func listMemberChannels(client SlackClient) ([]map[string]any, error) {
+	return listAPI(client, "users.conversations", map[string]string{
+		"types":            "public_channel,private_channel",
+		"exclude_archived": "true",
+		"limit":            "200",
+	}, "channels")
+}
+
+func lookupChannelIDByName(client SlackClient, value string) (string, error) {
+	query := channelNameQuery(value)
+	if query == "" {
+		return "", nil
+	}
+	channels, err := listMemberChannels(client)
+	if err != nil {
+		return "", err
+	}
+	var matches []map[string]any
+	for _, channel := range channels {
+		name := strings.ToLower(firstNonEmpty(str(channel["name"]), str(channel["name_normalized"])))
+		if name == query {
+			matches = append(matches, channel)
+		}
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	if len(matches) > 1 {
+		ids := make([]string, 0, len(matches))
+		for _, channel := range matches {
+			ids = append(ids, str(channel["id"]))
+		}
+		sort.Strings(ids)
+		return "", UsageError{Message: fmt.Sprintf("Multiple Slack channels named %q. Use an explicit channel id: %s", query, strings.Join(ids, ", "))}
+	}
+	return str(matches[0]["id"]), nil
+}
+
 func lookupUserIDByEmail(client SlackClient, email string) (string, error) {
 	data, err := client.Request("users.lookupByEmail", map[string]string{"email": email}, false, http.MethodGet, false)
 	if err != nil {
@@ -349,6 +404,11 @@ func resolvePostTarget(rt *Runtime, recipient string, contacts Contacts, postCli
 		}
 		return PostTarget{Kind: "user", ChannelID: channelID, UserID: value}, nil
 	}
+	if channelID, err := lookupChannelIDByName(lookupClient, value); err != nil {
+		return PostTarget{}, err
+	} else if channelID != "" {
+		return PostTarget{Kind: "channel_name", ChannelID: channelID}, nil
+	}
 	if strings.Contains(value, "@") {
 		userID, err := lookupUserIDByEmail(lookupClient, value)
 		if err != nil {
@@ -362,7 +422,7 @@ func resolvePostTarget(rt *Runtime, recipient string, contacts Contacts, postCli
 	}
 	_ = rt
 	_ = postClient
-	return PostTarget{}, UsageError{Message: fmt.Sprintf("Unable to resolve Slack target: %s", recipient)}
+	return PostTarget{}, UsageError{Message: fmt.Sprintf("Unable to resolve Slack target: %s (use contact, email, #channel, channel id, or message id)", recipient)}
 }
 
 func sendPost(client SlackClient, channelID, text, threadTS string) (string, error) {
@@ -503,6 +563,119 @@ func uploadRawFile(httpClient *http.Client, uploadURL, path, filename string) er
 
 func escapeQuotes(value string) string {
 	return strings.ReplaceAll(value, `"`, `\"`)
+}
+
+func completeUploadExternalBatch(client SlackClient, channelID, threadTS, initialComment string, paths []string) ([]string, string, error) {
+	if len(paths) == 0 {
+		return nil, "", nil
+	}
+	type uploadJob struct {
+		path     string
+		filename string
+		cleanup  func()
+	}
+	var jobs []uploadJob
+	for _, rawPath := range paths {
+		path, err := expandExistingPath(rawPath, "attachment")
+		if err != nil {
+			for _, job := range jobs {
+				job.cleanup()
+			}
+			return nil, "", err
+		}
+		cleanup := func() {}
+		info, err := os.Stat(path)
+		if err != nil {
+			for _, job := range jobs {
+				job.cleanup()
+			}
+			return nil, "", err
+		}
+		filename := filepath.Base(path)
+		if info.IsDir() {
+			zipped, clean, err := zipDirectory(path)
+			if err != nil {
+				for _, job := range jobs {
+					job.cleanup()
+				}
+				return nil, "", err
+			}
+			path = zipped
+			cleanup = clean
+			filename = filepath.Base(rawPath) + ".zip"
+		}
+		jobs = append(jobs, uploadJob{path: path, filename: filename, cleanup: cleanup})
+	}
+	defer func() {
+		for _, job := range jobs {
+			job.cleanup()
+		}
+	}()
+
+	fileEntries := make([]map[string]string, 0, len(jobs))
+	uploaded := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		info, err := os.Stat(job.path)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := client.Request("files.getUploadURLExternal", map[string]string{
+			"filename": job.filename,
+			"length":   strconv.FormatInt(info.Size(), 10),
+		}, false, http.MethodPost, false)
+		if err != nil {
+			return nil, "", err
+		}
+		uploadURL := str(data["upload_url"])
+		fileID := str(data["file_id"])
+		if uploadURL == "" || fileID == "" {
+			return nil, "", fmt.Errorf("Slack did not return upload URL for %s", job.filename)
+		}
+		if err := uploadRawFile(client.HTTPClient, uploadURL, job.path, job.filename); err != nil {
+			return nil, "", err
+		}
+		fileEntries = append(fileEntries, map[string]string{"id": fileID, "title": job.filename})
+		uploaded = append(uploaded, job.filename)
+	}
+	filesJSON, err := json.Marshal(fileEntries)
+	if err != nil {
+		return nil, "", err
+	}
+	payload := map[string]string{
+		"channel_id": channelID,
+		"files":      string(filesJSON),
+	}
+	if strings.TrimSpace(initialComment) != "" {
+		payload["initial_comment"] = strings.TrimSpace(initialComment)
+	}
+	if threadTS != "" {
+		payload["thread_ts"] = threadTS
+	}
+	data, err := client.Request("files.completeUploadExternal", payload, false, http.MethodPost, false)
+	if err != nil {
+		return nil, "", err
+	}
+	shareTS := ""
+	for _, filePayload := range asList(data["files"]) {
+		fileMap := asMap(filePayload)
+		shares := asMap(fileMap["shares"])
+		for _, shareList := range shares {
+			for _, rawShare := range asList(shareList) {
+				share := asMap(rawShare)
+				if ts := str(share["ts"]); ts != "" {
+					shareTS = ts
+					break
+				}
+			}
+			if shareTS != "" {
+				break
+			}
+		}
+		if shareTS != "" {
+			break
+		}
+	}
+	return uploaded, shareTS, nil
 }
 
 func sendAttachments(client SlackClient, channelID, threadTS string, paths []string) ([]string, error) {

@@ -582,6 +582,61 @@ func (rt *Runtime) clearStaleConversations(client SlackClient) error {
 	return nil
 }
 
+func (rt *Runtime) listMemberChannelsReport(client SlackClient, outputJSON bool) error {
+	channels, err := listMemberChannels(client)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		Surface   string `json:"surface"`
+		Name      string `json:"name"`
+		ChannelID string `json:"channel_id"`
+		Members   string `json:"members,omitempty"`
+	}
+	var rows []row
+	for _, channel := range channels {
+		channelID := str(channel["id"])
+		if channelID == "" {
+			continue
+		}
+		surface := conversationSurface(channel, channelID)
+		if surface != "channel" && surface != "private_channel" {
+			continue
+		}
+		item := row{
+			Surface:   surface,
+			Name:      channelName(channel, channelID),
+			ChannelID: channelID,
+		}
+		if members := channel["num_members"]; members != nil {
+			item.Members = str(members)
+		}
+		rows = append(rows, item)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	if outputJSON {
+		return rt.printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(rt.Stdout, "No member channels found.")
+		return nil
+	}
+	var sections [][]kv
+	for _, item := range rows {
+		section := []kv{
+			{"surface", item.Surface},
+			{"name", item.Name},
+			{"channel_id", item.ChannelID},
+		}
+		if item.Members != "" {
+			section = append(section, kv{"members", item.Members})
+		}
+		sections = append(sections, section)
+	}
+	rt.printSections(sections)
+	return nil
+}
+
 func rawJSON(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)

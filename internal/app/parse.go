@@ -44,12 +44,13 @@ features:
   slack 1 events timer install
   slack 1 events status
 
-  send a message from a configured Slack account to a contact, channel, or conversation
-  # <preset> send to <label|email|message_id|channel_id> body <message> [attach <path> ...]
+  send a new top-level message to a contact, channel id, channel name, or conversation
+  # <preset> send to <label|email|#channel|channel_id|message_id> body <message> [attach <path> ...]
   slack 1 preview send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
   slack 1 send to mom body "hello"
   slack 1 send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
   slack 1 send to C0AE059EU5T body "group update"
+  slack 2 send to #blog body "Excellence blog update"
 
   reply in the thread for an exact Slack message id
   # <preset> reply to <message_id> body <message> [attach <path> ...]
@@ -77,6 +78,12 @@ features:
   slack 1 list containing invoice since "jan 2025" limit 20
   slack 1 list for md read open limit 5
   slack 1 list for md limit 5 output json
+  # list is message history, not a channel directory; use conversations list for channel ids
+
+  list member public and private channels you can post to
+  # <preset> conversations list [output json]
+  slack 1 conversations list
+  slack 2 conversations list output json
 
   list all registered contact labels
   # <preset> contacts list
@@ -182,11 +189,7 @@ func parseArgs(argv []string) (Args, error) {
 	case "list":
 		return parseListArgs(args, remaining)
 	case "conversations":
-		if strings.Join(remaining, " ") != "clean" {
-			return args, UsageError{Message: "Use: slack <preset> conversations clean"}
-		}
-		args.Command = "sc"
-		return args, nil
+		return parseConversationsArgs(args, remaining)
 	case "mark":
 		if strings.Join(remaining, " ") != "all read" {
 			return args, UsageError{Message: "Use: slack [<preset>] mark all read"}
@@ -356,6 +359,27 @@ func parseBodyAndPaths(remaining []string, shape string) (string, []string, erro
 		}
 	}
 	return message, paths, nil
+}
+
+func parseConversationsArgs(args Args, remaining []string) (Args, error) {
+	shape := "Use: slack <preset> conversations list [output json] | conversations clean"
+	if len(remaining) == 1 && remaining[0] == "clean" {
+		args.Command = "sc"
+		return args, nil
+	}
+	if len(remaining) == 0 || remaining[0] != "list" {
+		return args, UsageError{Message: shape}
+	}
+	rest, outputJSON, err := extractOutputJSON(remaining[1:], shape)
+	if err != nil {
+		return args, err
+	}
+	if len(rest) > 0 {
+		return args, UsageError{Message: shape}
+	}
+	args.Command = "conversations-list"
+	args.OutputJSON = outputJSON
+	return args, nil
 }
 
 func parseSendArgs(args Args, remaining []string) (Args, error) {
