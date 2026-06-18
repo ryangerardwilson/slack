@@ -20,7 +20,15 @@ func TestHelpAndParseContract(t *testing.T) {
 	if err := rt.Run(nil); err != nil {
 		t.Fatalf("Run help: %v", err)
 	}
-	for _, want := range []string{"slack accounts list", "slack 1 inspect message", "slack 1 preview send", "slack mark all read", "output json"} {
+	for _, want := range []string{
+		"slack <preset> list channels",
+		"slack <preset> list dms",
+		"slack accounts list",
+		"slack 1 inspect message",
+		"slack 1 preview send",
+		"slack mark all read",
+		"output json",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing %q", want)
 		}
@@ -44,19 +52,26 @@ func TestHelpAndParseContract(t *testing.T) {
 		t.Fatalf("expected malformed mark to fail")
 	}
 
-	listArgs, err := parseArgs([]string{"2", "conversations", "list"})
+	channelsArgs, err := parseArgs([]string{"2", "list", "channels"})
 	if err != nil {
-		t.Fatalf("parse conversations list: %v", err)
+		t.Fatalf("parse list channels: %v", err)
 	}
-	if listArgs.Command != "conversations-list" || listArgs.Preset != "2" || listArgs.OutputJSON {
-		t.Fatalf("unexpected conversations list parse: %+v", listArgs)
+	if channelsArgs.Command != "list-channels" || channelsArgs.Preset != "2" {
+		t.Fatalf("unexpected list channels parse: %+v", channelsArgs)
 	}
-	listJSON, err := parseArgs([]string{"2", "conversations", "list", "output", "json"})
-	if err != nil {
-		t.Fatalf("parse conversations list json: %v", err)
+	dmsJSON, err := parseArgs([]string{"2", "list", "dms", "output", "json"})
+	if err != nil || dmsJSON.Command != "list-dms" || !dmsJSON.OutputJSON {
+		t.Fatalf("unexpected list dms json parse: %+v err=%v", dmsJSON, err)
 	}
-	if !listJSON.OutputJSON {
-		t.Fatalf("expected output json: %+v", listJSON)
+	contactsArgs, err := parseArgs([]string{"1", "list", "contacts"})
+	if err != nil || contactsArgs.Command != "list-contacts" {
+		t.Fatalf("unexpected list contacts parse: %+v err=%v", contactsArgs, err)
+	}
+	if _, err := parseArgs([]string{"2", "conversations", "list"}); err == nil {
+		t.Fatalf("expected conversations list to be rejected")
+	}
+	if _, err := parseArgs([]string{"2", "contacts", "list"}); err == nil {
+		t.Fatalf("expected contacts list to be rejected")
 	}
 	cleanArgs, err := parseArgs([]string{"2", "conversations", "clean"})
 	if err != nil || cleanArgs.Command != "sc" {

@@ -319,6 +319,14 @@ func listMemberChannels(client SlackClient) ([]map[string]any, error) {
 	}, "channels")
 }
 
+func listMemberDMs(client SlackClient) ([]map[string]any, error) {
+	return listAPI(client, "users.conversations", map[string]string{
+		"types":            "im,mpim",
+		"exclude_archived": "true",
+		"limit":            "200",
+	}, "channels")
+}
+
 func lookupChannelIDByName(client SlackClient, value string) (string, error) {
 	query := channelNameQuery(value)
 	if query == "" {

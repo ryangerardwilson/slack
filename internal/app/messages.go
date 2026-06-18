@@ -637,6 +637,80 @@ func (rt *Runtime) listMemberChannelsReport(client SlackClient, outputJSON bool)
 	return nil
 }
 
+func (rt *Runtime) listMemberDMsReport(client SlackClient, outputJSON bool) error {
+	channels, err := listMemberDMs(client)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		Surface   string `json:"surface"`
+		Name      string `json:"name"`
+		ChannelID string `json:"channel_id"`
+	}
+	var rows []row
+	for _, channel := range channels {
+		channelID := str(channel["id"])
+		if channelID == "" {
+			continue
+		}
+		surface := conversationSurface(channel, channelID)
+		if surface != "dm" && surface != "group_dm" {
+			continue
+		}
+		rows = append(rows, row{
+			Surface:   surface,
+			Name:      channelName(channel, channelID),
+			ChannelID: channelID,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	if outputJSON {
+		return rt.printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(rt.Stdout, "No DM or group-DM conversations found.")
+		return nil
+	}
+	var sections [][]kv
+	for _, item := range rows {
+		sections = append(sections, []kv{
+			{"surface", item.Surface},
+			{"name", item.Name},
+			{"channel_id", item.ChannelID},
+		})
+	}
+	rt.printSections(sections)
+	return nil
+}
+
+func (rt *Runtime) listContactsReport(contacts Contacts, outputJSON bool) error {
+	if len(contacts) == 0 {
+		if outputJSON {
+			return rt.printJSON([]map[string]string{})
+		}
+		fmt.Fprintln(rt.Stdout, "No contacts registered.")
+		return nil
+	}
+	keys := make([]string, 0, len(contacts))
+	for key := range contacts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if outputJSON {
+		payload := make([]map[string]string, 0, len(keys))
+		for _, key := range keys {
+			payload = append(payload, map[string]string{"label": key, "target": contacts[key]})
+		}
+		return rt.printJSON(payload)
+	}
+	var rows [][]kv
+	for _, key := range keys {
+		rows = append(rows, []kv{{"label", key}, {"target", contacts[key]}})
+	}
+	rt.printSections(rows)
+	return nil
+}
+
 func rawJSON(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)

@@ -89,11 +89,29 @@ func (rt *Runtime) Run(argv []string) error {
 	switch args.Command {
 	case "events":
 		return rt.dispatchEvents(account, preset, args)
-	case "ls":
-		if args.ListRegistry {
-			listRegisteredContacts(rt, contacts)
-			return nil
+	case "list-contacts":
+		return rt.listContactsReport(contacts, args.OutputJSON)
+	case "list-channels":
+		listToken, err := resolveListToken(account)
+		if err != nil {
+			return err
 		}
+		listClient := rt.slackClient(listToken)
+		if _, err := listClient.AuthTest(); err != nil {
+			return err
+		}
+		return rt.listMemberChannelsReport(listClient, args.OutputJSON)
+	case "list-dms":
+		listToken, err := resolveListToken(account)
+		if err != nil {
+			return err
+		}
+		listClient := rt.slackClient(listToken)
+		if _, err := listClient.AuthTest(); err != nil {
+			return err
+		}
+		return rt.listMemberDMsReport(listClient, args.OutputJSON)
+	case "ls":
 		token, err := resolveListToken(account)
 		if err != nil {
 			return err
@@ -176,16 +194,6 @@ func (rt *Runtime) Run(argv []string) error {
 		return rt.downloadFile(args.Recipient, args.FileID, args.OutputPath, client)
 	case "sc":
 		return rt.clearStaleConversations(client)
-	case "conversations-list":
-		listToken, err := resolveListToken(account)
-		if err != nil {
-			return err
-		}
-		listClient := rt.slackClient(listToken)
-		if _, err := listClient.AuthTest(); err != nil {
-			return err
-		}
-		return rt.listMemberChannelsReport(listClient, args.OutputJSON)
 	case "post":
 		directToken := resolveDirectPostToken(account, token)
 		lookupToken, err := resolveLookupToken(account, directToken)

@@ -28,7 +28,9 @@ slack auth
 slack auth 1 import
 slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
 slack 1 contacts add mom mom@example.com
-slack 1 contacts list
+slack 1 list contacts
+slack 1 list channels
+slack 1 list dms
 slack 1 users search rohan
 slack 1 preview send to mom body "hello"
 slack 1 send to mom body "hello"

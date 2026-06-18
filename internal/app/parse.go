@@ -8,105 +8,59 @@ import (
 
 const helpText = `Slack CLI
 
-global actions:
-  slack help
-    show this help
-  slack version
-    print the installed version
-  slack upgrade
-    upgrade to the latest release
+agent quick reference:
+  slack <preset> list channels [output json]     channel ids for send to #name or C...
+  slack <preset> list dms [output json]          DM and group-DM conversation ids
+  slack <preset> list contacts [output json]     saved contact labels
+  slack <preset> list [messages] [filters...]    message history (default: messages)
+  slack <preset> inspect message <message_id>    read metadata, no side effects
+  slack <preset> preview send to <target> body <text> [attach <path>...]
+  slack <preset> send to <target> body <text> [attach <path>...]   new top-level post
+  slack <preset> reply to <message_id> body <text> [attach <path>...]   thread only
+  slack 1 inspect message <message_id>
+  slack 1 preview send to <target> body <text>
 
-features:
-  save a contact label for a frequently used Slack recipient
-  # <preset> contacts add <label> <email>
-  slack 1 contacts add mom mom@example.com
-  slack 1 contacts add boss boss@company.com
-
-  edit the saved-contact config directly in your editor
-  # config
+global:
+  slack help | version | upgrade
+  slack accounts list [output json]
+  slack setup check [output json]
   slack config
-
-  list configured accounts and run a redacted setup check for agents
-  # accounts list | setup check
-  slack accounts list
-  slack setup check
-
-  configure Slack account presets with tokens stored in config.json
-  # slack auth
-  # slack auth <preset> import
-  # slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]
-  slack auth
-  slack auth 1 import
-  slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
-
-  keep a local realtime DM/GDM event cache for faster list and TUI loads
-  # <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status
-  slack 1 events timer install
-  slack 1 events status
-
-  send a new top-level message to a contact, channel id, channel name, or conversation
-  # <preset> send to <label|email|#channel|channel_id|message_id> body <message> [attach <path> ...]
-  slack 1 preview send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
-  slack 1 send to mom body "hello"
-  slack 1 send to boss@company.com body "latest draft" attach ~/Downloads/draft.pdf
-  slack 1 send to C0AE059EU5T body "group update"
-  slack 2 send to #blog body "Excellence blog update"
-
-  reply in the thread for an exact Slack message id
-  # <preset> reply to <message_id> body <message> [attach <path> ...]
-  slack 1 preview reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
-  slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
-
-  download a file attachment from a conversation by channel_id and file_id
-  # <preset> files download <channel_id> <file_id> [to <path>]
-  slack 1 files download D0466D63H7B F0AH0LD4133
-
-  open a conversation or exact message id, mark it read, show text, download files, and print code blocks
-  # <preset> inspect conversation <channel_id> | inspect message <message_id> | open conversation <channel_id> | open message <message_id>
-  slack 1 inspect message D0466D63H7B:1712764800.000100
-  slack 1 open conversation D0466D63H7B
-  slack 1 open message D0466D63H7B:1712764800.000100
-
-  open a keyboard-first terminal view for the latest 100 DM/group-DM messages
-  # <preset> open tui
-  slack 1 open tui
-
-  list Slack message history with Gmail-style filters, surface labels, and attachment names
-  # <preset> list [unread|read] [from <name>] [containing <text>] [since <window>] [limit <count>] [for <label>] [open] [output json]
-  slack 1 list limit 10
-  slack 1 list unread from maanas since 2w limit 10
-  slack 1 list containing invoice since "jan 2025" limit 20
-  slack 1 list for md read open limit 5
-  slack 1 list for md limit 5 output json
-  # list is message history, not a channel directory; use conversations list for channel ids
-
-  list member public and private channels you can post to
-  # <preset> conversations list [output json]
-  slack 1 conversations list
-  slack 2 conversations list output json
-
-  list all registered contact labels
-  # <preset> contacts list
-  slack 1 contacts list
-
-  search saved contacts and Slack workspace users
-  # <preset> users search <query>
-  slack 1 users search rohan
-  slack 1 users search "rohan choudhary"
-
-  clear stale conversations and bot-like conversations
-  # <preset> conversations clean
-  slack 1 conversations clean
-
-  mark all unread DM/GDM notifications as read for one preset, or all presets
-  # [<preset>] mark all read
+  slack auth | slack auth <preset> import | slack auth <preset> bot <token> [user <token>] [app <token>] [name <name>]
   slack mark all read
-  slack 1 mark all read
+  slack <preset> mark all read
 
-agent-safe workflow:
-  list accounts first, inspect before open when read-state or downloads matter,
-  preview before send or reply, and use output json when another agent will
-  parse rows
+list (directories vs message history):
+  slack <preset> list channels [output json]
+  slack <preset> list dms [output json]
+  slack <preset> list contacts [output json]
+  slack <preset> list [messages] [unread|read] [for <label>] [from <name>] [containing <text>]
+              [since <window>] [limit <count>] [output json]
+
+read:
+  slack <preset> inspect conversation <channel_id>
+  slack <preset> inspect message <message_id>
+  slack <preset> open conversation <channel_id> | open message <message_id> | open tui
+
+write:
+  slack <preset> preview send to <label|email|#channel|channel_id> body <message> [attach <path>...]
+  slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...]
+  slack <preset> preview reply to <channel_id>:<ts> body <message> [attach <path>...]
+  slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...]
+
+people and contacts:
+  slack <preset> contacts add <label> <email>
+  slack <preset> users search <query>
+
+files:
+  slack <preset> files download <channel_id> <file_id> [to <path>]
+
+maintenance:
+  slack <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status
+  slack <preset> conversations clean
+
+workflow:
+  use setup check when preset identity is uncertain; inspect before open; preview before send or reply;
+  trailing output json when another agent parses rows
 `
 
 func parseArgs(argv []string) (Args, error) {
@@ -261,9 +215,7 @@ func parseAuthArgs(args Args, remaining []string) (Args, error) {
 
 func parseContactsArgs(args Args, remaining []string) (Args, error) {
 	if len(remaining) == 1 && remaining[0] == "list" {
-		args.Command = "ls"
-		args.ListRegistry = true
-		return args, nil
+		return args, UsageError{Message: "Use: slack <preset> list contacts [output json]"}
 	}
 	if len(remaining) == 3 && remaining[0] == "add" {
 		args.Command = "ac"
@@ -271,7 +223,7 @@ func parseContactsArgs(args Args, remaining []string) (Args, error) {
 		args.Email = remaining[2]
 		return args, nil
 	}
-	return args, UsageError{Message: "Use: slack <preset> contacts list|add <label> <email>"}
+	return args, UsageError{Message: "Use: slack <preset> contacts add <label> <email>"}
 }
 
 func parseUsersArgs(args Args, remaining []string) (Args, error) {
@@ -362,24 +314,14 @@ func parseBodyAndPaths(remaining []string, shape string) (string, []string, erro
 }
 
 func parseConversationsArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> conversations list [output json] | conversations clean"
+	if len(remaining) == 1 && remaining[0] == "list" {
+		return args, UsageError{Message: "Use: slack <preset> list channels [output json]"}
+	}
 	if len(remaining) == 1 && remaining[0] == "clean" {
 		args.Command = "sc"
 		return args, nil
 	}
-	if len(remaining) == 0 || remaining[0] != "list" {
-		return args, UsageError{Message: shape}
-	}
-	rest, outputJSON, err := extractOutputJSON(remaining[1:], shape)
-	if err != nil {
-		return args, err
-	}
-	if len(rest) > 0 {
-		return args, UsageError{Message: shape}
-	}
-	args.Command = "conversations-list"
-	args.OutputJSON = outputJSON
-	return args, nil
+	return args, UsageError{Message: "Use: slack <preset> conversations clean"}
 }
 
 func parseSendArgs(args Args, remaining []string) (Args, error) {
@@ -498,13 +440,52 @@ func parseOpenArgs(args Args, remaining []string) (Args, error) {
 }
 
 func parseListArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> list [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [open] [output json]"
+	shape := listUsage()
 	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
 	if err != nil {
 		return args, err
 	}
-	args.Command = "ls"
 	args.OutputJSON = outputJSON
+	if len(remaining) > 0 {
+		switch remaining[0] {
+		case "channels":
+			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list channels [output json]")
+			if err != nil {
+				return args, err
+			}
+			if len(rest) > 0 {
+				return args, UsageError{Message: "Use: slack <preset> list channels [output json]"}
+			}
+			args.Command = "list-channels"
+			args.OutputJSON = outputJSON || extraJSON
+			return args, nil
+		case "dms":
+			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list dms [output json]")
+			if err != nil {
+				return args, err
+			}
+			if len(rest) > 0 {
+				return args, UsageError{Message: "Use: slack <preset> list dms [output json]"}
+			}
+			args.Command = "list-dms"
+			args.OutputJSON = outputJSON || extraJSON
+			return args, nil
+		case "contacts":
+			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list contacts [output json]")
+			if err != nil {
+				return args, err
+			}
+			if len(rest) > 0 {
+				return args, UsageError{Message: "Use: slack <preset> list contacts [output json]"}
+			}
+			args.Command = "list-contacts"
+			args.OutputJSON = outputJSON || extraJSON
+			return args, nil
+		case "messages":
+			remaining = remaining[1:]
+		}
+	}
+	args.Command = "ls"
 	for i := 0; i < len(remaining); {
 		token := remaining[i]
 		switch token {
@@ -574,5 +555,5 @@ func topLevelUsage() string {
 }
 
 func listUsage() string {
-	return "Use: slack <preset> contacts list | slack <preset> list [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [open] [output json]"
+	return "Use: slack <preset> list channels|dms|contacts [output json] | slack <preset> list [messages] [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [output json]"
 }
