@@ -401,7 +401,7 @@ func (rt *Runtime) inspectSlack(args Args, client SlackClient) error {
 			return rt.printJSON(map[string]any{"message": message})
 		}
 		entry := MessageEntry{ChannelID: channelID, DMID: channelID, Surface: conversationSurface(map[string]any{}, channelID), Conversation: channelID, Message: message, Sender: senderInfo(client, message, nil), SortTS: tsFloat(ts)}
-		rt.printSections([][]kv{listEntryFields(entry)})
+		rt.printSections([][]kv{inspectEntryFields(entry)})
 		return nil
 	}
 	limit := args.ListLimit
@@ -422,7 +422,7 @@ func (rt *Runtime) inspectSlack(args Args, client SlackClient) error {
 	for _, raw := range asList(data["messages"]) {
 		message := asMap(raw)
 		entry := MessageEntry{ChannelID: args.Recipient, DMID: args.Recipient, Surface: conversationSurface(map[string]any{}, args.Recipient), Conversation: args.Recipient, Message: message, Sender: senderInfo(client, message, nil), SortTS: tsFloat(str(message["ts"]))}
-		rows = append(rows, listEntryFields(entry))
+		rows = append(rows, inspectEntryFields(entry))
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(rt.Stdout, "No messages found.")

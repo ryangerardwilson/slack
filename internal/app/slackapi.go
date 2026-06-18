@@ -888,6 +888,24 @@ func listEntryFields(entry MessageEntry) []kv {
 	}
 }
 
+func inspectEntryFields(entry MessageEntry) []kv {
+	summary := entrySummary(entry)
+	text := messageText(entry.Message)
+	if text == "" || text == "-" {
+		text = str(summary["text"])
+	}
+	return []kv{
+		{"surface", str(summary["surface"])},
+		{"conversation", str(summary["conversation"])},
+		{"sender", str(summary["sender"])},
+		{"date", str(summary["date"])},
+		{"unread", str(summary["unread"])},
+		{"message_id", str(summary["message_id"])},
+		{"text", text},
+		{"attachments", str(summary["attachments"])},
+	}
+}
+
 func compactText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	if value == "" {

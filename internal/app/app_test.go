@@ -181,6 +181,7 @@ func TestAuthStoresTokensInsidePreset(t *testing.T) {
 }
 
 func TestInspectConversationUsesUserToken(t *testing.T) {
+	longText := strings.Repeat("alpha ", 80)
 	var authHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
@@ -188,7 +189,16 @@ func TestInspectConversationUsesUserToken(t *testing.T) {
 		case "/api/auth.test":
 			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
 		case "/api/conversations.history":
-			_, _ = w.Write([]byte(`{"ok":true,"messages":[{"ts":"100.1","user":"U2","text":"channel reply"}]}`))
+			payload := map[string]any{
+				"ok": true,
+				"messages": []map[string]any{{
+					"ts":   "100.1",
+					"user": "U2",
+					"text": longText,
+				}},
+			}
+			data, _ := json.Marshal(payload)
+			_, _ = w.Write(data)
 		case "/api/users.info":
 			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"U2","profile":{"real_name":"Mike Willbanks","email":"mike@willbanks.dev"}}}`))
 		default:
@@ -224,8 +234,11 @@ func TestInspectConversationUsesUserToken(t *testing.T) {
 	if authHeader != "Bearer xoxp-user" {
 		t.Fatalf("expected user token, got %q", authHeader)
 	}
-	if !strings.Contains(stdout.String(), "channel reply") {
-		t.Fatalf("stdout: %s", stdout.String())
+	if !strings.Contains(stdout.String(), strings.TrimSpace(longText)) {
+		t.Fatalf("inspect should include full text, stdout: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "...") {
+		t.Fatalf("inspect should not truncate text, stdout: %s", stdout.String())
 	}
 }
 
