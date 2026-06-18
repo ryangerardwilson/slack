@@ -448,6 +448,23 @@ func sendPost(client SlackClient, channelID, text, threadTS string) (string, err
 	return str(data["ts"]), nil
 }
 
+func deleteMessage(client SlackClient, channelID, messageTS string) error {
+	_, err := client.Request("chat.delete", map[string]string{
+		"channel": channelID,
+		"ts":      messageTS,
+	}, false, http.MethodPost, false)
+	return err
+}
+
+func editMessage(client SlackClient, channelID, messageTS, text string) error {
+	_, err := client.Request("chat.update", map[string]string{
+		"channel": channelID,
+		"ts":      messageTS,
+		"text":    text,
+	}, false, http.MethodPost, false)
+	return err
+}
+
 func resolveReplyThreadTS(client SlackClient, channelID, messageTS string) (string, error) {
 	data, err := client.Request("conversations.replies", map[string]string{
 		"channel":   channelID,

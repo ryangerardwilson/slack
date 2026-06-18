@@ -26,6 +26,8 @@ func TestHelpAndParseContract(t *testing.T) {
 		"slack accounts list",
 		"slack 1 inspect message",
 		"slack 1 preview send",
+		"slack <preset> delete message",
+		"slack <preset> edit message",
 		"slack mark all read",
 		"output json",
 	} {
@@ -347,5 +349,131 @@ func TestMarkAllReadUsesUserTokenAndCache(t *testing.T) {
 		if (entry.ChannelID == "D1" || entry.ChannelID == "G1") && entry.Unread {
 			t.Fatalf("entry still unread: %+v", entry)
 		}
+	}
+}
+
+func TestChannelPostUsesUserToken(t *testing.T) {
+	var authHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/chat.postMessage":
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"200.1"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-bot","user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+
+	err := rt.Run([]string{"1", "send", "to", "C0B7V41SRST", "body", "engineering update"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if authHeader != "Bearer xoxp-user" {
+		t.Fatalf("expected user token for channel post, got %q", authHeader)
+	}
+	if !strings.Contains(stdout.String(), "posted target=C0B7V41SRST") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+}
+
+func TestDeleteAndEditMessage(t *testing.T) {
+	var deletePayload map[string]string
+	var editPayload map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/chat.delete":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &deletePayload)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/chat.update":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &editPayload)
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"200.1"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-bot","user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+
+	err := rt.Run([]string{"1", "delete", "message", "C0B7V41SRST:1781778512.813869"})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if deletePayload["channel"] != "C0B7V41SRST" || deletePayload["ts"] != "1781778512.813869" {
+		t.Fatalf("unexpected delete payload: %#v", deletePayload)
+	}
+	if !strings.Contains(stdout.String(), "deleted message_id=C0B7V41SRST:1781778512.813869") {
+		t.Fatalf("delete stdout: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	err = rt.Run([]string{"1", "edit", "message", "C0B7V41SRST:1781778811.092529", "body", "corrected update"})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if editPayload["channel"] != "C0B7V41SRST" || editPayload["ts"] != "1781778811.092529" || editPayload["text"] != "corrected update" {
+		t.Fatalf("unexpected edit payload: %#v", editPayload)
+	}
+	if !strings.Contains(stdout.String(), "edited message_id=C0B7V41SRST:1781778811.092529") {
+		t.Fatalf("edit stdout: %s", stdout.String())
+	}
+}
+
+func TestDeleteEditParseContract(t *testing.T) {
+	deleteArgs, err := parseArgs([]string{"2", "delete", "message", "C0B7V41SRST:1781778512.813869"})
+	if err != nil || deleteArgs.Command != "delete" || deleteArgs.Recipient != "C0B7V41SRST:1781778512.813869" {
+		t.Fatalf("unexpected delete parse: %+v err=%v", deleteArgs, err)
+	}
+	editArgs, err := parseArgs([]string{"2", "preview", "edit", "message", "C0B7V41SRST:1781778811.092529", "body", "updated"})
+	if err != nil || editArgs.Command != "preview-edit" || editArgs.Message != "updated" {
+		t.Fatalf("unexpected preview edit parse: %+v err=%v", editArgs, err)
+	}
+	if _, err := parseArgs([]string{"2", "delete", "message", "bad-id"}); err == nil {
+		t.Fatal("expected invalid message id to fail")
 	}
 }

@@ -17,6 +17,10 @@ agent quick reference:
   slack <preset> preview send to <target> body <text> [attach <path>...]
   slack <preset> send to <target> body <text> [attach <path>...]   new top-level post
   slack <preset> reply to <message_id> body <text> [attach <path>...]   thread only
+  slack <preset> preview delete message <message_id>
+  slack <preset> delete message <message_id>
+  slack <preset> preview edit message <message_id> body <text>
+  slack <preset> edit message <message_id> body <text>
   slack 1 inspect message <message_id>
   slack 1 preview send to <target> body <text>
 
@@ -46,6 +50,10 @@ write:
   slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...]
   slack <preset> preview reply to <channel_id>:<ts> body <message> [attach <path>...]
   slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...]
+  slack <preset> preview delete message <channel_id>:<ts>
+  slack <preset> delete message <channel_id>:<ts>
+  slack <preset> preview edit message <channel_id>:<ts> body <message>
+  slack <preset> edit message <channel_id>:<ts> body <message>
 
 people and contacts:
   slack <preset> contacts add <label> <email>
@@ -59,8 +67,8 @@ maintenance:
   slack <preset> conversations clean
 
 workflow:
-  use setup check when preset identity is uncertain; inspect before open; preview before send or reply;
-  trailing output json when another agent parses rows
+  use setup check when preset identity is uncertain; inspect before open; preview before send, reply, edit, or delete;
+  channel posts use the user token when configured so Ryan is the author; trailing output json when another agent parses rows
 `
 
 func parseArgs(argv []string) (Args, error) {
@@ -136,6 +144,10 @@ func parseArgs(argv []string) (Args, error) {
 		return parseSendArgs(args, remaining)
 	case "reply":
 		return parseReplyArgs(args, remaining)
+	case "delete":
+		return parseDeleteArgs(args, remaining)
+	case "edit":
+		return parseEditArgs(args, remaining)
 	case "files":
 		return parseFilesArgs(args, remaining)
 	case "open":
@@ -358,7 +370,7 @@ func parseReplyArgs(args Args, remaining []string) (Args, error) {
 
 func parsePreviewArgs(args Args, remaining []string) (Args, error) {
 	if len(remaining) == 0 {
-		return args, UsageError{Message: "Use: slack <preset> preview send ... | preview reply ..."}
+		return args, UsageError{Message: "Use: slack <preset> preview send ... | preview reply ... | preview delete message ... | preview edit message ..."}
 	}
 	switch remaining[0] {
 	case "send":
@@ -369,9 +381,45 @@ func parsePreviewArgs(args Args, remaining []string) (Args, error) {
 		parsed, err := parseReplyArgs(args, remaining[1:])
 		parsed.Command = "preview-reply"
 		return parsed, err
+	case "delete":
+		parsed, err := parseDeleteArgs(args, remaining[1:])
+		parsed.Command = "preview-delete"
+		return parsed, err
+	case "edit":
+		parsed, err := parseEditArgs(args, remaining[1:])
+		parsed.Command = "preview-edit"
+		return parsed, err
 	default:
-		return args, UsageError{Message: "Use: slack <preset> preview send ... | preview reply ..."}
+		return args, UsageError{Message: "Use: slack <preset> preview send ... | preview reply ... | preview delete message ... | preview edit message ..."}
 	}
+}
+
+func parseDeleteArgs(args Args, remaining []string) (Args, error) {
+	shape := "Use: slack <preset> delete message <message_id>"
+	if len(remaining) != 2 || remaining[0] != "message" || !isMessageID(remaining[1]) {
+		return args, UsageError{Message: shape}
+	}
+	args.Command = "delete"
+	args.Recipient = remaining[1]
+	return args, nil
+}
+
+func parseEditArgs(args Args, remaining []string) (Args, error) {
+	shape := "Use: slack <preset> edit message <message_id> body <message>"
+	if len(remaining) < 4 || remaining[0] != "message" || !isMessageID(remaining[1]) {
+		return args, UsageError{Message: shape}
+	}
+	message, paths, err := parseBodyAndPaths(remaining[2:], shape)
+	if err != nil {
+		return args, err
+	}
+	if len(paths) > 0 {
+		return args, UsageError{Message: shape}
+	}
+	args.Command = "edit"
+	args.Recipient = remaining[1]
+	args.Message = message
+	return args, nil
 }
 
 func parseInspectArgs(args Args, remaining []string) (Args, error) {

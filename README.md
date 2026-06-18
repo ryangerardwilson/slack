@@ -37,6 +37,10 @@ slack 1 send to mom body "hello"
 slack 1 send to C0AE059EU5T body "group update"
 slack 1 preview reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
+slack 1 preview delete message C0AE059EU5T:1712764800.000100
+slack 1 delete message C0AE059EU5T:1712764800.000100
+slack 1 preview edit message C0AE059EU5T:1712764800.000100 body "corrected text"
+slack 1 edit message C0AE059EU5T:1712764800.000100 body "corrected text"
 slack 1 files download D0466D63H7B F0AH0LD4133
 slack 1 inspect conversation D0466D63H7B
 slack 1 inspect message D0466D63H7B:1712764800.000100
@@ -80,7 +84,7 @@ slack 1 events reset cache
 }
 ```
 
-User tokens are preferred for listing and person-targeted DMs, and required for marking read state. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
+User tokens are preferred for listing, channel posts, edits, deletes, and person-targeted DMs, and required for marking read state. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
 Use `inspect` before `open` when read-state or downloads matter. Use `preview`
 before sends or replies when an agent should validate intent without posting.
 

@@ -151,7 +151,7 @@ func (rt *Runtime) Run(argv []string) error {
 			return err
 		}
 		return rt.searchUsersAndContacts(contacts, client, args.Query)
-	case "preview-post", "preview-reply":
+	case "preview-post", "preview-reply", "preview-delete", "preview-edit":
 		return rt.previewSlackAction(args, contacts)
 	case "mra":
 		token, err := resolveMarkReadToken(account)
@@ -217,7 +217,7 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		postClient := client
+		postClient := rt.writeClient(account, token)
 		if target.Kind == "email" || target.Kind == "user" {
 			postClient = directClient
 		}
@@ -252,15 +252,16 @@ func (rt *Runtime) Run(argv []string) error {
 		if !ok {
 			return UsageError{Message: "Use: slack <preset> reply to <message_id> body <message> [attach <path> ...]"}
 		}
-		threadTS, err := resolveReplyThreadTS(client, channelID, messageTS)
+		writeClient := rt.writeClient(account, token)
+		threadTS, err := resolveReplyThreadTS(writeClient, channelID, messageTS)
 		if err != nil {
 			return err
 		}
-		ts, err := sendPost(client, channelID, args.Message, threadTS)
+		ts, err := sendPost(writeClient, channelID, args.Message, threadTS)
 		if err != nil {
 			return err
 		}
-		uploaded, err := sendAttachments(client, channelID, threadTS, args.Paths)
+		uploaded, err := sendAttachments(writeClient, channelID, threadTS, args.Paths)
 		if err != nil {
 			return err
 		}
@@ -273,8 +274,46 @@ func (rt *Runtime) Run(argv []string) error {
 		}
 		fmt.Fprintln(rt.Stdout, strings.Join(details, " "))
 		return nil
+	case "delete":
+		channelID, messageTS, ok := parseMessageID(args.Recipient)
+		if !ok {
+			return UsageError{Message: "Use: slack <preset> delete message <message_id>"}
+		}
+		writeClient := rt.writeClient(account, token)
+		if err := deleteMessage(writeClient, channelID, messageTS); err != nil {
+			return err
+		}
+		fmt.Fprintln(rt.Stdout, strings.Join([]string{
+			"deleted",
+			"message_id=" + args.Recipient,
+			"channel=" + channelID,
+		}, " "))
+		return nil
+	case "edit":
+		channelID, messageTS, ok := parseMessageID(args.Recipient)
+		if !ok {
+			return UsageError{Message: "Use: slack <preset> edit message <message_id> body <message>"}
+		}
+		writeClient := rt.writeClient(account, token)
+		if err := editMessage(writeClient, channelID, messageTS, args.Message); err != nil {
+			return err
+		}
+		fmt.Fprintln(rt.Stdout, strings.Join([]string{
+			"edited",
+			"message_id=" + args.Recipient,
+			"channel=" + channelID,
+		}, " "))
+		return nil
 	}
 	return UsageError{Message: topLevelUsage()}
+}
+
+func (rt *Runtime) writeClient(account Account, fallbackToken string) SlackClient {
+	userToken := resolveDirectPostToken(account, fallbackToken)
+	if userToken != "" && tokenKind(userToken) == "user" {
+		return rt.slackClient(userToken)
+	}
+	return rt.slackClient(fallbackToken)
 }
 
 func (rt *Runtime) upgradeApp() error {
@@ -477,6 +516,27 @@ func (rt *Runtime) previewSlackAction(args Args, contacts Contacts) error {
 				return err
 			}
 		}
+	}
+	if args.Command == "preview-delete" {
+		channelID, messageTS, _ := parseMessageID(args.Recipient)
+		rt.printSections([][]kv{{
+			{"action", "delete"},
+			{"message_id", args.Recipient},
+			{"channel", channelID},
+			{"ts", messageTS},
+		}})
+		return nil
+	}
+	if args.Command == "preview-edit" {
+		channelID, messageTS, _ := parseMessageID(args.Recipient)
+		rt.printSections([][]kv{{
+			{"action", "edit"},
+			{"message_id", args.Recipient},
+			{"channel", channelID},
+			{"ts", messageTS},
+			{"body", args.Message},
+		}})
+		return nil
 	}
 	if args.Command == "preview-reply" {
 		channelID, messageTS, _ := parseMessageID(args.Recipient)
