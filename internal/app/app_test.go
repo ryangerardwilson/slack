@@ -180,6 +180,73 @@ func TestAuthStoresTokensInsidePreset(t *testing.T) {
 	}
 }
 
+func TestInspectConversationUsesUserToken(t *testing.T) {
+	var authHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/conversations.history":
+			_, _ = w.Write([]byte(`{"ok":true,"messages":[{"ts":"100.1","user":"U2","text":"channel reply"}]}`))
+		case "/api/users.info":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"U2","profile":{"real_name":"Mike Willbanks","email":"mike@willbanks.dev"}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-bot","user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+
+	err := rt.Run([]string{"1", "inspect", "conversation", "C0B7V41SRST"})
+	if err != nil {
+		t.Fatalf("inspect conversation: %v", err)
+	}
+	if authHeader != "Bearer xoxp-user" {
+		t.Fatalf("expected user token, got %q", authHeader)
+	}
+	if !strings.Contains(stdout.String(), "channel reply") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+}
+
+func TestSenderFilterResolvesSavedContact(t *testing.T) {
+	contacts := Contacts{"mike": "mike@willbanks.dev"}
+	terms := senderFilterTerms(contacts, "mike")
+	if len(terms) < 2 {
+		t.Fatalf("expected multiple sender terms, got %#v", terms)
+	}
+	if resolveSenderSearchTerm(contacts, "mike") != "mike@willbanks.dev" {
+		t.Fatalf("unexpected search term: %s", resolveSenderSearchTerm(contacts, "mike"))
+	}
+	entry := MessageEntry{
+		Sender: map[string]any{"name": "Mike Willbanks", "email": "mike@willbanks.dev", "label": "Mike Willbanks", "id": "U2"},
+		Message: map[string]any{"text": "works for me"},
+	}
+	if !entryPassesFilters(entry, contacts, "", "mike", "", 0, false) {
+		t.Fatal("expected contact label to match sender")
+	}
+}
+
 func TestMarkAllReadUsesUserTokenAndCache(t *testing.T) {
 	var calls []map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -9,7 +9,7 @@ import (
 func (rt *Runtime) runTUI(client SlackClient, selfUserID, cachePath string) error {
 	return tui.Run(tui.Options{
 		LoadConversations: func() ([]tui.Conversation, error) {
-			rows, err := rt.loadRecentConversations(client, selfUserID, cachePath, 100, true)
+			rows, err := rt.loadRecentConversations(client, selfUserID, cachePath, 100, true, conversationTypesDMs)
 			if err != nil {
 				return nil, err
 			}

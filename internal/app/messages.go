@@ -18,15 +18,21 @@ func (rt *Runtime) listMessages(contacts Contacts, client SlackClient, args Args
 			return UsageError{Message: "Unknown contact label: " + args.ListLabel}
 		}
 	}
-	entries, err := eventCacheSearchEntries(cachePath, contacts, args.ListLimit, args.ListFilter, selfUserID, args.ListLabel, args.ListFrom, args.ListContains, args.ListTimeLimit)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
+	var entries []MessageEntry
+	var err error
+	if shouldBypassMessageCache(args) {
 		entries, err = rt.searchMessagesLive(contacts, client, args, selfUserID)
+	} else {
+		entries, err = eventCacheSearchEntries(cachePath, contacts, args.ListLimit, args.ListFilter, selfUserID, args.ListLabel, args.ListFrom, args.ListContains, args.ListTimeLimit)
 		if err != nil {
 			return err
 		}
+		if len(entries) == 0 {
+			entries, err = rt.searchMessagesLive(contacts, client, args, selfUserID)
+		}
+	}
+	if err != nil {
+		return err
 	}
 	if len(entries) == 0 {
 		fmt.Fprintf(rt.Stdout, "No %s messages found.\n", args.ListFilter)
@@ -113,7 +119,7 @@ func (rt *Runtime) searchMessagesAPI(contacts Contacts, client SlackClient, args
 			Sender:       sender,
 			Unread:       false,
 		}
-		if !entryPassesFilters(entry, args.ListFilter, args.ListFrom, args.ListContains, cutoff, hasCutoff) {
+		if !entryPassesFilters(entry, contacts, args.ListFilter, args.ListFrom, args.ListContains, cutoff, hasCutoff) {
 			continue
 		}
 		if args.ListLabel != "" && !cacheLabelMatches(entry, contacts, args.ListLabel) {
@@ -141,7 +147,7 @@ func buildSearchQuery(args Args, contacts Contacts) string {
 		}
 	}
 	if args.ListFrom != "" {
-		terms = append(terms, "from:"+quoteSearch(args.ListFrom))
+		terms = append(terms, "from:"+quoteSearch(resolveSenderSearchTerm(contacts, args.ListFrom)))
 	}
 	if args.ListTimeLimit != "" {
 		if cutoff, ok := startTS(args.ListTimeLimit); ok {
@@ -162,8 +168,12 @@ func quoteSearch(value string) string {
 	return value
 }
 
+func shouldBypassMessageCache(args Args) bool {
+	return strings.TrimSpace(args.ListFrom) != "" || strings.TrimSpace(args.ListContains) != ""
+}
+
 func (rt *Runtime) scanConversations(contacts Contacts, client SlackClient, args Args, selfUserID string) ([]MessageEntry, error) {
-	rows, err := rt.loadRecentConversations(client, selfUserID, "", maxInt(args.ListLimit*4, 20), false)
+	rows, err := rt.loadRecentConversations(client, selfUserID, "", maxInt(args.ListLimit*4, 20), false, conversationTypesMember)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +188,7 @@ func (rt *Runtime) scanConversations(contacts Contacts, client SlackClient, args
 			if args.ListLabel != "" && !cacheLabelMatches(entry, contacts, args.ListLabel) {
 				continue
 			}
-			if !entryPassesFilters(entry, args.ListFilter, args.ListFrom, args.ListContains, cutoff, hasCutoff) {
+			if !entryPassesFilters(entry, contacts, args.ListFilter, args.ListFrom, args.ListContains, cutoff, hasCutoff) {
 				continue
 			}
 			entries = append(entries, entry)
@@ -187,15 +197,18 @@ func (rt *Runtime) scanConversations(contacts Contacts, client SlackClient, args
 	return entries, nil
 }
 
-func (rt *Runtime) loadRecentConversations(client SlackClient, selfUserID, cachePath string, limit int, useCache bool) ([]ConversationRow, error) {
+func (rt *Runtime) loadRecentConversations(client SlackClient, selfUserID, cachePath string, limit int, useCache bool, conversationTypes string) ([]ConversationRow, error) {
 	if useCache && cachePath != "" {
 		rows, err := eventCacheLoadConversationRows(cachePath, selfUserID, limit)
 		if err == nil && len(rows) > 0 {
 			return rows, nil
 		}
 	}
+	if conversationTypes == "" {
+		conversationTypes = conversationTypesDMs
+	}
 	channels, err := listAPI(client, "users.conversations", map[string]string{
-		"types":            "im,mpim",
+		"types":            conversationTypes,
 		"exclude_archived": "true",
 		"limit":            "200",
 	}, "channels")

@@ -170,6 +170,28 @@ func (rt *Runtime) Run(argv []string) error {
 			return fmt.Errorf("mark all read failed for %d conversation(s)", result.Failed)
 		}
 		return nil
+	case "inspect-message", "inspect-conversation", "o", "df":
+		readToken, err := resolveListToken(account)
+		if err != nil {
+			return err
+		}
+		readClient := rt.slackClient(readToken)
+		auth, err := readClient.AuthTest()
+		if err != nil {
+			return err
+		}
+		switch args.Command {
+		case "inspect-message", "inspect-conversation":
+			return rt.inspectSlack(args, readClient)
+		case "o":
+			selfUserID := str(auth["user_id"])
+			if selfUserID == "" {
+				return UsageError{Message: "Unable to determine the current Slack user."}
+			}
+			return rt.openMessages(args.Recipient, readClient, selfUserID, eventCacheDBPath(account, preset))
+		case "df":
+			return rt.downloadFile(args.Recipient, args.FileID, args.OutputPath, readClient)
+		}
 	}
 
 	token, err := resolveToken(account)
@@ -177,21 +199,10 @@ func (rt *Runtime) Run(argv []string) error {
 		return err
 	}
 	client := rt.slackClient(token)
-	auth, err := client.AuthTest()
-	if err != nil {
+	if _, err := client.AuthTest(); err != nil {
 		return err
 	}
 	switch args.Command {
-	case "inspect-message", "inspect-conversation":
-		return rt.inspectSlack(args, client)
-	case "o":
-		selfUserID := str(auth["user_id"])
-		if selfUserID == "" {
-			return UsageError{Message: "Unable to determine the current Slack user."}
-		}
-		return rt.openMessages(args.Recipient, client, selfUserID, eventCacheDBPath(account, preset))
-	case "df":
-		return rt.downloadFile(args.Recipient, args.FileID, args.OutputPath, client)
 	case "sc":
 		return rt.clearStaleConversations(client)
 	case "post":

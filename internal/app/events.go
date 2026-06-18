@@ -73,7 +73,7 @@ func (rt *Runtime) eventsSyncOnce(account Account, preset string, quiet bool) (i
 		return 0, UsageError{Message: "Unable to determine the current Slack user."}
 	}
 	cachePath := eventCacheDBPath(account, preset)
-	rows, err := rt.loadRecentConversations(client, selfUserID, "", 100, false)
+	rows, err := rt.loadRecentConversations(client, selfUserID, "", 100, false, conversationTypesMember)
 	if err != nil {
 		return 0, err
 	}

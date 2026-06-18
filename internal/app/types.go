@@ -19,7 +19,9 @@ const (
 	appName                    = "slack"
 	defaultListLimit           = 10
 	eventCacheSchemaVersion    = 1
-	eventSyncConversationLimit = 20
+	eventSyncConversationLimit   = 20
+	conversationTypesDMs         = "im,mpim"
+	conversationTypesMember      = "im,mpim,public_channel,private_channel"
 	eventSocketTimeoutSeconds  = 70
 	eventSyncSeconds           = 120
 	defaultBotTokenFile        = "~/.openclaw/credentials/slack-bot-token"

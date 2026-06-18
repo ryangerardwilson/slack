@@ -564,7 +564,7 @@ func eventCacheSearchEntries(cachePath string, contacts Contacts, limit int, fil
 		if !cacheLabelMatches(entry, contacts, label) {
 			continue
 		}
-		if !entryPassesFilters(entry, filterMode, senderFilter, containsFilter, cutoff, hasCutoff) {
+		if !entryPassesFilters(entry, contacts, filterMode, senderFilter, containsFilter, cutoff, hasCutoff) {
 			continue
 		}
 		selected = append(selected, entry)
@@ -592,7 +592,48 @@ func cacheLabelMatches(entry MessageEntry, contacts Contacts, label string) bool
 	return target != "" && strings.Contains(haystack, target) || strings.Contains(haystack, strings.ToLower(label))
 }
 
-func entryPassesFilters(entry MessageEntry, filterMode, senderFilter, containsFilter string, cutoff float64, hasCutoff bool) bool {
+func senderFilterTerms(contacts Contacts, senderFilter string) []string {
+	senderFilter = strings.TrimSpace(senderFilter)
+	if senderFilter == "" {
+		return nil
+	}
+	terms := []string{strings.ToLower(senderFilter)}
+	for _, key := range []string{senderFilter, strings.ToLower(senderFilter)} {
+		target, ok := contacts[key]
+		if !ok || target == "" {
+			continue
+		}
+		terms = append(terms, strings.ToLower(target))
+		if local := strings.Split(target, "@")[0]; local != "" {
+			terms = append(terms, strings.ToLower(local))
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, term := range terms {
+		if term == "" || seen[term] {
+			continue
+		}
+		seen[term] = true
+		out = append(out, term)
+	}
+	return out
+}
+
+func resolveSenderSearchTerm(contacts Contacts, senderFilter string) string {
+	terms := senderFilterTerms(contacts, senderFilter)
+	if len(terms) == 0 {
+		return senderFilter
+	}
+	for _, term := range terms {
+		if strings.Contains(term, "@") {
+			return term
+		}
+	}
+	return terms[0]
+}
+
+func entryPassesFilters(entry MessageEntry, contacts Contacts, filterMode, senderFilter, containsFilter string, cutoff float64, hasCutoff bool) bool {
 	if filterMode == "unread" && !entry.Unread {
 		return false
 	}
@@ -600,8 +641,18 @@ func entryPassesFilters(entry MessageEntry, filterMode, senderFilter, containsFi
 		return false
 	}
 	if senderFilter != "" {
-		haystack := strings.ToLower(strings.Join([]string{str(entry.Sender["name"]), str(entry.Sender["email"]), str(entry.Sender["label"]), str(entry.Sender["id"])}, " "))
-		if !strings.Contains(haystack, strings.ToLower(senderFilter)) {
+		haystack := strings.ToLower(strings.Join([]string{
+			str(entry.Sender["name"]), str(entry.Sender["email"]), str(entry.Sender["label"]), str(entry.Sender["id"]),
+			entry.Conversation, entry.Email,
+		}, " "))
+		matched := false
+		for _, term := range senderFilterTerms(contacts, senderFilter) {
+			if strings.Contains(haystack, term) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}
