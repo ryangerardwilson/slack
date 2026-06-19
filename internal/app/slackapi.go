@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -520,7 +518,7 @@ func uploadExternalFile(client SlackClient, channelID, threadTS, path, filename 
 	data, err := client.Request("files.getUploadURLExternal", map[string]string{
 		"filename": filename,
 		"length":   strconv.FormatInt(info.Size(), 10),
-	}, false, http.MethodPost, false)
+	}, true, http.MethodPost, false)
 	if err != nil {
 		return "", err
 	}
@@ -540,7 +538,7 @@ func uploadExternalFile(client SlackClient, channelID, threadTS, path, filename 
 	if threadTS != "" {
 		payload["thread_ts"] = threadTS
 	}
-	if _, err := client.Request("files.completeUploadExternal", payload, false, http.MethodPost, false); err != nil {
+	if _, err := client.Request("files.completeUploadExternal", payload, true, http.MethodPost, false); err != nil {
 		return "", err
 	}
 	return fileID, nil
@@ -552,28 +550,18 @@ func uploadRawFile(httpClient *http.Client, uploadURL, path, filename string) er
 		return err
 	}
 	defer file.Close()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	partHeader := make(textproto.MIMEHeader)
-	partHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeQuotes(filename)))
+	req, err := http.NewRequest(http.MethodPost, uploadURL, file)
+	if err != nil {
+		return err
+	}
 	if contentType := mime.TypeByExtension(filepath.Ext(filename)); contentType != "" {
-		partHeader.Set("Content-Type", contentType)
+		req.Header.Set("Content-Type", contentType)
+	} else {
+		req.Header.Set("Content-Type", "application/octet-stream")
 	}
-	part, err := writer.CreatePart(partHeader)
-	if err != nil {
-		return err
+	if info, err := file.Stat(); err == nil {
+		req.ContentLength = info.Size()
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPost, uploadURL, &body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
@@ -647,7 +635,7 @@ func completeUploadExternalBatch(client SlackClient, channelID, threadTS, initia
 		data, err := client.Request("files.getUploadURLExternal", map[string]string{
 			"filename": job.filename,
 			"length":   strconv.FormatInt(info.Size(), 10),
-		}, false, http.MethodPost, false)
+		}, true, http.MethodPost, false)
 		if err != nil {
 			return nil, "", err
 		}
@@ -676,7 +664,7 @@ func completeUploadExternalBatch(client SlackClient, channelID, threadTS, initia
 	if threadTS != "" {
 		payload["thread_ts"] = threadTS
 	}
-	data, err := client.Request("files.completeUploadExternal", payload, false, http.MethodPost, false)
+	data, err := client.Request("files.completeUploadExternal", payload, true, http.MethodPost, false)
 	if err != nil {
 		return nil, "", err
 	}

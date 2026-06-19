@@ -34,6 +34,7 @@ slack 1 list dms
 slack 1 users search rohan
 slack 1 preview send to mom body "hello"
 slack 1 send to mom body "hello"
+slack 1 send to C0AE059EU5T body "sharing the file" attach /abs/path/report.pdf
 slack 1 send to C0AE059EU5T body "group update"
 slack 1 preview reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
 slack 1 reply to C0AE059EU5T:1712764800.000100 body "reply in thread"
@@ -84,7 +85,7 @@ slack 1 events reset cache
 }
 ```
 
-User tokens are preferred for listing, channel posts, edits, deletes, and person-targeted DMs, and required for marking read state. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
+User tokens are preferred for listing, channel posts, edits, deletes, file uploads, and person-targeted DMs, and required for marking read state. `send ... attach ...` creates one top-level Slack file message with the body as the file caption. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
 Use `inspect` before `open` when read-state or downloads matter. Use `preview`
 before sends or replies when an agent should validate intent without posting.
 

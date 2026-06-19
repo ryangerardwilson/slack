@@ -30,8 +30,16 @@ repo-local operating constraints.
 - Do not use a config-level default preset. Once `accounts` exists, account-scoped commands should take the preset explicitly.
 - Contacts belong only inside account presets as `accounts.<preset>.contacts`; do not add or merge root-level contacts for preset accounts.
 - Slack account metadata such as `team`, `team_id`, `url`, and `user_id` is optional display/debug context, not required config.
-- For `send`, saved contact labels, raw emails, and raw Slack user ids should use the preset user token when present so they land in Ryan's actual Slack DMs. Explicit channel ids, channel names (`#blog`), and message ids may use the normal bot-first post token path. Channel-name lookup uses the list/lookup token and `users.conversations`.
-- `send` with `attach` must use `files.completeUploadExternal` with `initial_comment` for the body and no `thread_ts` so caption and files land on one top-level message. `reply` with `attach` may thread uploads under the resolved `thread_ts`.
+- For `send`, saved contact labels, raw emails, raw Slack user ids, explicit
+  channel ids, channel names (`#blog`), and message ids should use the preset
+  user token when present so Ryan is the author on routine human-authored
+  Slack writes. Channel-name lookup uses the list/lookup token and
+  `users.conversations`.
+- `send` with `attach` must use Slack's external upload flow with form-encoded
+  `files.getUploadURLExternal`, raw file bytes to the returned upload URL, and
+  form-encoded `files.completeUploadExternal` with `initial_comment` for the
+  body and no `thread_ts` so caption and files land on one top-level message.
+  `reply` with `attach` may thread uploads under the resolved `thread_ts`.
 - `slack <preset> list` (or `list messages`) scans accessible message history for the configured token by default; saved contacts remain useful as labels and targeted filters. It must label the surface (`dm`, `group_dm`, `channel`, or `private_channel`) rather than implying every result is a one-to-one DM.
 - Use Slack `search.messages` for message `list` with the preset's user token by default, because Slack does not allow bot tokens to search across all user DMs. Bot tokens should fall back to `users.conversations` and `conversations.history` only when no user token is available.
 - `list channels` and `list dms` are conversation directories for posting targets, not message history.

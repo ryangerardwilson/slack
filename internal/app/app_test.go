@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,19 +93,43 @@ func TestChannelNameQuery(t *testing.T) {
 
 func TestPostSendUsesBatchUploadWithoutThread(t *testing.T) {
 	var completePayload map[string]string
+	var completeContentType string
+	var getUploadAuth string
+	var getUploadContentType string
+	var getUploadForm url.Values
+	var completeAuth string
+	var uploadBody []byte
+	var uploadContentType string
 	var uploadURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/auth.test":
 			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
 		case "/api/files.getUploadURLExternal":
+			getUploadAuth = r.Header.Get("Authorization")
+			getUploadContentType = r.Header.Get("Content-Type")
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse getUpload form: %v", err)
+			}
+			getUploadForm = r.Form
 			_, _ = w.Write([]byte(`{"ok":true,"upload_url":"` + uploadURL + `","file_id":"F1"}`))
 		case "/upload":
+			uploadContentType = r.Header.Get("Content-Type")
+			uploadBody, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`ok`))
 		case "/api/files.completeUploadExternal":
-			body, _ := io.ReadAll(r.Body)
-			_ = json.Unmarshal(body, &completePayload)
+			completeAuth = r.Header.Get("Authorization")
+			completeContentType = r.Header.Get("Content-Type")
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse complete form: %v", err)
+			}
+			completePayload = map[string]string{}
+			for key, values := range r.Form {
+				if len(values) > 0 {
+					completePayload[key] = values[0]
+				}
+			}
 			_, _ = w.Write([]byte(`{"ok":true,"files":[{"shares":{"C123":[{"ts":"200.1"}]}}]}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -123,7 +148,7 @@ func TestPostSendUsesBatchUploadWithoutThread(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-token"}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"bot":"xoxb-token","user":"xoxp-user"}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,6 +165,24 @@ func TestPostSendUsesBatchUploadWithoutThread(t *testing.T) {
 	err := rt.Run([]string{"1", "send", "to", "C123", "body", "caption", "attach", attachPath})
 	if err != nil {
 		t.Fatalf("send: %v", err)
+	}
+	if getUploadAuth != "Bearer xoxp-user" || completeAuth != "Bearer xoxp-user" {
+		t.Fatalf("expected user token for file upload, get=%q complete=%q", getUploadAuth, completeAuth)
+	}
+	if !strings.HasPrefix(getUploadContentType, "application/x-www-form-urlencoded") {
+		t.Fatalf("expected getUpload form encoding, got %q", getUploadContentType)
+	}
+	if getUploadForm.Get("filename") != "note.txt" || getUploadForm.Get("length") != "2" {
+		t.Fatalf("unexpected getUpload form: %#v", getUploadForm)
+	}
+	if string(uploadBody) != "hi" {
+		t.Fatalf("expected raw upload bytes, got %q", string(uploadBody))
+	}
+	if strings.HasPrefix(uploadContentType, "multipart/") {
+		t.Fatalf("expected raw upload content type, got %q", uploadContentType)
+	}
+	if !strings.HasPrefix(completeContentType, "application/x-www-form-urlencoded") {
+		t.Fatalf("expected completeUpload form encoding, got %q", completeContentType)
 	}
 	if completePayload["thread_ts"] != "" {
 		t.Fatalf("expected no thread_ts, got %#v", completePayload)
@@ -254,7 +297,7 @@ func TestSenderFilterResolvesSavedContact(t *testing.T) {
 		t.Fatalf("unexpected search term: %s", resolveSenderSearchTerm(contacts, "mike"))
 	}
 	entry := MessageEntry{
-		Sender: map[string]any{"name": "Mike Willbanks", "email": "mike@willbanks.dev", "label": "Mike Willbanks", "id": "U2"},
+		Sender:  map[string]any{"name": "Mike Willbanks", "email": "mike@willbanks.dev", "label": "Mike Willbanks", "id": "U2"},
 		Message: map[string]any{"text": "works for me"},
 	}
 	if !entryPassesFilters(entry, contacts, "", "mike", "", 0, false) {
