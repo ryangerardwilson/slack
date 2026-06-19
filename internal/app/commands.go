@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/ryangerardwilson/slack/internal/version"
 )
@@ -317,10 +318,15 @@ func (rt *Runtime) writeClient(account Account, fallbackToken string) SlackClien
 }
 
 func (rt *Runtime) upgradeApp() error {
-	cmd := exec.Command("bash", "-c", "curl -fsSL "+installScriptURL+" | bash -s -- upgrade")
-	cmd.Stdout = rt.Stdout
-	cmd.Stderr = rt.Stderr
-	return cmd.Run()
+	command := "curl -fsSL " + installScriptURL + " | bash -s -- upgrade"
+	if rt.RunCommand != nil {
+		return rt.RunCommand("bash", "-c", command)
+	}
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(bashPath, []string{"bash", "-c", command}, os.Environ())
 }
 
 func (rt *Runtime) openConfig(path string, bootstrap string) error {

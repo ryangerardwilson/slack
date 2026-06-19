@@ -82,6 +82,29 @@ func TestHelpAndParseContract(t *testing.T) {
 	}
 }
 
+func TestUpgradeUsesCommandHook(t *testing.T) {
+	var commandName string
+	var commandArgs []string
+	rt := NewRuntime()
+	rt.Stdout = &bytes.Buffer{}
+	rt.Stderr = &bytes.Buffer{}
+	rt.RunCommand = func(name string, args ...string) error {
+		commandName = name
+		commandArgs = append([]string{}, args...)
+		return nil
+	}
+
+	if err := rt.Run([]string{"upgrade"}); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if commandName != "bash" || len(commandArgs) != 2 || commandArgs[0] != "-c" {
+		t.Fatalf("unexpected upgrade command: %s %#v", commandName, commandArgs)
+	}
+	if !strings.Contains(commandArgs[1], installScriptURL) || !strings.Contains(commandArgs[1], "upgrade") {
+		t.Fatalf("unexpected upgrade shell: %s", commandArgs[1])
+	}
+}
+
 func TestChannelNameQuery(t *testing.T) {
 	if got := channelNameQuery("#blog"); got != "blog" {
 		t.Fatalf("channelNameQuery(#blog)=%q", got)
