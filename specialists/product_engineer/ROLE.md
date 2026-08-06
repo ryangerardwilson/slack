@@ -63,8 +63,11 @@ repo-local operating constraints.
   downloading attachments. `open` remains the deliberate stateful read/download
   command.
 - `slack config` prints a redacted summary only (no raw tokens). Editing requires
-  `slack config edit` and an interactive TTY; non-interactive edit must fail closed.
-- Write commands (`send`, `reply`, `edit`, `delete`) and list/thread/preview accept trailing `output json` where implemented.
+  `slack config edit` and a real interactive terminal detected via termios ioctl
+  on stdin and stdout (not FileMode char-device bits). Non-interactive edit must
+  fail closed without launching an editor or writing config contents to captured
+  stdout. The editor process must attach only to `os.Stdin/Stdout/Stderr`.
+- Write commands (`send`, `reply`, `edit`, `delete`) and list/thread/preview accept trailing `output json` or `--json` where implemented.
 - Only `help`, `version`, and `upgrade` remain as global launcher actions for help, version, and upgrade.
 - `slack` with no args must print the same help as `slack help`.
 - Help output must stay human-written, compact, and printed with terminal-default styling.

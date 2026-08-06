@@ -62,10 +62,11 @@ The CLI SHALL support listing accounts, writing tokens via `auth`, importing Ope
 - **AND** raw token values MUST NOT appear in terminal output
 
 #### Scenario: Config edit requires interactive TTY
-- **WHEN** the user runs `slack config edit` without an interactive TTY
+- **WHEN** the user runs `slack config edit` without a real interactive terminal on stdin and stdout
 - **THEN** the command SHALL fail closed without opening an editor or dumping config contents
-- **WHEN** the user runs `slack config edit` on an interactive TTY
-- **THEN** the runtime SHALL open the config path in an editor
+- **AND** TTY detection MUST use termios/isatty semantics rather than FileMode char-device bits alone
+- **WHEN** the user runs `slack config edit` on a real interactive TTY
+- **THEN** the runtime SHALL open the config path in an editor attached only to process stdio
 - **AND** if the file is missing, it SHALL bootstrap with a minimal `{"accounts": {}}` JSON document
 
 ### Requirement: Setup check diagnostics

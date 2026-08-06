@@ -9,12 +9,12 @@ import (
 const helpText = `Slack CLI
 
 agent quick reference:
-  slack <preset> list channels [output json]     channel ids for send to #name or C...
-  slack <preset> list dms [output json]          DM and group-DM conversation ids
-  slack <preset> list contacts [output json]     saved contact labels
-  slack <preset> list [messages] [filters...]    message history (newest first)
-  slack <preset> thread <message_id>             replies for a root message
-  slack <preset> inspect message <message_id>    read metadata, no side effects
+  slack <preset> list channels [output json|--json]     channel ids for send to #name or C...
+  slack <preset> list dms [output json|--json]          DM and group-DM conversation ids
+  slack <preset> list contacts [output json|--json]     saved contact labels
+  slack <preset> list [messages] [filters...]           message history (newest first)
+  slack <preset> thread <message_id>                    replies for a root message
+  slack <preset> inspect message <message_id>           read metadata, no side effects
   slack <preset> preview send to <target> body <text> [attach <path>...]
   slack <preset> send to <target> body <text> [attach <path>...]   new top-level post
   slack <preset> reply to <message_id> body <text> [attach <path>...]   thread only
@@ -27,35 +27,35 @@ agent quick reference:
 
 global:
   slack help | version | upgrade
-  slack accounts list [output json]
-  slack setup check [output json]
-  slack config | slack config edit
+  slack accounts list [output json|--json]
+  slack setup check [output json|--json]
+  slack config | slack config edit | slack config --json
   slack auth | slack auth <preset> import | slack auth <preset> user <token> [bot <token>] [name <name>]
   slack mark all read
   slack <preset> mark all read
 
 list (directories vs message history):
-  slack <preset> list channels [output json]
-  slack <preset> list dms [output json]
-  slack <preset> list contacts [output json]
+  slack <preset> list channels [output json|--json]
+  slack <preset> list dms [output json|--json]
+  slack <preset> list contacts [output json|--json]
   slack <preset> list [messages] [unread|read] [in <channel>] [for <label>] [from <name>]
-              [containing <text>] [since <window>] [limit <count>] [output json]
+              [containing <text>] [since <window>] [limit <count>] [output json|--json]
 
 read:
   slack <preset> inspect conversation <channel_id>
   slack <preset> inspect message <message_id>
-  slack <preset> thread <message_id> [limit <count>] [output json]
+  slack <preset> thread <message_id> [limit <count>] [output json|--json]
   slack <preset> open conversation <channel_id> | open message <message_id> | open tui
 
 write:
   slack <preset> preview send to <label|email|#channel|channel_id> body <message> [attach <path>...]
-  slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...] [output json]
+  slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...] [output json|--json]
   slack <preset> preview reply to <channel_id>:<ts> body <message> [attach <path>...]
-  slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...] [output json]
+  slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...] [output json|--json]
   slack <preset> preview delete message <channel_id>:<ts>
-  slack <preset> delete message <channel_id>:<ts> [output json]
+  slack <preset> delete message <channel_id>:<ts> [output json|--json]
   slack <preset> preview edit message <channel_id>:<ts> body <message>
-  slack <preset> edit message <channel_id>:<ts> body <message> [output json]
+  slack <preset> edit message <channel_id>:<ts> body <message> [output json|--json]
 
 people and contacts:
   slack <preset> contacts add <label> <email>
@@ -70,7 +70,7 @@ maintenance:
 
 workflow:
   use setup check when preset identity is uncertain; inspect before open; preview before send, reply, edit, or delete;
-  user tokens are preferred for human-authored writes; use output json for machine-readable rows;
+  user tokens are preferred for human-authored writes; use output json or --json for machine-readable rows;
   since windows: 4h, 2d, 1w, 3m, 1y, 2025-01-01, "jan 2025"; list defaults to newest first
 `
 
@@ -193,30 +193,40 @@ func parseConfigArgs(args Args, remaining []string) (Args, error) {
 		args.Command = "config-edit"
 		return args, nil
 	}
-	if len(remaining) == 2 && remaining[0] == "output" && remaining[1] == "json" {
+	if isJSONFlag(remaining) {
 		args.Command = "config"
 		args.OutputJSON = true
 		return args, nil
 	}
-	return args, UsageError{Message: "Use: slack config | slack config edit | slack config output json"}
+	return args, UsageError{Message: "Use: slack config | slack config edit | slack config output json | slack config --json"}
 }
 
 func parseOptionalOutputJSON(params []string, shape string) (bool, error) {
 	if len(params) == 0 {
 		return false, nil
 	}
-	if len(params) == 2 && params[0] == "output" && params[1] == "json" {
+	if isJSONFlag(params) {
 		return true, nil
 	}
 	return false, UsageError{Message: shape}
 }
 
+func isJSONFlag(params []string) bool {
+	if len(params) == 1 && params[0] == "--json" {
+		return true
+	}
+	return len(params) == 2 && params[0] == "output" && params[1] == "json"
+}
+
 func extractOutputJSON(params []string, shape string) ([]string, bool, error) {
+	if len(params) >= 1 && params[len(params)-1] == "--json" {
+		return params[:len(params)-1], true, nil
+	}
 	if len(params) >= 2 && params[len(params)-2] == "output" && params[len(params)-1] == "json" {
 		return params[:len(params)-2], true, nil
 	}
 	for _, param := range params {
-		if param == "output" {
+		if param == "output" || param == "--json" {
 			return nil, false, UsageError{Message: shape}
 		}
 	}
@@ -683,5 +693,5 @@ func topLevelUsage() string {
 }
 
 func listUsage() string {
-	return "Use: slack <preset> list channels|dms|contacts [output json] | slack <preset> list [messages] [unread|read] [in <channel|#name|id>] [for <label>] [from <sender>] [containing <text>] [since <window>] [limit <count>] [output json]"
+	return "Use: slack <preset> list channels|dms|contacts [output json|--json] | slack <preset> list [messages] [unread|read] [in <channel|#name|id>] [for <label>] [from <sender>] [containing <text>] [since <window>] [limit <count>] [output json|--json]"
 }

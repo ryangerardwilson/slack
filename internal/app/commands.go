@@ -375,12 +375,19 @@ func (rt *Runtime) showConfigSummary(path string, cfg Config, outputJSON bool) e
 }
 
 func (rt *Runtime) openConfig(path string, bootstrap string) error {
+	// Fail closed unless a real interactive terminal is available for the editor
+	// session. Do not trust FileMode alone; re-check process stdio FDs.
 	isTTY := isInteractiveTTY
 	if rt.IsTTY != nil {
 		isTTY = rt.IsTTY
 	}
 	if !isTTY() {
-		return UsageError{Message: "slack config edit requires an interactive TTY. Use `slack config` or `slack setup check` for a redacted summary."}
+		return UsageError{Message: "slack config edit requires an interactive TTY on stdin and stdout. Use `slack config` or `slack setup check` for a redacted summary."}
+	}
+	// Defense in depth: even if a test hook says TTY, never launch the real
+	// editor unless the process stdio FDs are terminals.
+	if rt.OpenEditor == nil && !isInteractiveTTY() {
+		return UsageError{Message: "slack config edit requires an interactive TTY on stdin and stdout. Use `slack config` or `slack setup check` for a redacted summary."}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -398,9 +405,11 @@ func (rt *Runtime) openConfig(path string, bootstrap string) error {
 		return UsageError{Message: "No EDITOR/VISUAL set. Export EDITOR and re-run `slack config edit`, or edit the redacted-safe config path after `slack setup check`."}
 	}
 	cmd := exec.Command("sh", "-c", editor+" \"$1\"", "slack-editor", path)
+	// Attach only to the real process terminals — never to captured rt.Stdout
+	// buffers that could leak token-bearing file contents into agent logs.
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = rt.Stdout
-	cmd.Stderr = rt.Stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 

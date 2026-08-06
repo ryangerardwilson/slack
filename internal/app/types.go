@@ -103,14 +103,6 @@ func NewRuntime() *Runtime {
 	}
 }
 
-func isInteractiveTTY() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
-}
-
 func Main(argv []string) int {
 	rt := NewRuntime()
 	if err := rt.Run(argv); err != nil {

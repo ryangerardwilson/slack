@@ -36,6 +36,7 @@ func TestHelpAndParseContract(t *testing.T) {
 		"slack config | slack config edit",
 		"slack mark all read",
 		"output json",
+		"--json",
 		"in <channel>",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -678,6 +679,60 @@ func TestConfigEditRequiresTTY(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "interactive TTY") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConfigEditFailsClosedOnRealNonTTY(t *testing.T) {
+	// Regression for agent runners: ModeCharDevice can be true on non-terminals,
+	// but termios ioctl correctly reports non-TTY. Do not override IsTTY.
+	if isInteractiveTTY() {
+		t.Skip("real interactive TTY present; cannot assert fail-closed path")
+	}
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("EDITOR", "vim")
+	t.Setenv("VISUAL", "vim")
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	// Leave OpenEditor nil so the real editor path is exercised up to the guard.
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.Run([]string{"config", "edit"})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected config edit without real TTY to fail closed")
+		}
+		if !strings.Contains(err.Error(), "interactive TTY") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(stdout.String(), "token") || strings.Contains(stdout.String(), "xox") {
+			t.Fatalf("config edit leaked content: %s", stdout.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("config edit hung instead of failing closed without a TTY")
+	}
+}
+
+func TestJSONFlagAlias(t *testing.T) {
+	listArgs, err := parseArgs([]string{"1", "list", "in", "C123", "limit", "5", "--json"})
+	if err != nil || !listArgs.OutputJSON || listArgs.ListIn != "C123" {
+		t.Fatalf("unexpected --json list parse: %+v err=%v", listArgs, err)
+	}
+	threadArgs, err := parseArgs([]string{"1", "thread", "C123:1712764800.000100", "--json"})
+	if err != nil || !threadArgs.OutputJSON {
+		t.Fatalf("unexpected --json thread parse: %+v err=%v", threadArgs, err)
+	}
+	configArgs, err := parseArgs([]string{"config", "--json"})
+	if err != nil || configArgs.Command != "config" || !configArgs.OutputJSON {
+		t.Fatalf("unexpected config --json parse: %+v err=%v", configArgs, err)
+	}
+	accountsArgs, err := parseArgs([]string{"accounts", "list", "--json"})
+	if err != nil || !accountsArgs.OutputJSON {
+		t.Fatalf("unexpected accounts --json parse: %+v err=%v", accountsArgs, err)
 	}
 }
 

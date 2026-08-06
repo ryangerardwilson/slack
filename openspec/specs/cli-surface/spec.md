@@ -80,5 +80,5 @@ Command output SHALL be script-friendly plain text by default, with opt-in JSON 
 - **THEN** rows SHALL be printed as blank-line-separated `key: value` sections
 
 #### Scenario: JSON opt-in
-- **WHEN** a supported command is invoked with trailing `output json`
+- **WHEN** a supported command is invoked with trailing `output json` or `--json`
 - **THEN** stdout SHALL be a single indented JSON document suitable for machine consumption

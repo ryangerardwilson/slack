@@ -90,7 +90,8 @@ Use `inspect` before `open` when read-state or downloads matter. Use `preview`
 before sends or replies when an agent should validate intent without posting.
 `list` is newest-first; `since` accepts `4h`/`2d`/`1w`/… and rejects bad windows.
 Scope history with `in <channel_id|#name>` and load replies with `thread <message_id>`.
-Prefer `output json` for agent parsing on list, thread, and write commands.
+Prefer `output json` or `--json` for agent parsing on list, thread, and write commands.
+`slack config edit` requires a real interactive terminal (termios); non-TTY runners fail closed.
 
 ## Development
 
