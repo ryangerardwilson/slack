@@ -61,8 +61,6 @@ type ConversationRow struct {
 
 func tokenKind(token string) string {
 	switch {
-	case strings.HasPrefix(token, "xapp-"):
-		return "app"
 	case strings.HasPrefix(token, "xoxb-"):
 		return "bot"
 	case strings.HasPrefix(token, "xoxp-"):
@@ -84,7 +82,7 @@ func readTokenFile(path string) string {
 func tokenMap(cfg map[string]any) map[string]string {
 	out := map[string]string{}
 	raw := asMap(cfg["token"])
-	for _, kind := range []string{"bot", "user", "app"} {
+	for _, kind := range []string{"bot", "user"} {
 		if value := strings.TrimSpace(str(raw[kind])); value != "" {
 			out[kind] = value
 		}
@@ -92,7 +90,6 @@ func tokenMap(cfg map[string]any) map[string]string {
 	legacy := map[string][]string{
 		"bot":  {"bot_token", "slack_bot_token"},
 		"user": {"user_token", "slack_user_token", "token"},
-		"app":  {"app_token", "socket_token"},
 	}
 	for kind, keys := range legacy {
 		if out[kind] != "" {
@@ -127,15 +124,16 @@ func hasToken(cfg map[string]any, kind string) bool {
 
 func resolveToken(cfg map[string]any) (string, error) {
 	token := firstNonEmpty(
+		directToken(cfg, "user"),
+		getenv("SLACK_USER_TOKEN"),
+		getenv("SLACK_TOKEN"),
 		directToken(cfg, "bot"),
 		getenv("SLACK_BOT_TOKEN"),
-		getenv("SLACK_TOKEN"),
-		directToken(cfg, "user"),
-		readTokenFile(defaultBotTokenFile),
 		readTokenFile(defaultUserTokenFile),
+		readTokenFile(defaultBotTokenFile),
 	)
 	if token == "" {
-		return "", UsageError{Message: "Missing Slack token. Set SLACK_BOT_TOKEN or add a token in slack config."}
+		return "", UsageError{Message: "Missing Slack token. Set SLACK_TOKEN or add a user token in slack config."}
 	}
 	if tokenKind(token) == "unknown" {
 		return "", UsageError{Message: "Slack token must be a bot token (xoxb-) or user token (xoxp-)."}
@@ -180,17 +178,6 @@ func resolveMarkReadToken(cfg map[string]any) (string, error) {
 	}
 	if tokenKind(token) != "user" {
 		return "", UsageError{Message: "mark all read requires a user token (xoxp-) with im:write, mpim:write, groups:write, and channels:write for every conversation type."}
-	}
-	return token, nil
-}
-
-func resolveAppToken(cfg map[string]any) (string, error) {
-	token := firstNonEmpty(directToken(cfg, "app"), getenv("SLACK_APP_TOKEN"), readTokenFile(defaultAppTokenFile))
-	if token == "" {
-		return "", UsageError{Message: "Missing Slack app token. Add app token in slack config or import ~/.openclaw/credentials/slack-app-token with slack auth <preset> import."}
-	}
-	if tokenKind(token) != "app" {
-		return "", UsageError{Message: "Slack app token must start with xapp-."}
 	}
 	return token, nil
 }
@@ -864,19 +851,32 @@ func senderInfo(client SlackClient, message map[string]any, userCache map[string
 }
 
 func entrySummary(entry MessageEntry) map[string]any {
-	return map[string]any{
-		"message_id":      messageID(entry.ChannelID, str(entry.Message["ts"])),
+	ts := str(entry.Message["ts"])
+	summary := map[string]any{
+		"message_id":      messageID(entry.ChannelID, ts),
+		"ts":              ts,
 		"surface":         entry.Surface,
 		"conversation":    entry.Conversation,
 		"sender":          str(entry.Sender["name"]),
+		"sender_id":       str(entry.Sender["id"]),
 		"sender_email":    str(entry.Sender["email"]),
 		"text":            messageText(entry.Message),
-		"date":            formatTS(str(entry.Message["ts"])),
+		"date":            formatTS(ts),
 		"unread":          entry.Unread,
 		"attachments":     summarizeAttachments(entry.Message),
 		"channel_id":      entry.ChannelID,
 		"conversation_id": entry.ChannelID,
 	}
+	if threadTS := str(entry.Message["thread_ts"]); threadTS != "" {
+		summary["thread_ts"] = threadTS
+	}
+	if replyCount := entry.Message["reply_count"]; replyCount != nil {
+		summary["reply_count"] = replyCount
+	}
+	if latestReply := str(entry.Message["latest_reply"]); latestReply != "" {
+		summary["latest_reply"] = latestReply
+	}
+	return summary
 }
 
 func listEntryFields(entry MessageEntry) []kv {

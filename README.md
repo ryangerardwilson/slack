@@ -22,11 +22,12 @@ slack version
 slack upgrade
 
 slack config
+slack config edit
 slack accounts list
 slack setup check
 slack auth
 slack auth 1 import
-slack auth 2 bot xoxb-... user xoxp-... app xapp-... name work
+slack auth 2 user xoxp-... name work
 slack 1 contacts add mom mom@example.com
 slack 1 list contacts
 slack 1 list channels
@@ -45,27 +46,28 @@ slack 1 edit message C0AE059EU5T:1712764800.000100 body "corrected text"
 slack 1 files download D0466D63H7B F0AH0LD4133
 slack 1 inspect conversation D0466D63H7B
 slack 1 inspect message D0466D63H7B:1712764800.000100
+slack 1 thread C0AE059EU5T:1712764800.000100
+slack 1 thread C0AE059EU5T:1712764800.000100 output json
 slack 1 open conversation D0466D63H7B
 slack 1 open message D0466D63H7B:1712764800.000100
 slack 1 open tui
 slack 1 list unread from maanas since 2w limit 10
 slack 1 list unread from maanas since 2w limit 10 output json
+slack 1 list in C0AE059EU5T since 4h limit 50 output json
+slack 1 list in #blog from maanas since 1d limit 20
 slack 1 list containing invoice since "jan 2025" limit 20
 slack 1 conversations clean
 slack mark all read
 slack 1 mark all read
 slack 1 events sync
-slack 1 events service
-slack 1 events timer install
-slack 1 events timer disable
 slack 1 events status
-slack 1 events logs 80
 slack 1 events reset cache
 ```
 
 ## Config
 
-`slack config` opens `~/.config/slack/config.json` or `$XDG_CONFIG_HOME/slack/config.json`.
+`slack config` prints a redacted account summary (never raw tokens).  
+`slack config edit` opens `~/.config/slack/config.json` or `$XDG_CONFIG_HOME/slack/config.json` and requires an interactive TTY.
 
 ```json
 {
@@ -73,9 +75,7 @@ slack 1 events reset cache
     "1": {
       "name": "work",
       "token": {
-        "bot": "xoxb-...",
-        "user": "xoxp-...",
-        "app": "xapp-..."
+        "user": "xoxp-..."
       },
       "contacts": {
         "mom": "mom@example.com"
@@ -85,9 +85,12 @@ slack 1 events reset cache
 }
 ```
 
-User tokens are preferred for listing, channel posts, edits, deletes, file uploads, and person-targeted DMs, and required for marking read state. `send ... attach ...` creates one top-level Slack file message with the body as the file caption. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. The events service owns the per-preset event cache used by `list`, `open tui`, and mark-read cleanup.
+User tokens are the primary token for listing, channel posts, edits, deletes, file uploads, and person-targeted DMs, and required for marking read state. `send ... attach ...` creates one top-level Slack file message with the body as the file caption. `slack mark all read` marks cached or API-reported unread conversation notifications across configured presets; `slack 1 mark all read` scopes the action to preset `1`. DMs and group DMs require `im:write` and `mpim:write`; channel notifications also require `channels:write` or `groups:write`. Slack Activity inbox items are a separate Slack UI surface and are not attempted by this command. `events sync` warms the per-preset cache used by `list`, `open tui`, and mark-read cleanup.
 Use `inspect` before `open` when read-state or downloads matter. Use `preview`
 before sends or replies when an agent should validate intent without posting.
+`list` is newest-first; `since` accepts `4h`/`2d`/`1w`/… and rejects bad windows.
+Scope history with `in <channel_id|#name>` and load replies with `thread <message_id>`.
+Prefer `output json` for agent parsing on list, thread, and write commands.
 
 ## Development
 

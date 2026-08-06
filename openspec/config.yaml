@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Project: slack — minimal Slack CLI/TUI for DM and adjacent message workflows.
+
+  Tech stack:
+  - Go 1.26 module github.com/ryangerardwilson/slack
+  - Entry point: cmd/slack/main.go → internal/app
+  - Bubble Tea TUI: internal/tui (charmbracelet/bubbletea, lipgloss)
+  - SQLite event cache: modernc.org/sqlite under XDG state
+  - Prefer stdlib; dependencies limited to terminal UI and SQLite
+
+  Layout:
+  - cmd/slack — binary main
+  - internal/app — CLI parse, commands, Slack API, cache, mark-read, TUI bridge
+  - internal/tui — Bubble Tea surface for im/mpim only
+  - internal/version — stamped Version (source default 0.0.0)
+  - install.sh — release install/upgrade to ~/.local/bin/slack
+  - specialists/ — product engineer facts (ROLE.md); no project-root AGENTS.md
+
+  Product boundaries:
+  - Numeric account presets (1, 2, 3…); no config-level default preset
+  - Config: ~/.config/slack/config.json (or $XDG_CONFIG_HOME/slack/config.json)
+  - Tokens under accounts.<preset>.token.{user,bot}; user tokens preferred for human-authored writes and mark-read
+  - Flat declarative CLI; retired short commands (cfg, post, dm, ls, mra, …) rejected
+  - TUI limited to recent im,mpim — no public/private channel browsing without explicit direction
+  - Activity inbox is out of scope for mark all read
+  - Deterministic plain-text (and optional JSON) output; script-friendly
+
+  Verification:
+  - go test ./...
+  - go run ./cmd/slack help|version
+
+rules:
+  proposal:
+    - Keep scope narrow; do not expand into a general Slack client without explicit direction
+    - Preserve declarative command grammar and numeric presets
+    - Include Non-goals when changing product surface
+  specs:
+    - Requirements use SHALL/MUST and scenario form (WHEN/THEN)
+    - Specs document user-visible and agent-visible contracts, not every internal helper
+  tasks:
+    - Prefer small, testable chunks; cover parse + command behavior in app_test.go when changing CLI

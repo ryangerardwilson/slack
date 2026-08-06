@@ -16,8 +16,7 @@ import (
 )
 
 type cachePaths struct {
-	DBFile  string
-	LogFile string
+	DBFile string
 }
 
 func safePresetSlug(preset string) string {
@@ -38,8 +37,7 @@ func eventCachePaths(account map[string]any, preset string) cachePaths {
 	slug := safePresetSlug(preset)
 	base := stateBaseDir()
 	dbPath := firstNonEmpty(str(account["events_cache_db"]), str(account["event_cache_db"]), filepath.Join(base, "events-"+slug+".db"))
-	logPath := firstNonEmpty(str(account["events_log_file"]), filepath.Join(base, "events-"+slug+".log"))
-	return cachePaths{DBFile: expandPath(dbPath), LogFile: expandPath(logPath)}
+	return cachePaths{DBFile: expandPath(dbPath)}
 }
 
 func eventCacheDBPath(account map[string]any, preset string) string {
@@ -552,16 +550,22 @@ func eventCacheMarkRead(cachePath, channelID, latestTS string) error {
 	return err
 }
 
-func eventCacheSearchEntries(cachePath string, contacts Contacts, limit int, filterMode, selfUserID, label, senderFilter, containsFilter, timeLimit string) ([]MessageEntry, error) {
+func eventCacheSearchEntries(cachePath string, contacts Contacts, limit int, filterMode, selfUserID, label, senderFilter, containsFilter, timeLimit, channelFilter string) ([]MessageEntry, error) {
 	entries, err := eventCacheLoadEntries(cachePath, selfUserID, maxInt(200, limit*20), "")
 	if err != nil || len(entries) == 0 {
 		return entries, err
 	}
 	cutoff, hasCutoff := startTS(timeLimit)
+	if strings.TrimSpace(timeLimit) != "" && !hasCutoff {
+		return nil, UsageError{Message: "invalid since window " + strconv.Quote(timeLimit)}
+	}
 	var selected []MessageEntry
 	sortEntriesLatest(entries)
 	for _, entry := range entries {
 		if !cacheLabelMatches(entry, contacts, label) {
+			continue
+		}
+		if !channelFilterMatches(entry, channelFilter) {
 			continue
 		}
 		if !entryPassesFilters(entry, contacts, filterMode, senderFilter, containsFilter, cutoff, hasCutoff) {
@@ -572,8 +576,28 @@ func eventCacheSearchEntries(cachePath string, contacts Contacts, limit int, fil
 			break
 		}
 	}
-	sort.Slice(selected, func(i, j int) bool { return selected[i].SortTS < selected[j].SortTS })
+	// Keep newest-first for agent-friendly "latest messages" workflows.
 	return selected, nil
+}
+
+func channelFilterMatches(entry MessageEntry, channelFilter string) bool {
+	channelFilter = strings.TrimSpace(channelFilter)
+	if channelFilter == "" {
+		return true
+	}
+	if conversationIDRE.MatchString(channelFilter) {
+		return entry.ChannelID == channelFilter || entry.DMID == channelFilter
+	}
+	name := channelNameQuery(channelFilter)
+	if name == "" {
+		name = strings.TrimPrefix(channelFilter, "#")
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	haystack := strings.ToLower(strings.Join([]string{entry.ChannelID, entry.Conversation, entry.Surface}, " "))
+	return strings.Contains(haystack, name) || strings.EqualFold(entry.Conversation, channelFilter) || strings.EqualFold(entry.Conversation, "#"+name)
 }
 
 func cacheLabelMatches(entry MessageEntry, contacts Contacts, label string) bool {
@@ -672,8 +696,13 @@ func startTS(value string) (float64, bool) {
 	}
 	now := time.Now()
 	if match := relativeTimeRE.FindStringSubmatch(value); len(match) == 3 {
-		amount, _ := strconv.Atoi(match[1])
+		amount, err := strconv.Atoi(match[1])
+		if err != nil || amount <= 0 {
+			return 0, false
+		}
 		switch strings.ToLower(match[2]) {
+		case "h":
+			return float64(now.Add(-time.Duration(amount) * time.Hour).Unix()), true
 		case "d":
 			return float64(now.AddDate(0, 0, -amount).Unix()), true
 		case "w":
@@ -696,13 +725,17 @@ func startTS(value string) (float64, bool) {
 	if match := namedMonthRE.FindStringSubmatch(value); len(match) == 3 {
 		month := monthNumber(match[1])
 		year, _ := strconv.Atoi(match[2])
-		if month > 0 {
+		if month > 0 && year > 0 {
 			return float64(time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.Local).Unix()), true
 		}
 	}
 	_ = isoDateRE
 	_ = isoMonthRE
 	return 0, false
+}
+
+func formatCutoffUTC(cutoff float64) string {
+	return time.Unix(int64(cutoff), 0).UTC().Format(time.RFC3339)
 }
 
 func monthNumber(value string) int {

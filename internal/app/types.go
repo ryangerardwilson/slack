@@ -18,15 +18,13 @@ import (
 const (
 	appName                    = "slack"
 	defaultListLimit           = 10
+	defaultListHTTPTimeout     = 45 * time.Second
 	eventCacheSchemaVersion    = 1
-	eventSyncConversationLimit   = 20
-	conversationTypesDMs         = "im,mpim"
-	conversationTypesMember      = "im,mpim,public_channel,private_channel"
-	eventSocketTimeoutSeconds  = 70
-	eventSyncSeconds           = 120
+	eventSyncConversationLimit = 20
+	conversationTypesDMs       = "im,mpim"
+	conversationTypesMember    = "im,mpim,public_channel,private_channel"
 	defaultBotTokenFile        = "~/.openclaw/credentials/slack-bot-token"
 	defaultUserTokenFile       = "~/.openclaw/credentials/slack-user-token"
-	defaultAppTokenFile        = "~/.openclaw/credentials/slack-app-token"
 	installScriptURL           = "https://raw.githubusercontent.com/ryangerardwilson/slack/main/install.sh"
 	configBootstrapText        = "{\n  \"accounts\": {}\n}\n"
 )
@@ -35,7 +33,7 @@ var (
 	userIDRE         = regexp.MustCompile(`^[UW][A-Z0-9]+$`)
 	conversationIDRE = regexp.MustCompile(`^[CDG][A-Z0-9]+$`)
 	messageIDRE      = regexp.MustCompile(`^([CDG][A-Z0-9]+):([0-9]+\.[0-9]+)$`)
-	relativeTimeRE   = regexp.MustCompile(`(?i)^(\d+)([dwmy])$`)
+	relativeTimeRE   = regexp.MustCompile(`(?i)^(\d+)([hdwmy])$`)
 	isoDateRE        = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})$`)
 	isoMonthRE       = regexp.MustCompile(`^(\d{4})-(\d{2})$`)
 	namedMonthRE     = regexp.MustCompile(`(?i)^([A-Za-z]+)[ -]+(\d{4})$`)
@@ -63,16 +61,15 @@ type Args struct {
 	ListFrom      string
 	ListContains  string
 	ListTimeLimit string
+	ListIn        string
 	Query         string
 	AuthPreset    string
 	AuthBotToken  string
 	AuthUserToken string
-	AuthAppToken  string
 	AuthName      string
 	AuthImport    bool
 	AuthList      bool
 	EventsAction  string
-	EventsLines   int
 	OutputJSON    bool
 }
 
@@ -83,6 +80,7 @@ type Runtime struct {
 	Now        func() time.Time
 	OpenEditor func(path string, bootstrap string) error
 	RunCommand func(name string, args ...string) error
+	IsTTY      func() bool
 }
 
 type UsageError struct {
@@ -101,7 +99,16 @@ func NewRuntime() *Runtime {
 		Now: func() time.Time {
 			return time.Now()
 		},
+		IsTTY: isInteractiveTTY,
 	}
+}
+
+func isInteractiveTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func Main(argv []string) int {

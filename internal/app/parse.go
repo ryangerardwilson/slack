@@ -12,7 +12,8 @@ agent quick reference:
   slack <preset> list channels [output json]     channel ids for send to #name or C...
   slack <preset> list dms [output json]          DM and group-DM conversation ids
   slack <preset> list contacts [output json]     saved contact labels
-  slack <preset> list [messages] [filters...]    message history (default: messages)
+  slack <preset> list [messages] [filters...]    message history (newest first)
+  slack <preset> thread <message_id>             replies for a root message
   slack <preset> inspect message <message_id>    read metadata, no side effects
   slack <preset> preview send to <target> body <text> [attach <path>...]
   slack <preset> send to <target> body <text> [attach <path>...]   new top-level post
@@ -28,8 +29,8 @@ global:
   slack help | version | upgrade
   slack accounts list [output json]
   slack setup check [output json]
-  slack config
-  slack auth | slack auth <preset> import | slack auth <preset> bot <token> [user <token>] [app <token>] [name <name>]
+  slack config | slack config edit
+  slack auth | slack auth <preset> import | slack auth <preset> user <token> [bot <token>] [name <name>]
   slack mark all read
   slack <preset> mark all read
 
@@ -37,23 +38,24 @@ list (directories vs message history):
   slack <preset> list channels [output json]
   slack <preset> list dms [output json]
   slack <preset> list contacts [output json]
-  slack <preset> list [messages] [unread|read] [for <label>] [from <name>] [containing <text>]
-              [since <window>] [limit <count>] [output json]
+  slack <preset> list [messages] [unread|read] [in <channel>] [for <label>] [from <name>]
+              [containing <text>] [since <window>] [limit <count>] [output json]
 
 read:
   slack <preset> inspect conversation <channel_id>
   slack <preset> inspect message <message_id>
+  slack <preset> thread <message_id> [limit <count>] [output json]
   slack <preset> open conversation <channel_id> | open message <message_id> | open tui
 
 write:
   slack <preset> preview send to <label|email|#channel|channel_id> body <message> [attach <path>...]
-  slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...]
+  slack <preset> send to <label|email|#channel|channel_id> body <message> [attach <path>...] [output json]
   slack <preset> preview reply to <channel_id>:<ts> body <message> [attach <path>...]
-  slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...]
+  slack <preset> reply to <channel_id>:<ts> body <message> [attach <path>...] [output json]
   slack <preset> preview delete message <channel_id>:<ts>
-  slack <preset> delete message <channel_id>:<ts>
+  slack <preset> delete message <channel_id>:<ts> [output json]
   slack <preset> preview edit message <channel_id>:<ts> body <message>
-  slack <preset> edit message <channel_id>:<ts> body <message>
+  slack <preset> edit message <channel_id>:<ts> body <message> [output json]
 
 people and contacts:
   slack <preset> contacts add <label> <email>
@@ -63,19 +65,19 @@ files:
   slack <preset> files download <channel_id> <file_id> [to <path>]
 
 maintenance:
-  slack <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status
+  slack <preset> events sync|status|reset cache
   slack <preset> conversations clean
 
 workflow:
   use setup check when preset identity is uncertain; inspect before open; preview before send, reply, edit, or delete;
-  channel posts use the user token when configured so Ryan is the author; trailing output json when another agent parses rows
+  user tokens are preferred for human-authored writes; use output json for machine-readable rows;
+  since windows: 4h, 2d, 1w, 3m, 1y, 2025-01-01, "jan 2025"; list defaults to newest first
 `
 
 func parseArgs(argv []string) (Args, error) {
 	args := Args{
-		ListFilter:  "all",
-		ListLimit:   defaultListLimit,
-		EventsLines: 80,
+		ListFilter: "all",
+		ListLimit:  defaultListLimit,
 	}
 	if len(argv) == 0 {
 		return args, nil
@@ -98,11 +100,7 @@ func parseArgs(argv []string) (Args, error) {
 		args.OutputJSON = output
 		return args, err
 	case "config":
-		if len(argv) != 1 {
-			return args, UsageError{Message: "Use: slack config"}
-		}
-		args.Command = "config"
-		return args, nil
+		return parseConfigArgs(args, argv[1:])
 	case "auth":
 		return parseAuthArgs(args, argv[1:])
 	case "mark":
@@ -113,9 +111,24 @@ func parseArgs(argv []string) (Args, error) {
 		return args, nil
 	}
 
-	retired := map[string]bool{"cfg": true, "conf": true, "ac": true, "post": true, "dm": true, "reply": true, "df": true, "o": true, "ls": true, "su": true, "u": true, "mra": true, "sc": true}
-	if retired[argv[0]] {
-		return args, UsageError{Message: "Use declarative Slack commands. Run: slack help"}
+	// Retired short aliases only. Do not list current declarative verbs here
+	// (especially reply/send/list) or execution will reject help-advertised forms.
+	retired := map[string]string{
+		"cfg":  "slack config | slack config edit",
+		"conf": "slack config | slack config edit",
+		"ac":   "slack <preset> contacts add <label> <email>",
+		"post": "slack <preset> send to <target> body <message>",
+		"dm":   "slack <preset> send to <target> body <message>",
+		"df":   "slack <preset> files download <channel_id> <file_id>",
+		"o":    "slack <preset> open conversation|message <id> | open tui",
+		"ls":   "slack <preset> list [messages] [filters...]",
+		"su":   "slack <preset> users search <query>",
+		"u":    "slack <preset> users search <query>",
+		"mra":  "slack [<preset>] mark all read",
+		"sc":   "slack <preset> conversations clean",
+	}
+	if replacement, ok := retired[argv[0]]; ok {
+		return args, UsageError{Message: "Retired command. Use: " + replacement}
 	}
 	if _, err := strconv.Atoi(argv[0]); err != nil {
 		return args, UsageError{Message: topLevelUsage()}
@@ -126,8 +139,11 @@ func parseArgs(argv []string) (Args, error) {
 	args.Preset = argv[0]
 	command := argv[1]
 	remaining := argv[2:]
-	if retired[command] || command == "tui" {
-		return args, UsageError{Message: "Use declarative Slack commands. Run: slack help"}
+	if replacement, ok := retired[command]; ok {
+		return args, UsageError{Message: "Retired command. Use: " + replacement}
+	}
+	if command == "tui" {
+		return args, UsageError{Message: "Retired command. Use: slack <preset> open tui"}
 	}
 	switch command {
 	case "contacts":
@@ -154,6 +170,8 @@ func parseArgs(argv []string) (Args, error) {
 		return parseOpenArgs(args, remaining)
 	case "list":
 		return parseListArgs(args, remaining)
+	case "thread":
+		return parseThreadArgs(args, remaining)
 	case "conversations":
 		return parseConversationsArgs(args, remaining)
 	case "mark":
@@ -164,6 +182,23 @@ func parseArgs(argv []string) (Args, error) {
 		return args, nil
 	}
 	return args, UsageError{Message: topLevelUsage()}
+}
+
+func parseConfigArgs(args Args, remaining []string) (Args, error) {
+	if len(remaining) == 0 {
+		args.Command = "config"
+		return args, nil
+	}
+	if len(remaining) == 1 && remaining[0] == "edit" {
+		args.Command = "config-edit"
+		return args, nil
+	}
+	if len(remaining) == 2 && remaining[0] == "output" && remaining[1] == "json" {
+		args.Command = "config"
+		args.OutputJSON = true
+		return args, nil
+	}
+	return args, UsageError{Message: "Use: slack config | slack config edit | slack config output json"}
 }
 
 func parseOptionalOutputJSON(params []string, shape string) (bool, error) {
@@ -196,7 +231,7 @@ func parseAuthArgs(args Args, remaining []string) (Args, error) {
 	}
 	args.AuthPreset = remaining[0]
 	if args.AuthPreset == "" || strings.HasPrefix(args.AuthPreset, "-") {
-		return args, UsageError{Message: "Use: slack auth <preset> import | slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]"}
+		return args, UsageError{Message: "Use: slack auth <preset> import | slack auth <preset> user <user_token> [bot <bot_token>] [name <name>]"}
 	}
 	rest := remaining[1:]
 	if len(rest) == 1 && rest[0] == "import" {
@@ -213,12 +248,10 @@ func parseAuthArgs(args Args, remaining []string) (Args, error) {
 			args.AuthBotToken = value
 		case "user":
 			args.AuthUserToken = value
-		case "app":
-			args.AuthAppToken = value
 		case "name":
 			args.AuthName = value
 		default:
-			return args, UsageError{Message: "Use: slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]"}
+			return args, UsageError{Message: "Use: slack auth <preset> user <user_token> [bot <bot_token>] [name <name>]"}
 		}
 		i += 2
 	}
@@ -258,20 +291,11 @@ func parseEventsArgs(args Args, remaining []string) (Args, error) {
 		return args, nil
 	}
 	if remaining[0] == "timer" {
-		if len(remaining) != 2 {
-			return args, UsageError{Message: "Use: slack <preset> events timer install|disable|status"}
+		if len(remaining) == 2 && remaining[1] == "disable" {
+			args.EventsAction = "timer-disable"
+			return args, nil
 		}
-		switch remaining[1] {
-		case "install":
-			args.EventsAction = "ti"
-		case "disable":
-			args.EventsAction = "td"
-		case "status":
-			args.EventsAction = "st"
-		default:
-			return args, UsageError{Message: "Use: slack <preset> events timer install|disable|status"}
-		}
-		return args, nil
+		return args, UsageError{Message: "Use: slack <preset> events sync|status|reset cache"}
 	}
 	if len(remaining) == 2 && remaining[0] == "reset" && remaining[1] == "cache" {
 		args.EventsAction = "reset-cache"
@@ -280,27 +304,14 @@ func parseEventsArgs(args Args, remaining []string) (Args, error) {
 	action := remaining[0]
 	rest := remaining[1:]
 	switch action {
-	case "once", "sync", "service", "status":
+	case "sync", "status":
 		if len(rest) != 0 {
 			return args, UsageError{Message: fmt.Sprintf("Use: slack <preset> events %s", action)}
 		}
 		args.EventsAction = action
 		return args, nil
-	case "logs":
-		if len(rest) > 1 {
-			return args, UsageError{Message: "Use: slack <preset> events logs [lines]"}
-		}
-		if len(rest) == 1 {
-			value, err := parsePositiveInt(rest[0], "events logs lines")
-			if err != nil {
-				return args, err
-			}
-			args.EventsLines = value
-		}
-		args.EventsAction = action
-		return args, nil
 	}
-	return args, UsageError{Message: "Use: slack <preset> events sync|once|service|status|logs|reset cache|timer install|timer disable|timer status"}
+	return args, UsageError{Message: "Use: slack <preset> events sync|status|reset cache"}
 }
 
 func parseBodyAndPaths(remaining []string, shape string) (string, []string, error) {
@@ -337,7 +348,11 @@ func parseConversationsArgs(args Args, remaining []string) (Args, error) {
 }
 
 func parseSendArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> send to <target> body <message> [attach <path> ...]"
+	shape := "Use: slack <preset> send to <target> body <message> [attach <path> ...] [output json]"
+	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
+	if err != nil {
+		return args, err
+	}
 	if len(remaining) < 4 || remaining[0] != "to" {
 		return args, UsageError{Message: shape}
 	}
@@ -349,13 +364,21 @@ func parseSendArgs(args Args, remaining []string) (Args, error) {
 	args.Recipient = remaining[1]
 	args.Message = message
 	args.Paths = paths
+	args.OutputJSON = outputJSON
 	return args, nil
 }
 
 func parseReplyArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> reply to <message_id> body <message> [attach <path> ...]"
-	if len(remaining) < 4 || remaining[0] != "to" || !isMessageID(remaining[1]) {
+	shape := "Use: slack <preset> reply to <message_id> body <message> [attach <path> ...] [output json]"
+	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
+	if err != nil {
+		return args, err
+	}
+	if len(remaining) < 4 || remaining[0] != "to" {
 		return args, UsageError{Message: shape}
+	}
+	if !isMessageID(remaining[1]) {
+		return args, UsageError{Message: "reply target must be message id <channel_id>:<ts> (example C123:1712764800.000100). Use: " + shape}
 	}
 	message, paths, err := parseBodyAndPaths(remaining[2:], shape)
 	if err != nil {
@@ -365,6 +388,7 @@ func parseReplyArgs(args Args, remaining []string) (Args, error) {
 	args.Recipient = remaining[1]
 	args.Message = message
 	args.Paths = paths
+	args.OutputJSON = outputJSON
 	return args, nil
 }
 
@@ -395,19 +419,34 @@ func parsePreviewArgs(args Args, remaining []string) (Args, error) {
 }
 
 func parseDeleteArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> delete message <message_id>"
-	if len(remaining) != 2 || remaining[0] != "message" || !isMessageID(remaining[1]) {
+	shape := "Use: slack <preset> delete message <message_id> [output json]"
+	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
+	if err != nil {
+		return args, err
+	}
+	if len(remaining) != 2 || remaining[0] != "message" {
 		return args, UsageError{Message: shape}
+	}
+	if !isMessageID(remaining[1]) {
+		return args, UsageError{Message: "delete target must be message id <channel_id>:<ts>. Use: " + shape}
 	}
 	args.Command = "delete"
 	args.Recipient = remaining[1]
+	args.OutputJSON = outputJSON
 	return args, nil
 }
 
 func parseEditArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> edit message <message_id> body <message>"
-	if len(remaining) < 4 || remaining[0] != "message" || !isMessageID(remaining[1]) {
+	shape := "Use: slack <preset> edit message <message_id> body <message> [output json]"
+	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
+	if err != nil {
+		return args, err
+	}
+	if len(remaining) < 4 || remaining[0] != "message" {
 		return args, UsageError{Message: shape}
+	}
+	if !isMessageID(remaining[1]) {
+		return args, UsageError{Message: "edit target must be message id <channel_id>:<ts>. Use: " + shape}
 	}
 	message, paths, err := parseBodyAndPaths(remaining[2:], shape)
 	if err != nil {
@@ -419,7 +458,35 @@ func parseEditArgs(args Args, remaining []string) (Args, error) {
 	args.Command = "edit"
 	args.Recipient = remaining[1]
 	args.Message = message
+	args.OutputJSON = outputJSON
 	return args, nil
+}
+
+func parseThreadArgs(args Args, remaining []string) (Args, error) {
+	shape := "Use: slack <preset> thread <message_id> [limit <count>] [output json]"
+	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
+	if err != nil {
+		return args, err
+	}
+	args.OutputJSON = outputJSON
+	if len(remaining) < 1 {
+		return args, UsageError{Message: shape}
+	}
+	if !isMessageID(remaining[0]) {
+		return args, UsageError{Message: "thread target must be message id <channel_id>:<ts>. Use: " + shape}
+	}
+	args.Command = "thread"
+	args.Recipient = remaining[0]
+	rest := remaining[1:]
+	if len(rest) == 0 {
+		return args, nil
+	}
+	if len(rest) == 2 && rest[0] == "limit" {
+		value, err := parsePositiveInt(rest[1], "thread limit")
+		args.ListLimit = value
+		return args, err
+	}
+	return args, UsageError{Message: shape}
 }
 
 func parseInspectArgs(args Args, remaining []string) (Args, error) {
@@ -551,9 +618,18 @@ func parseListArgs(args Args, remaining []string) (Args, error) {
 			i += 2
 		case "from":
 			if i+1 >= len(remaining) {
-				return args, UsageError{Message: "from requires: <name>"}
+				return args, UsageError{Message: "from requires: <name> (sender filter, not channel)"}
 			}
 			args.ListFrom = remaining[i+1]
+			i += 2
+		case "in", "channel":
+			if i+1 >= len(remaining) {
+				return args, UsageError{Message: "in requires: <channel_id|#name|name>"}
+			}
+			if args.ListIn != "" {
+				return args, UsageError{Message: "list accepts at most one in/channel filter"}
+			}
+			args.ListIn = remaining[i+1]
 			i += 2
 		case "containing":
 			if i+1 >= len(remaining) {
@@ -563,9 +639,13 @@ func parseListArgs(args Args, remaining []string) (Args, error) {
 			i += 2
 		case "since":
 			if i+1 >= len(remaining) {
-				return args, UsageError{Message: "since requires: <window>"}
+				return args, UsageError{Message: "since requires: <window> (examples: 4h, 2d, 1w, 2025-01-01)"}
 			}
-			args.ListTimeLimit = remaining[i+1]
+			window := remaining[i+1]
+			if _, ok := startTS(window); !ok {
+				return args, UsageError{Message: "invalid since window " + strconv.Quote(window) + "; use 4h, 2d, 1w, 3m, 1y, YYYY-MM-DD, YYYY-MM, or \"jan 2025\""}
+			}
+			args.ListTimeLimit = window
 			i += 2
 		case "limit":
 			if i+1 >= len(remaining) {
@@ -584,7 +664,7 @@ func parseListArgs(args Args, remaining []string) (Args, error) {
 			args.OpenMode = true
 			i++
 		default:
-			return args, UsageError{Message: "Use: slack <preset> list [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [open]"}
+			return args, UsageError{Message: listUsage()}
 		}
 	}
 	return args, nil
@@ -599,9 +679,9 @@ func parsePositiveInt(value, label string) (int, error) {
 }
 
 func topLevelUsage() string {
-	return "Use: slack auth | slack auth <preset> import | slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>] | slack config | slack <preset> contacts add <label> <email> | slack <preset> send to <target> body <message> [attach <path> ...] | slack <preset> reply to <message_id> body <message> [attach <path> ...] | slack <preset> list [unread|read] [from <name>] [since <window>] [limit <count>]"
+	return "Use: slack auth | slack auth <preset> import | slack auth <preset> user <user_token> [bot <bot_token>] [name <name>] | slack config | slack config edit | slack <preset> contacts add <label> <email> | slack <preset> send to <target> body <message> [attach <path> ...] | slack <preset> reply to <message_id> body <message> [attach <path> ...] | slack <preset> list [unread|read] [in <channel>] [from <name>] [since <window>] [limit <count>] | slack <preset> thread <message_id>"
 }
 
 func listUsage() string {
-	return "Use: slack <preset> list channels|dms|contacts [output json] | slack <preset> list [messages] [unread|read] [for <label>] [from <name>] [containing <text>] [since <window>] [limit <count>] [output json]"
+	return "Use: slack <preset> list channels|dms|contacts [output json] | slack <preset> list [messages] [unread|read] [in <channel|#name|id>] [for <label>] [from <sender>] [containing <text>] [since <window>] [limit <count>] [output json]"
 }

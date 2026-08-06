@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,31 +19,71 @@ func (rt *Runtime) listMessages(contacts Contacts, client SlackClient, args Args
 			return UsageError{Message: "Unknown contact label: " + args.ListLabel}
 		}
 	}
+	var cutoff float64
+	var hasCutoff bool
+	if args.ListTimeLimit != "" {
+		cutoff, hasCutoff = startTS(args.ListTimeLimit)
+		if !hasCutoff {
+			return UsageError{Message: "invalid since window " + strconv.Quote(args.ListTimeLimit) + "; use 4h, 2d, 1w, 3m, 1y, YYYY-MM-DD, YYYY-MM, or \"jan 2025\""}
+		}
+	}
+	// Prefer a bounded client for ordinary list calls so agents see failures instead of hangs.
+	listClient := client
+	if client.HTTPClient != nil {
+		listClient = SlackClient{Token: client.Token, HTTPClient: &http.Client{Timeout: defaultListHTTPTimeout, Transport: client.HTTPClient.Transport}}
+	}
 	var entries []MessageEntry
 	var err error
 	if shouldBypassMessageCache(args) {
-		entries, err = rt.searchMessagesLive(contacts, client, args, selfUserID)
+		entries, err = rt.searchMessagesLive(contacts, listClient, args, selfUserID)
 	} else {
-		entries, err = eventCacheSearchEntries(cachePath, contacts, args.ListLimit, args.ListFilter, selfUserID, args.ListLabel, args.ListFrom, args.ListContains, args.ListTimeLimit)
+		entries, err = eventCacheSearchEntries(cachePath, contacts, args.ListLimit, args.ListFilter, selfUserID, args.ListLabel, args.ListFrom, args.ListContains, args.ListTimeLimit, args.ListIn)
 		if err != nil {
 			return err
 		}
 		if len(entries) == 0 {
-			entries, err = rt.searchMessagesLive(contacts, client, args, selfUserID)
+			entries, err = rt.searchMessagesLive(contacts, listClient, args, selfUserID)
 		}
 	}
 	if err != nil {
 		return err
 	}
+	// Re-apply time boundary after merge so limit never truncates older-first.
+	if hasCutoff {
+		filtered := entries[:0]
+		for _, entry := range entries {
+			if entry.SortTS >= cutoff {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
+	}
 	if len(entries) == 0 {
-		fmt.Fprintf(rt.Stdout, "No %s messages found.\n", args.ListFilter)
+		if args.OutputJSON {
+			payload := map[string]any{"messages": []any{}, "count": 0, "filter": args.ListFilter}
+			if hasCutoff {
+				payload["since"] = args.ListTimeLimit
+				payload["since_cutoff_utc"] = formatCutoffUTC(cutoff)
+			}
+			if args.ListIn != "" {
+				payload["in"] = args.ListIn
+			}
+			return rt.printJSON(payload)
+		}
+		msg := fmt.Sprintf("No %s messages found.", args.ListFilter)
+		if hasCutoff {
+			msg = fmt.Sprintf("No %s messages found since %s (cutoff_utc=%s).", args.ListFilter, args.ListTimeLimit, formatCutoffUTC(cutoff))
+		}
+		if args.ListIn != "" {
+			msg += " in=" + args.ListIn
+		}
+		fmt.Fprintln(rt.Stdout, msg)
 		return nil
 	}
 	sortEntriesLatest(entries)
 	if len(entries) > args.ListLimit {
 		entries = entries[:args.ListLimit]
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].SortTS < entries[j].SortTS })
 	if args.OpenMode {
 		return rt.printOpenEntriesAndMark(entries, client, cachePath)
 	}
@@ -51,7 +92,18 @@ func (rt *Runtime) listMessages(contacts Contacts, client SlackClient, args Args
 		for _, entry := range entries {
 			summaries = append(summaries, entrySummary(entry))
 		}
-		return rt.printJSON(map[string]any{"messages": summaries})
+		payload := map[string]any{"messages": summaries, "count": len(summaries), "order": "newest_first"}
+		if hasCutoff {
+			payload["since"] = args.ListTimeLimit
+			payload["since_cutoff_utc"] = formatCutoffUTC(cutoff)
+		}
+		if args.ListIn != "" {
+			payload["in"] = args.ListIn
+		}
+		return rt.printJSON(payload)
+	}
+	if hasCutoff {
+		fmt.Fprintf(rt.Stdout, "since: %s\nsince_cutoff_utc: %s\norder: newest_first\n\n", args.ListTimeLimit, formatCutoffUTC(cutoff))
 	}
 	var rows [][]kv
 	for _, entry := range entries {
@@ -72,6 +124,10 @@ func (rt *Runtime) searchMessagesLive(contacts Contacts, client SlackClient, arg
 }
 
 func (rt *Runtime) searchMessagesAPI(contacts Contacts, client SlackClient, args Args, selfUserID string) ([]MessageEntry, error) {
+	// Channel-scoped history is more reliable via conversations.history than workspace search.
+	if strings.TrimSpace(args.ListIn) != "" {
+		return rt.listMessagesInChannel(contacts, client, args, selfUserID)
+	}
 	query := buildSearchQuery(args, contacts)
 	data, err := client.Request("search.messages", map[string]string{
 		"query":    query,
@@ -125,12 +181,86 @@ func (rt *Runtime) searchMessagesAPI(contacts Contacts, client SlackClient, args
 		if args.ListLabel != "" && !cacheLabelMatches(entry, contacts, args.ListLabel) {
 			continue
 		}
+		if !channelFilterMatches(entry, args.ListIn) {
+			continue
+		}
 		if str(message["user"]) == selfUserID {
 			entry.Unread = false
 		}
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+func (rt *Runtime) listMessagesInChannel(contacts Contacts, client SlackClient, args Args, selfUserID string) ([]MessageEntry, error) {
+	channelID, label, err := rt.resolveListChannel(client, args.ListIn)
+	if err != nil {
+		return nil, err
+	}
+	cutoff, hasCutoff := startTS(args.ListTimeLimit)
+	payload := map[string]string{
+		"channel": channelID,
+		"limit":   fmt.Sprintf("%d", maxInt(args.ListLimit*4, 50)),
+	}
+	if hasCutoff {
+		payload["oldest"] = fmt.Sprintf("%.6f", cutoff)
+	}
+	data, err := client.Request("conversations.history", payload, false, http.MethodGet, false)
+	if err != nil {
+		return nil, err
+	}
+	info, _ := client.Request("conversations.info", map[string]string{"channel": channelID}, false, http.MethodGet, true)
+	channelInfo := asMap(asMap(info)["channel"])
+	surface := conversationSurface(channelInfo, channelID)
+	conversation := firstNonEmpty(channelName(channelInfo, channelID), label, channelID)
+	userCache := map[string]map[string]any{}
+	var entries []MessageEntry
+	for _, raw := range asList(data["messages"]) {
+		message := asMap(raw)
+		ts := str(message["ts"])
+		if ts == "" {
+			continue
+		}
+		sender := senderInfo(client, message, userCache)
+		entry := MessageEntry{
+			SortTS:       tsFloat(ts),
+			Email:        firstNonEmpty(str(sender["email"]), "-"),
+			DMID:         channelID,
+			ChannelID:    channelID,
+			Surface:      surface,
+			Conversation: conversation,
+			UserID:       firstNonEmpty(str(sender["id"]), "-"),
+			Members:      firstNonEmpty(str(channelInfo["num_members"]), "-"),
+			Message:      message,
+			Sender:       sender,
+			Unread:       false,
+		}
+		if !entryPassesFilters(entry, contacts, args.ListFilter, args.ListFrom, args.ListContains, cutoff, hasCutoff) {
+			continue
+		}
+		if args.ListLabel != "" && !cacheLabelMatches(entry, contacts, args.ListLabel) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	sortEntriesLatest(entries)
+	return entries, nil
+}
+
+func (rt *Runtime) resolveListChannel(client SlackClient, target string) (string, string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", "", UsageError{Message: "in requires: <channel_id|#name|name>"}
+	}
+	if conversationIDRE.MatchString(target) {
+		return target, target, nil
+	}
+	if channelID, err := lookupChannelIDByName(client, target); err != nil {
+		return "", "", err
+	} else if channelID != "" {
+		return channelID, channelNameQuery(target), nil
+	}
+	return "", "", UsageError{Message: "Unable to resolve list channel: " + target + " (use channel id like C123 or #name)"}
 }
 
 func buildSearchQuery(args Args, contacts Contacts) string {
@@ -149,9 +279,19 @@ func buildSearchQuery(args Args, contacts Contacts) string {
 	if args.ListFrom != "" {
 		terms = append(terms, "from:"+quoteSearch(resolveSenderSearchTerm(contacts, args.ListFrom)))
 	}
+	if args.ListIn != "" {
+		if conversationIDRE.MatchString(args.ListIn) {
+			terms = append(terms, "in:"+args.ListIn)
+		} else if name := channelNameQuery(args.ListIn); name != "" {
+			terms = append(terms, "in:#"+name)
+		} else {
+			terms = append(terms, "in:"+quoteSearch(args.ListIn))
+		}
+	}
 	if args.ListTimeLimit != "" {
 		if cutoff, ok := startTS(args.ListTimeLimit); ok {
-			terms = append(terms, "after:"+time.Unix(int64(cutoff), 0).Format("2006-01-02"))
+			// Slack search after: is date-granular; client still enforces exact cutoff.
+			terms = append(terms, "after:"+time.Unix(int64(cutoff), 0).UTC().Add(-24*time.Hour).Format("2006-01-02"))
 		}
 	}
 	if len(terms) == 0 {
@@ -169,10 +309,13 @@ func quoteSearch(value string) string {
 }
 
 func shouldBypassMessageCache(args Args) bool {
-	return strings.TrimSpace(args.ListFrom) != "" || strings.TrimSpace(args.ListContains) != ""
+	return strings.TrimSpace(args.ListFrom) != "" || strings.TrimSpace(args.ListContains) != "" || strings.TrimSpace(args.ListIn) != ""
 }
 
 func (rt *Runtime) scanConversations(contacts Contacts, client SlackClient, args Args, selfUserID string) ([]MessageEntry, error) {
+	if strings.TrimSpace(args.ListIn) != "" {
+		return rt.listMessagesInChannel(contacts, client, args, selfUserID)
+	}
 	rows, err := rt.loadRecentConversations(client, selfUserID, "", maxInt(args.ListLimit*4, 20), false, conversationTypesMember)
 	if err != nil {
 		return nil, err
@@ -194,7 +337,94 @@ func (rt *Runtime) scanConversations(contacts Contacts, client SlackClient, args
 			entries = append(entries, entry)
 		}
 	}
+	sortEntriesLatest(entries)
 	return entries, nil
+}
+
+func (rt *Runtime) listThreadReplies(client SlackClient, args Args) error {
+	channelID, threadTS, ok := parseMessageID(args.Recipient)
+	if !ok {
+		return UsageError{Message: "Use: slack <preset> thread <message_id> [limit <count>] [output json]"}
+	}
+	limit := args.ListLimit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	data, err := client.Request("conversations.replies", map[string]string{
+		"channel": channelID,
+		"ts":      threadTS,
+		"limit":   fmt.Sprintf("%d", maxInt(limit, 1)),
+	}, false, http.MethodGet, false)
+	if err != nil {
+		return err
+	}
+	messages := asList(data["messages"])
+	if len(messages) == 0 {
+		if args.OutputJSON {
+			return rt.printJSON(map[string]any{
+				"thread_ts":  threadTS,
+				"channel_id": channelID,
+				"messages":   []any{},
+				"count":      0,
+			})
+		}
+		fmt.Fprintln(rt.Stdout, "No thread messages found.")
+		return nil
+	}
+	userCache := map[string]map[string]any{}
+	var entries []MessageEntry
+	for _, raw := range messages {
+		message := asMap(raw)
+		ts := str(message["ts"])
+		if ts == "" {
+			continue
+		}
+		sender := senderInfo(client, message, userCache)
+		entries = append(entries, MessageEntry{
+			SortTS:       tsFloat(ts),
+			ChannelID:    channelID,
+			DMID:         channelID,
+			Surface:      conversationSurface(map[string]any{}, channelID),
+			Conversation: channelID,
+			Message:      message,
+			Sender:       sender,
+			UserID:       firstNonEmpty(str(sender["id"]), "-"),
+		})
+	}
+	// Thread chronology is oldest-first (root then replies); agents often need root context first.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].SortTS < entries[j].SortTS })
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	if args.OutputJSON {
+		summaries := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			summary := entrySummary(entry)
+			summary["thread_ts"] = threadTS
+			summary["ts"] = str(entry.Message["ts"])
+			summary["reply_count"] = entry.Message["reply_count"]
+			summaries = append(summaries, summary)
+		}
+		nextCursor := str(asMap(data["response_metadata"])["next_cursor"])
+		return rt.printJSON(map[string]any{
+			"thread_ts":   threadTS,
+			"channel_id":  channelID,
+			"message_id":  args.Recipient,
+			"messages":    summaries,
+			"count":       len(summaries),
+			"order":       "oldest_first",
+			"next_cursor": nextCursor,
+		})
+	}
+	fmt.Fprintf(rt.Stdout, "thread: %s\nchannel: %s\ncount: %d\n\n", args.Recipient, channelID, len(entries))
+	var rows [][]kv
+	for _, entry := range entries {
+		fields := inspectEntryFields(entry)
+		fields = append(fields, kv{"thread_ts", threadTS})
+		rows = append(rows, fields)
+	}
+	rt.printSections(rows)
+	return nil
 }
 
 func (rt *Runtime) loadRecentConversations(client SlackClient, selfUserID, cachePath string, limit int, useCache bool, conversationTypes string) ([]ConversationRow, error) {

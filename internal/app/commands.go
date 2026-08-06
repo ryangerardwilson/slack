@@ -34,6 +34,13 @@ func (rt *Runtime) Run(argv []string) error {
 	}
 	path := configPath("")
 	if args.Command == "config" {
+		cfg, err := loadConfig(path)
+		if err != nil {
+			return err
+		}
+		return rt.showConfigSummary(path, cfg, args.OutputJSON)
+	}
+	if args.Command == "config-edit" {
 		return rt.openConfig(path, configBootstrapText)
 	}
 	cfg, err := loadConfig(path)
@@ -127,6 +134,16 @@ func (rt *Runtime) Run(argv []string) error {
 			return UsageError{Message: "Unable to determine the current Slack user."}
 		}
 		return rt.listMessages(contacts, client, args, selfUserID, eventCacheDBPath(account, preset))
+	case "thread":
+		token, err := resolveListToken(account)
+		if err != nil {
+			return err
+		}
+		client := rt.slackClient(token)
+		if _, err := client.AuthTest(); err != nil {
+			return err
+		}
+		return rt.listThreadReplies(client, args)
 	case "tui":
 		token, err := resolveListToken(account)
 		if err != nil {
@@ -239,15 +256,14 @@ func (rt *Runtime) Run(argv []string) error {
 				return err
 			}
 		}
-		details := []string{"posted", "target=" + args.Recipient, "kind=" + target.Kind, "channel=" + target.ChannelID}
-		if ts != "" {
-			details = append(details, "ts="+ts)
-		}
-		if len(uploaded) > 0 {
-			details = append(details, "files="+strings.Join(uploaded, ","))
-		}
-		fmt.Fprintln(rt.Stdout, strings.Join(details, " "))
-		return nil
+		return rt.printWriteResult(args.OutputJSON, map[string]any{
+			"action":  "posted",
+			"target":  args.Recipient,
+			"kind":    target.Kind,
+			"channel": target.ChannelID,
+			"ts":      ts,
+			"files":   uploaded,
+		}, []string{"posted", "target=" + args.Recipient, "kind=" + target.Kind, "channel=" + target.ChannelID}, ts, uploaded)
 	case "reply":
 		channelID, messageTS, ok := parseMessageID(args.Recipient)
 		if !ok {
@@ -266,15 +282,14 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		details := []string{"replied", "message_id=" + args.Recipient, "channel=" + channelID, "thread_ts=" + threadTS}
-		if ts != "" {
-			details = append(details, "ts="+ts)
-		}
-		if len(uploaded) > 0 {
-			details = append(details, "files="+strings.Join(uploaded, ","))
-		}
-		fmt.Fprintln(rt.Stdout, strings.Join(details, " "))
-		return nil
+		return rt.printWriteResult(args.OutputJSON, map[string]any{
+			"action":     "replied",
+			"message_id": args.Recipient,
+			"channel":    channelID,
+			"thread_ts":  threadTS,
+			"ts":         ts,
+			"files":      uploaded,
+		}, []string{"replied", "message_id=" + args.Recipient, "channel=" + channelID, "thread_ts=" + threadTS}, ts, uploaded)
 	case "delete":
 		channelID, messageTS, ok := parseMessageID(args.Recipient)
 		if !ok {
@@ -284,12 +299,12 @@ func (rt *Runtime) Run(argv []string) error {
 		if err := deleteMessage(writeClient, channelID, messageTS); err != nil {
 			return err
 		}
-		fmt.Fprintln(rt.Stdout, strings.Join([]string{
-			"deleted",
-			"message_id=" + args.Recipient,
-			"channel=" + channelID,
-		}, " "))
-		return nil
+		return rt.printWriteResult(args.OutputJSON, map[string]any{
+			"action":     "deleted",
+			"message_id": args.Recipient,
+			"channel":    channelID,
+			"ts":         messageTS,
+		}, []string{"deleted", "message_id=" + args.Recipient, "channel=" + channelID}, "", nil)
 	case "edit":
 		channelID, messageTS, ok := parseMessageID(args.Recipient)
 		if !ok {
@@ -299,14 +314,39 @@ func (rt *Runtime) Run(argv []string) error {
 		if err := editMessage(writeClient, channelID, messageTS, args.Message); err != nil {
 			return err
 		}
-		fmt.Fprintln(rt.Stdout, strings.Join([]string{
-			"edited",
-			"message_id=" + args.Recipient,
-			"channel=" + channelID,
-		}, " "))
-		return nil
+		return rt.printWriteResult(args.OutputJSON, map[string]any{
+			"action":     "edited",
+			"message_id": args.Recipient,
+			"channel":    channelID,
+			"ts":         messageTS,
+			"body":       args.Message,
+		}, []string{"edited", "message_id=" + args.Recipient, "channel=" + channelID}, "", nil)
 	}
 	return UsageError{Message: topLevelUsage()}
+}
+
+func (rt *Runtime) printWriteResult(asJSON bool, payload map[string]any, base []string, ts string, files []string) error {
+	if asJSON {
+		if ts != "" {
+			payload["ts"] = ts
+		}
+		if files == nil {
+			files = []string{}
+		}
+		if _, ok := payload["files"]; !ok {
+			payload["files"] = files
+		}
+		return rt.printJSON(payload)
+	}
+	details := append([]string{}, base...)
+	if ts != "" {
+		details = append(details, "ts="+ts)
+	}
+	if len(files) > 0 {
+		details = append(details, "files="+strings.Join(files, ","))
+	}
+	fmt.Fprintln(rt.Stdout, strings.Join(details, " "))
+	return nil
 }
 
 func (rt *Runtime) writeClient(account Account, fallbackToken string) SlackClient {
@@ -329,7 +369,19 @@ func (rt *Runtime) upgradeApp() error {
 	return syscall.Exec(bashPath, []string{"bash", "-c", command}, os.Environ())
 }
 
+func (rt *Runtime) showConfigSummary(path string, cfg Config, outputJSON bool) error {
+	// Never dump raw tokens. Prefer the same redacted summary as setup check.
+	return rt.setupCheck(path, cfg, outputJSON)
+}
+
 func (rt *Runtime) openConfig(path string, bootstrap string) error {
+	isTTY := isInteractiveTTY
+	if rt.IsTTY != nil {
+		isTTY = rt.IsTTY
+	}
+	if !isTTY() {
+		return UsageError{Message: "slack config edit requires an interactive TTY. Use `slack config` or `slack setup check` for a redacted summary."}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -343,8 +395,7 @@ func (rt *Runtime) openConfig(path string, bootstrap string) error {
 	}
 	editor := firstNonEmpty(getenv("EDITOR"), getenv("VISUAL"))
 	if editor == "" {
-		fmt.Fprintln(rt.Stdout, path)
-		return nil
+		return UsageError{Message: "No EDITOR/VISUAL set. Export EDITOR and re-run `slack config edit`, or edit the redacted-safe config path after `slack setup check`."}
 	}
 	cmd := exec.Command("sh", "-c", editor+" \"$1\"", "slack-editor", path)
 	cmd.Stdin = os.Stdin
@@ -364,7 +415,6 @@ func (rt *Runtime) listAccountPresets(cfg Config, outputJSON bool) error {
 				"name":           firstNonEmpty(str(account["name"]), "-"),
 				"has_bot_token":  hasToken(account, "bot"),
 				"has_user_token": hasToken(account, "user"),
-				"has_app_token":  hasToken(account, "app"),
 				"contacts":       len(contactsForAccount(cfg, account)),
 			})
 		}
@@ -382,7 +432,6 @@ func (rt *Runtime) listAccountPresets(cfg Config, outputJSON bool) error {
 			{"name", firstNonEmpty(str(account["name"]), "-")},
 			{"bot", redactToken(directToken(account, "bot"))},
 			{"user", redactToken(directToken(account, "user"))},
-			{"app", redactToken(directToken(account, "app"))},
 			{"contacts", fmt.Sprintf("%d", len(contactsForAccount(cfg, account)))},
 		})
 	}
@@ -406,7 +455,6 @@ func (rt *Runtime) setupCheck(path string, cfg Config, outputJSON bool) error {
 			"name":           firstNonEmpty(str(account["name"]), "-"),
 			"has_bot_token":  hasToken(account, "bot"),
 			"has_user_token": hasToken(account, "user"),
-			"has_app_token":  hasToken(account, "app"),
 			"contacts":       len(contactsForAccount(cfg, account)),
 		})
 	}
@@ -417,7 +465,7 @@ func (rt *Runtime) setupCheck(path string, cfg Config, outputJSON bool) error {
 	fmt.Fprintf(rt.Stdout, "config: %s\nexists: %v\naccounts_count: %d\n", path, state["exists"], len(accts))
 	for _, row := range rows {
 		fmt.Fprintln(rt.Stdout)
-		keys := []string{"preset", "name", "has_bot_token", "has_user_token", "has_app_token", "contacts"}
+		keys := []string{"preset", "name", "has_bot_token", "has_user_token", "contacts"}
 		for _, key := range keys {
 			fmt.Fprintf(rt.Stdout, "%s: %v\n", key, row[key])
 		}
@@ -440,21 +488,15 @@ func (rt *Runtime) configureAccount(configPath string, cfg Config, args Args) er
 		if token := readTokenFile(defaultUserTokenFile); token != "" {
 			args.AuthUserToken = token
 		}
-		if token := readTokenFile(defaultAppTokenFile); token != "" {
-			args.AuthAppToken = token
-		}
 	}
-	if args.AuthBotToken == "" && args.AuthUserToken == "" && args.AuthAppToken == "" && args.AuthName == "" {
-		return UsageError{Message: "Use: slack auth <preset> bot <bot_token> [user <user_token>] [app <app_token>] [name <name>]"}
+	if args.AuthBotToken == "" && args.AuthUserToken == "" && args.AuthName == "" {
+		return UsageError{Message: "Use: slack auth <preset> user <user_token> [bot <bot_token>] [name <name>]"}
 	}
 	if args.AuthBotToken != "" && tokenKind(args.AuthBotToken) != "bot" {
 		return UsageError{Message: "bot token must start with xoxb-"}
 	}
 	if args.AuthUserToken != "" && tokenKind(args.AuthUserToken) != "user" {
 		return UsageError{Message: "user token must start with xoxp-"}
-	}
-	if args.AuthAppToken != "" && tokenKind(args.AuthAppToken) != "app" {
-		return UsageError{Message: "app token must start with xapp-"}
 	}
 	tokenObject := asMap(account["token"])
 	if tokenObject == nil {
@@ -465,9 +507,6 @@ func (rt *Runtime) configureAccount(configPath string, cfg Config, args Args) er
 	}
 	if args.AuthUserToken != "" {
 		tokenObject["user"] = args.AuthUserToken
-	}
-	if args.AuthAppToken != "" {
-		tokenObject["app"] = args.AuthAppToken
 	}
 	if len(tokenObject) > 0 {
 		account["token"] = tokenObject
@@ -525,36 +564,64 @@ func (rt *Runtime) previewSlackAction(args Args, contacts Contacts) error {
 	}
 	if args.Command == "preview-delete" {
 		channelID, messageTS, _ := parseMessageID(args.Recipient)
-		rt.printSections([][]kv{{
+		payload := map[string]any{
+			"action":     "delete",
+			"message_id": args.Recipient,
+			"channel":    channelID,
+			"ts":         messageTS,
+			"command":    fmt.Sprintf("slack %s delete message %s", args.Preset, args.Recipient),
+		}
+		return rt.printPreview(args.OutputJSON, payload, []kv{
 			{"action", "delete"},
 			{"message_id", args.Recipient},
 			{"channel", channelID},
 			{"ts", messageTS},
-		}})
-		return nil
+			{"command", str(payload["command"])},
+		})
 	}
 	if args.Command == "preview-edit" {
 		channelID, messageTS, _ := parseMessageID(args.Recipient)
-		rt.printSections([][]kv{{
+		payload := map[string]any{
+			"action":     "edit",
+			"message_id": args.Recipient,
+			"channel":    channelID,
+			"ts":         messageTS,
+			"body":       args.Message,
+			"command":    fmt.Sprintf("slack %s edit message %s body %q", args.Preset, args.Recipient, args.Message),
+		}
+		return rt.printPreview(args.OutputJSON, payload, []kv{
 			{"action", "edit"},
 			{"message_id", args.Recipient},
 			{"channel", channelID},
 			{"ts", messageTS},
 			{"body", args.Message},
-		}})
-		return nil
+			{"command", str(payload["command"])},
+		})
 	}
 	if args.Command == "preview-reply" {
 		channelID, messageTS, _ := parseMessageID(args.Recipient)
-		rt.printSections([][]kv{{
+		cmd := fmt.Sprintf("slack %s reply to %s body %q", args.Preset, args.Recipient, args.Message)
+		if len(args.Paths) > 0 {
+			cmd += " attach " + strings.Join(args.Paths, " attach ")
+		}
+		payload := map[string]any{
+			"action":      "reply",
+			"message_id":  args.Recipient,
+			"channel":     channelID,
+			"thread_ts":   messageTS,
+			"body":        args.Message,
+			"attachments": args.Paths,
+			"command":     cmd,
+		}
+		return rt.printPreview(args.OutputJSON, payload, []kv{
 			{"action", "reply"},
 			{"message_id", args.Recipient},
 			{"channel", channelID},
 			{"thread_ts", messageTS},
 			{"body", args.Message},
 			{"attachments", strings.Join(args.Paths, ",")},
-		}})
-		return nil
+			{"command", cmd},
+		})
 	}
 	target := args.Recipient
 	targetKind := "raw"
@@ -570,14 +637,38 @@ func (rt *Runtime) previewSlackAction(args Args, contacts Contacts) error {
 	} else if channelNameQuery(target) != "" {
 		targetKind = "channel_name"
 	}
-	rt.printSections([][]kv{{
+	cmd := fmt.Sprintf("slack %s send to %s body %q", args.Preset, args.Recipient, args.Message)
+	if len(args.Paths) > 0 {
+		cmd += " attach " + strings.Join(args.Paths, " attach ")
+	}
+	payload := map[string]any{
+		"action":      "send",
+		"target":      args.Recipient,
+		"target_kind": targetKind,
+		"resolved":    target,
+		"body":        args.Message,
+		"attachments": args.Paths,
+		"command":     cmd,
+	}
+	return rt.printPreview(args.OutputJSON, payload, []kv{
 		{"action", "send"},
 		{"target", args.Recipient},
 		{"target_kind", targetKind},
 		{"resolved", target},
 		{"body", args.Message},
 		{"attachments", strings.Join(args.Paths, ",")},
-	}})
+		{"command", cmd},
+	})
+}
+
+func (rt *Runtime) printPreview(asJSON bool, payload map[string]any, fields []kv) error {
+	if asJSON {
+		if payload["attachments"] == nil {
+			payload["attachments"] = []string{}
+		}
+		return rt.printJSON(payload)
+	}
+	rt.printSections([][]kv{fields})
 	return nil
 }
 

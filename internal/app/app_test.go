@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHelpAndParseContract(t *testing.T) {
@@ -29,11 +31,15 @@ func TestHelpAndParseContract(t *testing.T) {
 		"slack 1 preview send",
 		"slack <preset> delete message",
 		"slack <preset> edit message",
+		"slack <preset> reply to <message_id>",
+		"slack <preset> thread <message_id>",
+		"slack config | slack config edit",
 		"slack mark all read",
 		"output json",
+		"in <channel>",
 	} {
 		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("help missing %q", want)
+			t.Fatalf("help missing %q\nhelp:\n%s", want, stdout.String())
 		}
 	}
 
@@ -79,6 +85,25 @@ func TestHelpAndParseContract(t *testing.T) {
 	cleanArgs, err := parseArgs([]string{"2", "conversations", "clean"})
 	if err != nil || cleanArgs.Command != "sc" {
 		t.Fatalf("unexpected conversations clean parse: %+v err=%v", cleanArgs, err)
+	}
+
+	eventsSync, err := parseArgs([]string{"2", "events", "sync"})
+	if err != nil || eventsSync.Command != "events" || eventsSync.EventsAction != "sync" {
+		t.Fatalf("unexpected events sync parse: %+v err=%v", eventsSync, err)
+	}
+	eventsTimerDisable, err := parseArgs([]string{"2", "events", "timer", "disable"})
+	if err != nil || eventsTimerDisable.Command != "events" || eventsTimerDisable.EventsAction != "timer-disable" {
+		t.Fatalf("unexpected legacy timer disable parse: %+v err=%v", eventsTimerDisable, err)
+	}
+	for _, argv := range [][]string{
+		{"2", "events", "once"},
+		{"2", "events", "service"},
+		{"2", "events", "logs"},
+		{"2", "events", "timer", "install"},
+	} {
+		if _, err := parseArgs(argv); err == nil {
+			t.Fatalf("expected removed event command to fail: %v", argv)
+		}
 	}
 }
 
@@ -226,7 +251,7 @@ func TestAuthStoresTokensInsidePreset(t *testing.T) {
 	rt.Stdout = &stdout
 	rt.Stderr = &bytes.Buffer{}
 
-	err := rt.Run([]string{"auth", "2", "bot", "xoxb-bot", "user", "xoxp-user", "app", "xapp-app", "name", "work"})
+	err := rt.Run([]string{"auth", "2", "user", "xoxp-user", "bot", "xoxb-bot", "name", "work"})
 	if err != nil {
 		t.Fatalf("auth: %v", err)
 	}
@@ -240,7 +265,7 @@ func TestAuthStoresTokensInsidePreset(t *testing.T) {
 	}
 	account := accounts(cfg)["2"]
 	tokens := tokenMap(account)
-	if tokens["bot"] != "xoxb-bot" || tokens["user"] != "xoxp-user" || tokens["app"] != "xapp-app" {
+	if tokens["bot"] != "xoxb-bot" || tokens["user"] != "xoxp-user" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
 	if account["name"] != "work" {
@@ -541,5 +566,288 @@ func TestDeleteEditParseContract(t *testing.T) {
 	}
 	if _, err := parseArgs([]string{"2", "delete", "message", "bad-id"}); err == nil {
 		t.Fatal("expected invalid message id to fail")
+	}
+}
+
+func TestReplyParseIsExecutable(t *testing.T) {
+	// Regression: reply was incorrectly treated as a retired alias, so
+	// preview reply worked while real reply was rejected.
+	replyArgs, err := parseArgs([]string{"1", "reply", "to", "C123ABC:1712764800.000100", "body", "Example"})
+	if err != nil {
+		t.Fatalf("parse reply: %v", err)
+	}
+	if replyArgs.Command != "reply" || replyArgs.Recipient != "C123ABC:1712764800.000100" || replyArgs.Message != "Example" {
+		t.Fatalf("unexpected reply parse: %+v", replyArgs)
+	}
+	previewArgs, err := parseArgs([]string{"1", "preview", "reply", "to", "C123ABC:1712764800.000100", "body", "Example"})
+	if err != nil || previewArgs.Command != "preview-reply" {
+		t.Fatalf("unexpected preview reply parse: %+v err=%v", previewArgs, err)
+	}
+	if _, err := parseArgs([]string{"1", "reply", "to", "not-a-message", "body", "x"}); err == nil {
+		t.Fatal("expected invalid reply target to fail")
+	}
+}
+
+func TestListChannelAndSinceParse(t *testing.T) {
+	args, err := parseArgs([]string{"1", "list", "in", "#genie", "from", "ryan", "since", "4h", "limit", "20", "output", "json"})
+	if err != nil {
+		t.Fatalf("parse list in/since: %v", err)
+	}
+	if args.Command != "ls" || args.ListIn != "#genie" || args.ListFrom != "ryan" || args.ListTimeLimit != "4h" || args.ListLimit != 20 || !args.OutputJSON {
+		t.Fatalf("unexpected list parse: %+v", args)
+	}
+	if _, err := parseArgs([]string{"1", "list", "since", "not-a-window"}); err == nil {
+		t.Fatal("expected invalid since window to fail")
+	}
+	threadArgs, err := parseArgs([]string{"1", "thread", "C123ABC:1712764800.000100", "limit", "25", "output", "json"})
+	if err != nil || threadArgs.Command != "thread" || threadArgs.ListLimit != 25 || !threadArgs.OutputJSON {
+		t.Fatalf("unexpected thread parse: %+v err=%v", threadArgs, err)
+	}
+	configArgs, err := parseArgs([]string{"config"})
+	if err != nil || configArgs.Command != "config" {
+		t.Fatalf("unexpected config parse: %+v err=%v", configArgs, err)
+	}
+	editArgs, err := parseArgs([]string{"config", "edit"})
+	if err != nil || editArgs.Command != "config-edit" {
+		t.Fatalf("unexpected config edit parse: %+v err=%v", editArgs, err)
+	}
+}
+
+func TestStartTSSupportsHours(t *testing.T) {
+	cutoff, ok := startTS("4h")
+	if !ok {
+		t.Fatal("expected 4h to parse")
+	}
+	now := float64(time.Now().Unix())
+	if cutoff < now-4*3600-5 || cutoff > now-4*3600+5 {
+		t.Fatalf("unexpected 4h cutoff: %v (now=%v)", cutoff, now)
+	}
+	if _, ok := startTS("0h"); ok {
+		t.Fatal("expected 0h to be invalid")
+	}
+	if _, ok := startTS("banana"); ok {
+		t.Fatal("expected banana to be invalid")
+	}
+}
+
+func TestConfigDefaultsToRedactedSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"name":"work","token":{"user":"xoxp-super-secret-token","bot":"xoxb-bot-secret"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	if err := rt.Run([]string{"config"}); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "xoxp-super-secret-token") || strings.Contains(out, "xoxb-bot-secret") {
+		t.Fatalf("config leaked tokens: %s", out)
+	}
+	if !strings.Contains(out, "has_user_token: true") || !strings.Contains(out, "preset: 1") {
+		t.Fatalf("expected redacted summary, got: %s", out)
+	}
+}
+
+func TestConfigEditRequiresTTY(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.IsTTY = func() bool { return false }
+	opened := false
+	rt.OpenEditor = func(path string, bootstrap string) error {
+		opened = true
+		return nil
+	}
+	err := rt.Run([]string{"config", "edit"})
+	if err == nil {
+		t.Fatal("expected config edit without TTY to fail")
+	}
+	if opened {
+		t.Fatal("editor must not open without TTY")
+	}
+	if !strings.Contains(err.Error(), "interactive TTY") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReplyExecutionPostsThread(t *testing.T) {
+	var postPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/conversations.replies":
+			_, _ = w.Write([]byte(`{"ok":true,"messages":[{"ts":"1712764800.000100","thread_ts":"1712764800.000100","text":"root"}]}`))
+		case "/api/conversations.history":
+			_, _ = w.Write([]byte(`{"ok":true,"messages":[{"ts":"1712764800.000100","thread_ts":"1712764800.000100","text":"root"}]}`))
+		case "/api/chat.postMessage":
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &postPayload)
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"1712764801.000200"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+	err := rt.Run([]string{"1", "reply", "to", "C123ABC:1712764800.000100", "body", "Example"})
+	if err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	if str(postPayload["channel"]) != "C123ABC" || str(postPayload["thread_ts"]) != "1712764800.000100" || str(postPayload["text"]) != "Example" {
+		t.Fatalf("unexpected post payload: %#v", postPayload)
+	}
+	if !strings.Contains(stdout.String(), "replied message_id=C123ABC:1712764800.000100") {
+		t.Fatalf("stdout: %s", stdout.String())
+	}
+}
+
+func TestThreadCommandListsReplies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/conversations.replies":
+			_, _ = w.Write([]byte(`{"ok":true,"messages":[
+				{"ts":"1712764800.000100","thread_ts":"1712764800.000100","user":"U2","text":"root","reply_count":1},
+				{"ts":"1712764801.000200","thread_ts":"1712764800.000100","user":"U3","text":"reply"}
+			]}`))
+		case "/api/users.info":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"U2","profile":{"real_name":"Ada"}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+	err := rt.Run([]string{"1", "thread", "C123ABC:1712764800.000100", "output", "json"})
+	if err != nil {
+		t.Fatalf("thread: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json: %v stdout=%s", err, stdout.String())
+	}
+	if str(payload["thread_ts"]) != "1712764800.000100" {
+		t.Fatalf("payload: %#v", payload)
+	}
+	messages := asList(payload["messages"])
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %#v", payload)
+	}
+}
+
+func TestListInChannelUsesHistoryOldest(t *testing.T) {
+	now := time.Now().Unix()
+	newTS := fmt.Sprintf("%d.100000", now-60)
+	oldTS := fmt.Sprintf("%d.100000", now-120)
+	var historyQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"U1"}`))
+		case "/api/conversations.history":
+			historyQuery = r.URL.Query()
+			payload := fmt.Sprintf(`{"ok":true,"messages":[
+				{"ts":%q,"user":"U2","text":"new"},
+				{"ts":%q,"user":"U2","text":"old"}
+			]}`, newTS, oldTS)
+			_, _ = w.Write([]byte(payload))
+		case "/api/conversations.info":
+			_, _ = w.Write([]byte(`{"ok":true,"channel":{"id":"C123ABC","name":"genie","is_channel":true}}`))
+		case "/api/users.info":
+			_, _ = w.Write([]byte(`{"ok":true,"user":{"id":"U2","profile":{"real_name":"Ada"}}}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	configPath := filepath.Join(home, "config", "slack", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"accounts":{"1":{"token":{"user":"xoxp-user"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldBase := slackAPIBase
+	slackAPIBase = server.URL + "/api/"
+	defer func() { slackAPIBase = oldBase }()
+
+	var stdout bytes.Buffer
+	rt := NewRuntime()
+	rt.Stdout = &stdout
+	rt.Stderr = &bytes.Buffer{}
+	rt.HTTPClient = server.Client()
+	err := rt.Run([]string{"1", "list", "in", "C123ABC", "since", "4h", "limit", "10", "output", "json"})
+	if err != nil {
+		t.Fatalf("list in: %v", err)
+	}
+	if historyQuery.Get("channel") != "C123ABC" || historyQuery.Get("oldest") == "" {
+		t.Fatalf("expected channel+oldest history query, got %#v", historyQuery)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json: %v stdout=%s", err, stdout.String())
+	}
+	if str(payload["order"]) != "newest_first" {
+		t.Fatalf("expected newest_first, got %#v", payload)
+	}
+	messages := asList(payload["messages"])
+	if len(messages) == 0 {
+		t.Fatalf("expected messages, got %#v", payload)
+	}
+	first := asMap(messages[0])
+	if str(first["ts"]) != newTS {
+		t.Fatalf("expected newest first, got %#v", messages)
 	}
 }

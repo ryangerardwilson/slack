@@ -6,7 +6,6 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	modernc.org/sqlite v1.40.1
-	nhooyr.io/websocket v1.8.17
 )
 
 require (
