@@ -19,9 +19,63 @@ import (
 type SlackClient struct {
 	Token      string
 	HTTPClient *http.Client
+	// Verbose receives progress lines (pagination, rate limits). Typically stderr.
+	Verbose io.Writer
+	// Sleep is used for rate-limit backoff; nil means time.Sleep.
+	Sleep func(time.Duration)
 }
 
 var slackAPIBase = "https://slack.com/api/"
+
+func (c SlackClient) logf(format string, args ...any) {
+	if c.Verbose == nil {
+		return
+	}
+	fmt.Fprintf(c.Verbose, "slack: "+format+"\n", args...)
+}
+
+func (c SlackClient) sleep(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if c.Sleep != nil {
+		c.Sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+func shortCursor(cursor string) string {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return "-"
+	}
+	if len(cursor) <= 12 {
+		return cursor
+	}
+	return cursor[:6] + "…" + cursor[len(cursor)-4:]
+}
+
+func retryAfterDuration(resp *http.Response, decoded map[string]any) time.Duration {
+	if resp != nil {
+		if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
+			if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+				return time.Duration(seconds) * time.Second
+			}
+			if when, err := http.ParseTime(raw); err == nil {
+				if wait := time.Until(when); wait > 0 {
+					return wait
+				}
+			}
+		}
+	}
+	if decoded != nil {
+		if seconds := intValue(decoded["retry_after"], 0); seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 2 * time.Second
+}
 
 type PostTarget struct {
 	Kind      string
@@ -195,9 +249,9 @@ func (c SlackClient) Request(method string, payload map[string]string, useForm b
 		httpMethod = http.MethodPost
 	}
 	endpoint := slackAPIBase + method
-	var body io.Reader
 	reqURL := endpoint
 	contentType := "application/json; charset=utf-8"
+	var bodyBytes []byte
 	if strings.EqualFold(httpMethod, http.MethodGet) {
 		values := url.Values{}
 		for key, value := range payload {
@@ -211,40 +265,65 @@ func (c SlackClient) Request(method string, payload map[string]string, useForm b
 		for key, value := range payload {
 			values.Set(key, value)
 		}
-		body = strings.NewReader(values.Encode())
+		bodyBytes = []byte(values.Encode())
 		contentType = "application/x-www-form-urlencoded"
 	} else {
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err
 		}
-		body = bytes.NewReader(data)
+		bodyBytes = data
 	}
-	req, err := http.NewRequest(httpMethod, reqURL, body)
-	if err != nil {
-		return nil, err
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
+
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		var body io.Reader
+		if bodyBytes != nil {
+			body = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequest(httpMethod, reqURL, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Accept", "application/json")
+		c.logf("api method=%s attempt=%d", method, attempt+1)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return nil, fmt.Errorf("Slack API %s returned invalid JSON: %w", method, err)
+		}
+		rateLimited := resp.StatusCode == http.StatusTooManyRequests || str(decoded["error"]) == "ratelimited"
+		if rateLimited {
+			wait := retryAfterDuration(resp, decoded)
+			if attempt >= maxRateLimitRetries {
+				c.logf("rate_limited method=%s giving_up after=%d wait_would_be=%s", method, attempt+1, wait)
+				return decoded, fmt.Errorf("Slack API %s rate limited after %d retries", method, attempt+1)
+			}
+			c.logf("rate_limited method=%s attempt=%d retry_after=%s", method, attempt+1, wait)
+			c.sleep(wait)
+			continue
+		}
+		if decoded["ok"] != true && !allowError {
+			errText := firstNonEmpty(str(decoded["error"]), "unknown_error")
+			return decoded, fmt.Errorf("Slack API %s failed: %s", method, errText)
+		}
+		return decoded, nil
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, fmt.Errorf("Slack API %s returned invalid JSON: %w", method, err)
-	}
-	if decoded["ok"] != true && !allowError {
-		errText := firstNonEmpty(str(decoded["error"]), "unknown_error")
-		return decoded, fmt.Errorf("Slack API %s failed: %s", method, errText)
-	}
-	return decoded, nil
+	return nil, fmt.Errorf("Slack API %s failed: rate_limited", method)
 }
 
 func (c SlackClient) AuthTest() (map[string]any, error) {
@@ -254,7 +333,9 @@ func (c SlackClient) AuthTest() (map[string]any, error) {
 func listAPI(client SlackClient, method string, params map[string]string, key string) ([]map[string]any, error) {
 	var rows []map[string]any
 	cursor := ""
+	page := 0
 	for {
+		page++
 		payload := map[string]string{}
 		for k, v := range params {
 			payload[k] = v
@@ -262,16 +343,19 @@ func listAPI(client SlackClient, method string, params map[string]string, key st
 		if cursor != "" {
 			payload["cursor"] = cursor
 		}
+		client.logf("paginate method=%s page=%d cursor=%s rows_so_far=%d", method, page, shortCursor(cursor), len(rows))
 		data, err := client.Request(method, payload, false, http.MethodGet, false)
 		if err != nil {
 			return nil, err
 		}
+		before := len(rows)
 		for _, raw := range asList(data[key]) {
 			if item := asMap(raw); len(item) > 0 {
 				rows = append(rows, item)
 			}
 		}
 		cursor = strings.TrimSpace(str(asMap(data["response_metadata"])["next_cursor"]))
+		client.logf("paginate method=%s page=%d fetched=%d total=%d next_cursor=%s", method, page, len(rows)-before, len(rows), shortCursor(cursor))
 		if cursor == "" {
 			break
 		}

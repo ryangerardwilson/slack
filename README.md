@@ -91,7 +91,9 @@ before sends or replies when an agent should validate intent without posting.
 `list` is newest-first; `since` accepts `4h`/`2d`/`1w`/… and rejects bad windows.
 Scope history with `in <channel_id|#name>` and load replies with `thread <message_id>`.
 Prefer `output json` or `--json` for agent parsing on list, thread, and write commands.
+Add `verbose` / `--verbose` on list/thread to print pagination and rate-limit progress on stderr.
 `slack config edit` requires a real interactive terminal (termios); non-TTY runners fail closed.
+Ordinary list calls use a 45s HTTP timeout and retry rate limits up to 3 times.
 
 ## Development
 

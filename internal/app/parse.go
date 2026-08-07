@@ -39,12 +39,12 @@ list (directories vs message history):
   slack <preset> list dms [output json|--json]
   slack <preset> list contacts [output json|--json]
   slack <preset> list [messages] [unread|read] [in <channel>] [for <label>] [from <name>]
-              [containing <text>] [since <window>] [limit <count>] [output json|--json]
+              [containing <text>] [since <window>] [limit <count>] [verbose] [output json|--json]
 
 read:
   slack <preset> inspect conversation <channel_id>
   slack <preset> inspect message <message_id>
-  slack <preset> thread <message_id> [limit <count>] [output json|--json]
+  slack <preset> thread <message_id> [limit <count>] [verbose] [output json|--json]
   slack <preset> open conversation <channel_id> | open message <message_id> | open tui
 
 write:
@@ -71,7 +71,8 @@ maintenance:
 workflow:
   use setup check when preset identity is uncertain; inspect before open; preview before send, reply, edit, or delete;
   user tokens are preferred for human-authored writes; use output json or --json for machine-readable rows;
-  since windows: 4h, 2d, 1w, 3m, 1y, 2025-01-01, "jan 2025"; list defaults to newest first
+  since windows: 4h, 2d, 1w, 3m, 1y, 2025-01-01, "jan 2025"; list defaults to newest first;
+  add verbose or --verbose on list/thread to print pagination and rate-limit progress on stderr
 `
 
 func parseArgs(argv []string) (Args, error) {
@@ -231,6 +232,19 @@ func extractOutputJSON(params []string, shape string) ([]string, bool, error) {
 		}
 	}
 	return params, false, nil
+}
+
+func extractVerbose(params []string) ([]string, bool) {
+	out := make([]string, 0, len(params))
+	verbose := false
+	for _, param := range params {
+		if param == "verbose" || param == "--verbose" {
+			verbose = true
+			continue
+		}
+		out = append(out, param)
+	}
+	return out, verbose
 }
 
 func parseAuthArgs(args Args, remaining []string) (Args, error) {
@@ -473,7 +487,9 @@ func parseEditArgs(args Args, remaining []string) (Args, error) {
 }
 
 func parseThreadArgs(args Args, remaining []string) (Args, error) {
-	shape := "Use: slack <preset> thread <message_id> [limit <count>] [output json]"
+	shape := "Use: slack <preset> thread <message_id> [limit <count>] [verbose] [output json|--json]"
+	remaining, verbose := extractVerbose(remaining)
+	args.Verbose = verbose
 	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
 	if err != nil {
 		return args, err
@@ -566,6 +582,8 @@ func parseOpenArgs(args Args, remaining []string) (Args, error) {
 
 func parseListArgs(args Args, remaining []string) (Args, error) {
 	shape := listUsage()
+	remaining, verbose := extractVerbose(remaining)
+	args.Verbose = verbose
 	remaining, outputJSON, err := extractOutputJSON(remaining, shape)
 	if err != nil {
 		return args, err
@@ -574,34 +592,40 @@ func parseListArgs(args Args, remaining []string) (Args, error) {
 	if len(remaining) > 0 {
 		switch remaining[0] {
 		case "channels":
-			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list channels [output json]")
+			rest, extraVerbose := extractVerbose(remaining[1:])
+			args.Verbose = args.Verbose || extraVerbose
+			rest, extraJSON, err := extractOutputJSON(rest, "Use: slack <preset> list channels [output json|--json] [verbose]")
 			if err != nil {
 				return args, err
 			}
 			if len(rest) > 0 {
-				return args, UsageError{Message: "Use: slack <preset> list channels [output json]"}
+				return args, UsageError{Message: "Use: slack <preset> list channels [output json|--json] [verbose]"}
 			}
 			args.Command = "list-channels"
 			args.OutputJSON = outputJSON || extraJSON
 			return args, nil
 		case "dms":
-			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list dms [output json]")
+			rest, extraVerbose := extractVerbose(remaining[1:])
+			args.Verbose = args.Verbose || extraVerbose
+			rest, extraJSON, err := extractOutputJSON(rest, "Use: slack <preset> list dms [output json|--json] [verbose]")
 			if err != nil {
 				return args, err
 			}
 			if len(rest) > 0 {
-				return args, UsageError{Message: "Use: slack <preset> list dms [output json]"}
+				return args, UsageError{Message: "Use: slack <preset> list dms [output json|--json] [verbose]"}
 			}
 			args.Command = "list-dms"
 			args.OutputJSON = outputJSON || extraJSON
 			return args, nil
 		case "contacts":
-			rest, extraJSON, err := extractOutputJSON(remaining[1:], "Use: slack <preset> list contacts [output json]")
+			rest, extraVerbose := extractVerbose(remaining[1:])
+			args.Verbose = args.Verbose || extraVerbose
+			rest, extraJSON, err := extractOutputJSON(rest, "Use: slack <preset> list contacts [output json|--json]")
 			if err != nil {
 				return args, err
 			}
 			if len(rest) > 0 {
-				return args, UsageError{Message: "Use: slack <preset> list contacts [output json]"}
+				return args, UsageError{Message: "Use: slack <preset> list contacts [output json|--json]"}
 			}
 			args.Command = "list-contacts"
 			args.OutputJSON = outputJSON || extraJSON
@@ -693,5 +717,5 @@ func topLevelUsage() string {
 }
 
 func listUsage() string {
-	return "Use: slack <preset> list channels|dms|contacts [output json|--json] | slack <preset> list [messages] [unread|read] [in <channel|#name|id>] [for <label>] [from <sender>] [containing <text>] [since <window>] [limit <count>] [output json|--json]"
+	return "Use: slack <preset> list channels|dms|contacts [output json|--json] [verbose] | slack <preset> list [messages] [unread|read] [in <channel|#name|id>] [for <label>] [from <sender>] [containing <text>] [since <window>] [limit <count>] [verbose] [output json|--json]"
 }

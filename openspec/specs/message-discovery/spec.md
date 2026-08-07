@@ -65,6 +65,16 @@ The CLI SHALL separate conversation directories (`list channels`, `list dms`, `l
 - **AND** output root and replies with timestamps, senders, text, and optional pagination cursor
 - **AND** thread chronology SHALL be oldest-first (root first)
 
+#### Scenario: Verbose list and thread progress
+- **WHEN** list or thread is invoked with `verbose` or `--verbose`
+- **THEN** the runtime SHALL print progress lines to stderr for API attempts, pagination pages/cursors, cache hit/miss, and rate-limit waits
+- **AND** JSON/plain results on stdout MUST remain free of those progress lines
+
+#### Scenario: Rate-limit retries
+- **WHEN** Slack returns HTTP 429 or `ratelimited`
+- **THEN** the client SHALL wait using Retry-After when present and retry up to 3 times
+- **AND** after exhausting retries it SHALL fail with a clear rate-limit error
+
 ### Requirement: Inspect is read-only; open is stateful
 `inspect` SHALL report metadata without side effects; `open` SHALL perform deliberate read-state and download side effects.
 

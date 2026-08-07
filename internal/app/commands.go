@@ -104,7 +104,7 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		listClient := rt.slackClient(listToken)
+		listClient := rt.slackClientVerbose(listToken, args.Verbose)
 		if _, err := listClient.AuthTest(); err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		listClient := rt.slackClient(listToken)
+		listClient := rt.slackClientVerbose(listToken, args.Verbose)
 		if _, err := listClient.AuthTest(); err != nil {
 			return err
 		}
@@ -124,7 +124,7 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		client := rt.slackClient(token)
+		client := rt.slackClientVerbose(token, args.Verbose)
 		auth, err := client.AuthTest()
 		if err != nil {
 			return err
@@ -139,7 +139,7 @@ func (rt *Runtime) Run(argv []string) error {
 		if err != nil {
 			return err
 		}
-		client := rt.slackClient(token)
+		client := rt.slackClientVerbose(token, args.Verbose)
 		if _, err := client.AuthTest(); err != nil {
 			return err
 		}
@@ -355,6 +355,14 @@ func (rt *Runtime) writeClient(account Account, fallbackToken string) SlackClien
 		return rt.slackClient(userToken)
 	}
 	return rt.slackClient(fallbackToken)
+}
+
+func (rt *Runtime) slackClientVerbose(token string, verbose bool) SlackClient {
+	client := rt.slackClient(token)
+	if verbose {
+		client.Verbose = rt.Stderr
+	}
+	return client
 }
 
 func (rt *Runtime) upgradeApp() error {

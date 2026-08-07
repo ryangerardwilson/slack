@@ -30,19 +30,34 @@ func (rt *Runtime) listMessages(contacts Contacts, client SlackClient, args Args
 	// Prefer a bounded client for ordinary list calls so agents see failures instead of hangs.
 	listClient := client
 	if client.HTTPClient != nil {
-		listClient = SlackClient{Token: client.Token, HTTPClient: &http.Client{Timeout: defaultListHTTPTimeout, Transport: client.HTTPClient.Transport}}
+		listClient = SlackClient{
+			Token:      client.Token,
+			HTTPClient: &http.Client{Timeout: defaultListHTTPTimeout, Transport: client.HTTPClient.Transport},
+			Verbose:    client.Verbose,
+			Sleep:      client.Sleep,
+		}
+	}
+	if hasCutoff {
+		listClient.logf("list since=%s cutoff_utc=%s timeout=%s", args.ListTimeLimit, formatCutoffUTC(cutoff), defaultListHTTPTimeout)
+	} else {
+		listClient.logf("list filter=%s limit=%d timeout=%s", args.ListFilter, args.ListLimit, defaultListHTTPTimeout)
 	}
 	var entries []MessageEntry
 	var err error
 	if shouldBypassMessageCache(args) {
+		listClient.logf("list source=live reason=filters")
 		entries, err = rt.searchMessagesLive(contacts, listClient, args, selfUserID)
 	} else {
+		listClient.logf("list source=cache path=%s", cachePath)
 		entries, err = eventCacheSearchEntries(cachePath, contacts, args.ListLimit, args.ListFilter, selfUserID, args.ListLabel, args.ListFrom, args.ListContains, args.ListTimeLimit, args.ListIn)
 		if err != nil {
 			return err
 		}
 		if len(entries) == 0 {
+			listClient.logf("list cache_miss falling_back=live")
 			entries, err = rt.searchMessagesLive(contacts, listClient, args, selfUserID)
+		} else {
+			listClient.logf("list cache_hit count=%d", len(entries))
 		}
 	}
 	if err != nil {
@@ -126,9 +141,11 @@ func (rt *Runtime) searchMessagesLive(contacts Contacts, client SlackClient, arg
 func (rt *Runtime) searchMessagesAPI(contacts Contacts, client SlackClient, args Args, selfUserID string) ([]MessageEntry, error) {
 	// Channel-scoped history is more reliable via conversations.history than workspace search.
 	if strings.TrimSpace(args.ListIn) != "" {
+		client.logf("list live=conversations.history in=%s", args.ListIn)
 		return rt.listMessagesInChannel(contacts, client, args, selfUserID)
 	}
 	query := buildSearchQuery(args, contacts)
+	client.logf("list live=search.messages query=%q", query)
 	data, err := client.Request("search.messages", map[string]string{
 		"query":    query,
 		"count":    fmt.Sprintf("%d", maxInt(args.ListLimit*4, 20)),
@@ -197,6 +214,7 @@ func (rt *Runtime) listMessagesInChannel(contacts Contacts, client SlackClient, 
 	if err != nil {
 		return nil, err
 	}
+	client.logf("list channel_resolved id=%s label=%s", channelID, label)
 	cutoff, hasCutoff := startTS(args.ListTimeLimit)
 	payload := map[string]string{
 		"channel": channelID,
@@ -205,6 +223,7 @@ func (rt *Runtime) listMessagesInChannel(contacts Contacts, client SlackClient, 
 	if hasCutoff {
 		payload["oldest"] = fmt.Sprintf("%.6f", cutoff)
 	}
+	client.logf("list conversations.history channel=%s oldest=%s limit=%s", channelID, payload["oldest"], payload["limit"])
 	data, err := client.Request("conversations.history", payload, false, http.MethodGet, false)
 	if err != nil {
 		return nil, err
@@ -350,6 +369,7 @@ func (rt *Runtime) listThreadReplies(client SlackClient, args Args) error {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
+	client.logf("thread channel=%s ts=%s limit=%d", channelID, threadTS, limit)
 	data, err := client.Request("conversations.replies", map[string]string{
 		"channel": channelID,
 		"ts":      threadTS,

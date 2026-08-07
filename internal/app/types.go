@@ -19,6 +19,7 @@ const (
 	appName                    = "slack"
 	defaultListLimit           = 10
 	defaultListHTTPTimeout     = 45 * time.Second
+	maxRateLimitRetries        = 3
 	eventCacheSchemaVersion    = 1
 	eventSyncConversationLimit = 20
 	conversationTypesDMs       = "im,mpim"
@@ -71,6 +72,7 @@ type Args struct {
 	AuthList      bool
 	EventsAction  string
 	OutputJSON    bool
+	Verbose       bool
 }
 
 type Runtime struct {

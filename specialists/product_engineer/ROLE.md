@@ -68,6 +68,7 @@ repo-local operating constraints.
   fail closed without launching an editor or writing config contents to captured
   stdout. The editor process must attach only to `os.Stdin/Stdout/Stderr`.
 - Write commands (`send`, `reply`, `edit`, `delete`) and list/thread/preview accept trailing `output json` or `--json` where implemented.
+- `verbose` / `--verbose` on list/thread (and channel/dm directories) prints progress to stderr: API attempts, pagination page/cursor, cache hit/miss, and rate-limit waits. Progress must never mix into JSON stdout. Rate-limited Slack calls retry up to 3 times using Retry-After.
 - Only `help`, `version`, and `upgrade` remain as global launcher actions for help, version, and upgrade.
 - `slack` with no args must print the same help as `slack help`.
 - Help output must stay human-written, compact, and printed with terminal-default styling.
